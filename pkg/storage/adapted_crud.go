@@ -203,30 +203,6 @@ func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, err
 	return registry, rows.Err()
 }
 
-// loadSingleAdaptedSpec reads a single entity's spec from the metadata table.
-// Used during migration to get the old spec for diffing.
-func loadSingleAdaptedSpec(ctx context.Context, db *sql.DB, entity string) (*AdaptedTableSpec, error) {
-	var schemaHash, columnSpecJSON string
-	var hasExtraInt int
-	err := db.QueryRowContext(ctx,
-		"SELECT schema_hash, column_spec, has_extra FROM adapted_table_schemas WHERE entity_type = ?",
-		entity).Scan(&schemaHash, &columnSpecJSON, &hasExtraInt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load spec for %q: %w", entity, err)
-	}
-
-	var columns []ColumnDef
-	if err := json.Unmarshal([]byte(columnSpecJSON), &columns); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal column spec for %q: %w", entity, err)
-	}
-
-	return &AdaptedTableSpec{
-		Entity:     entity,
-		Columns:    columns,
-		SchemaHash: schemaHash,
-		HasExtra:   hasExtraInt == 1,
-	}, nil
-}
 
 // ---------------------------------------------------------------------------
 // Adapted CRUD operations
@@ -247,10 +223,7 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 
 	// Build argument list matching the dialect's InsertSQL column order
 	args := []interface{}{id, tenantID}
-
-	for _, v := range colVals {
-		args = append(args, v)
-	}
+	args = append(args, colVals...)
 
 	hasExtraArg := spec.HasExtra
 	if spec.HasExtra && extra != nil {
@@ -362,10 +335,7 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 
 	// Build argument list matching the dialect's UpdateSQL column order
 	args := make([]interface{}, 0, len(spec.Columns)+6)
-
-	for _, v := range colVals {
-		args = append(args, v)
-	}
+	args = append(args, colVals...)
 
 	if spec.HasExtra {
 		if extra != nil {

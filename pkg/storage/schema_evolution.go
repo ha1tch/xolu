@@ -199,7 +199,7 @@ func MigrateAdaptedTable(
 	if err != nil {
 		return fmt.Errorf("failed to begin migration transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck // no-op if commit succeeded
 
 	// 1. Add new columns.
 	for _, col := range diff.Added {
@@ -346,7 +346,7 @@ func migrateDroppedToExtra(ctx context.Context, tx *sql.Tx, table string, droppe
 		// Parse existing _extra JSON.
 		extra := make(map[string]interface{})
 		if s, ok := existingExtra.(string); ok && s != "" {
-			json.Unmarshal([]byte(s), &extra) // ignore error — start fresh on bad JSON
+			_ = json.Unmarshal([]byte(s), &extra) // ignore error — start fresh on bad JSON
 		}
 
 		// Merge dropped column values into extra.

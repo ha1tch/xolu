@@ -30,6 +30,10 @@ import (
 	"github.com/ha1tch/xolu/pkg/version"
 )
 
+// identifierRe matches valid entity and field name segments: must start with
+// a letter and contain only letters, numbers, and underscores.
+var identifierRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
+
 // handlePatch partially updates an entity
 func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	entity := chi.URLParam(r, "entity")
@@ -844,7 +848,7 @@ func (s *Server) handleSulpherQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(encoded)
+	_, _ = w.Write(encoded)
 
 	// Log slow queries
 	if result.Stats.ExecutionTime > 5*time.Second {
@@ -1085,7 +1089,7 @@ func (s *Server) handleOQLQuery(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(encoded)
+	_, _ = w.Write(encoded)
 
 	// Log slow queries
 	if result.Stats.ExecutionTime > 5*time.Second {
@@ -1483,7 +1487,7 @@ func validateEntityName(entity string) error {
 		return fmt.Errorf("entity name cannot be empty")
 	}
 
-	matched, _ := regexp.MatchString(`^[a-zA-Z][a-zA-Z0-9_]*$`, entity)
+	matched := identifierRe.MatchString(entity)
 	if !matched {
 		return fmt.Errorf("invalid entity name: must start with a letter and contain only letters, numbers, and underscores")
 	}
@@ -1501,7 +1505,7 @@ func validateFieldName(field string) error {
 	}
 	segments := strings.Split(field, ".")
 	for _, seg := range segments {
-		matched, _ := regexp.MatchString(`^[a-zA-Z][a-zA-Z0-9_]*$`, seg)
+		matched := identifierRe.MatchString(seg)
 		if !matched {
 			return fmt.Errorf("invalid field name %q: each segment must start with a letter and contain only letters, numbers, and underscores", field)
 		}

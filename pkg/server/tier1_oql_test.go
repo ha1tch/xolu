@@ -631,7 +631,7 @@ func TestListEmptyEntity(t *testing.T) {
 			t.Fatalf("expected 200, got %d", status)
 		}
 		data, _ := result["data"].([]interface{})
-		if data != nil && len(data) != 0 {
+		if len(data) != 0 {
 			t.Errorf("expected empty data, got %d items", len(data))
 		}
 		pagination := result["pagination"].(map[string]interface{})

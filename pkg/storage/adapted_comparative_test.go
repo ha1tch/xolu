@@ -555,7 +555,7 @@ func fmtDuration(d time.Duration) string {
 }
 
 // marshalJSON is used to verify blob data is properly handled
-func marshalJSON(v interface{}) string {
+func marshalJSON(v interface{}) string { //nolint:unused
 	b, _ := json.Marshal(v)
 	return string(b)
 }

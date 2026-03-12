@@ -48,7 +48,6 @@ func newBenchEnv(b *testing.B, n int) *benchEnv {
 
 	// Seed N pulse-beat records (simulating a sensor with millions of readings)
 	statuses := []string{"normal", "elevated", "critical", "warning"}
-	batchSize := 1000
 	for i := 0; i < n; i++ {
 		_, err := store.Create(ctx, "pulses", map[string]interface{}{
 			"sensor_id": fmt.Sprintf("SENS-%04d", i%100),
@@ -62,9 +61,7 @@ func newBenchEnv(b *testing.B, n int) *benchEnv {
 			b.Fatalf("seed %d: %v", i, err)
 		}
 		// Log progress for large seeds
-		if (i+1)%batchSize == 0 && i+1 < n {
-			// no-op in benchmarks, but keeps us honest
-		}
+		// Progress logging omitted in benchmarks (no-op).
 	}
 
 	goExec := &Executor{

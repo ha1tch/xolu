@@ -360,7 +360,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	}
 
 	// Verify update.
-	status, result = env.do("GET", env.tsURL("corp", "/timelines/5"), nil)
+	_, result = env.do("GET", env.tsURL("corp", "/timelines/5"), nil)
 	if result["name"] != "vib-updated" {
 		t.Errorf("after patch: name %q, want vib-updated", result["name"])
 	}
@@ -373,7 +373,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	})
 
 	// Attempt to redefine with different dims — must fail.
-	status, result = env.do("POST", env.tsURL("corp", "/timelines"), map[string]interface{}{
+	status, _ = env.do("POST", env.tsURL("corp", "/timelines"), map[string]interface{}{
 		"id": 5, "dims": 3,
 	})
 	if status == http.StatusCreated {

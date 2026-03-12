@@ -368,9 +368,9 @@ func TestEntityCRUD(t *testing.T) {
 		}
 
 		// Verify update
-		resp, body = ts.doRequest("GET", fmt.Sprintf("/api/v1/%s/%d", entity, int(createdID)), nil)
+		_, body = ts.doRequest("GET", fmt.Sprintf("/api/v1/%s/%d", entity, int(createdID)), nil)
 		var result map[string]interface{}
-		json.Unmarshal(body, &result)
+		_ = json.Unmarshal(body, &result)
 
 		if result["name"] != "Alice Johnson" {
 			t.Errorf("Expected updated name, got %v", result["name"])
@@ -388,9 +388,9 @@ func TestEntityCRUD(t *testing.T) {
 		}
 
 		// Verify patch
-		resp, body = ts.doRequest("GET", fmt.Sprintf("/api/v1/%s/%d", entity, int(createdID)), nil)
+		_, body = ts.doRequest("GET", fmt.Sprintf("/api/v1/%s/%d", entity, int(createdID)), nil)
 		var result map[string]interface{}
-		json.Unmarshal(body, &result)
+		_ = json.Unmarshal(body, &result)
 
 		if result["age"].(float64) != 32 {
 			t.Errorf("Expected age 32, got %v", result["age"])

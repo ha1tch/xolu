@@ -30,7 +30,7 @@ func tsErrCode(result map[string]interface{}) string {
 	return code
 }
 
-func tsErrMsg(result map[string]interface{}) string {
+func tsErrMsg(result map[string]interface{}) string { //nolint:unused
 	errObj, _ := result["error"].(map[string]interface{})
 	msg, _ := errObj["message"].(string)
 	return msg

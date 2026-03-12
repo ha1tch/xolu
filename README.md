@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8.svg)](https://golang.org/)
 
 <!-- RELEASE_BADGE -->
-> **v0.9.7-patched65** — 2360 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
+> **v0.9.7-patched67** — 2360 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
 <!-- /RELEASE_BADGE -->
 ## What is Olu?
 

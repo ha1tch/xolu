@@ -223,7 +223,7 @@ func translateAdaptedWhere(expr ast.Expression, entity string, store storage.Agg
 		default:
 			// Comparison operator
 			fieldName := exprToString(ex.Left)
-			colName, _, isDecimal, ok := store.AdaptedColumnInfo(entity, fieldName)
+			colName, _, _, ok := store.AdaptedColumnInfo(entity, fieldName)
 			if !ok {
 				return "", fmt.Errorf("field %q not found in adapted table", fieldName)
 			}
@@ -237,20 +237,10 @@ func translateAdaptedWhere(expr ast.Expression, entity string, store storage.Agg
 			// required for PostgreSQL (strict typing) and harmless on SQLite.
 			lhs := colName
 			ph := addArg(val)
-			if isDecimal {
-				// Decimal columns are stored as scaled int64 on SQLite.
-				// The parameter is already the literal value; SQLite will
-				// coerce implicitly but PostgreSQL won't. Wrapping the
-				// parameter in a CAST ensures correct behaviour on both.
-				// Note: for full correctness on SQLite's scaled storage,
-				// the executor normalises the comparison value before this
-				// point. The CAST here protects the PostgreSQL path.
-			} else if isNumericLiteral(val) {
-				// Numeric literal against a text column or vice versa:
-				// emit explicit CAST on the column for strict backends.
-				// On SQLite this is a no-op; on PostgreSQL it prevents
-				// "operator does not exist: text > integer" errors.
-			}
+			// Numeric literal against a text column (or vice versa): explicit
+			// CAST on the column would prevent "operator does not exist" errors
+			// on strict backends. No-op on SQLite. Not yet emitted — deferred
+			// until the PostgreSQL backend is introduced.
 			return fmt.Sprintf("%s %s %s", lhs, ex.Operator, ph), nil
 		}
 
@@ -336,16 +326,6 @@ func translateAdaptedWhere(expr ast.Expression, entity string, store storage.Agg
 
 	default:
 		return "", fmt.Errorf("unsupported expression type for adapted WHERE: %T", expr)
-	}
-}
-
-// isNumericLiteral reports whether a Go value is a numeric type.
-func isNumericLiteral(v interface{}) bool {
-	switch v.(type) {
-	case int, int64, float64:
-		return true
-	default:
-		return false
 	}
 }
 

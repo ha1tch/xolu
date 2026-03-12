@@ -123,12 +123,7 @@ type tsTimelineRetention struct {
 	RetentionDays int    `json:"retention_days"`
 }
 
-type tsRetentionPatchRequest struct {
-	DefaultRetentionDays int `json:"default_retention_days"`
-}
-
 // Stats
-
 type tsStatsResponse struct {
 	TenantID  string `json:"tenant_id"`
 	Timelines int    `json:"timelines"`

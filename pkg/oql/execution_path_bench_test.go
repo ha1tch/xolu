@@ -202,7 +202,7 @@ func newPathBenchEnv(b *testing.B) *pathBenchEnv {
 }
 
 // run parses and executes a query through the given executor.
-func (env *pathBenchEnv) run(b *testing.B, exec *Executor, oql string) {
+func (env *pathBenchEnv) run(b *testing.B, exec *Executor, oql string) { //nolint:unused
 	b.Helper()
 	e := &Engine{}
 	stmt, err := e.parse(oql)

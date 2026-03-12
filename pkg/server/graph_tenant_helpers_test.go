@@ -130,9 +130,7 @@ func TestStripPrefixFromEdgeMap_EmptyPrefix(t *testing.T) {
 	}
 	got := stripPrefixFromEdgeMap("", input)
 	// Empty prefix: must return the original map unmodified.
-	if &got == &input {
-		// Same map reference is fine.
-	}
+	// &got == &input (same map reference) is acceptable; no assertion needed.
 	if v, ok := got["post:1"]; !ok || v != "next_ref" {
 		t.Errorf("empty prefix: expected map unchanged, got %v", got)
 	}

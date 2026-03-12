@@ -344,7 +344,7 @@ func (p *Planner) Plan(ctx context.Context, s *ast.SelectStatement, store storag
 
 	// If nothing was pushable, return PushNone
 	if len(pushOps) == 0 {
-		reason := "no pushable operations"
+		var reason string
 		if s.Where == nil {
 			reason = "no WHERE clause"
 		} else if !caps.Where {

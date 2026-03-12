@@ -258,25 +258,6 @@ func shouldAutoIndexField(name, jsonType, format string, required bool, enumVals
 	return false
 }
 
-// shouldAutoIndex is the legacy version using raw propMap.
-// Retained for any callers that still pass raw maps.
-func shouldAutoIndex(name, jsonType, format string, required bool, propMap map[string]interface{}) bool {
-	// Decimal fields: likely used in range queries
-	if format == "decimal" {
-		return true
-	}
-	// Enum fields: low cardinality, often filtered on
-	if _, hasEnum := propMap["enum"]; hasEnum {
-		return true
-	}
-	// Required string fields with constraints: likely unique identifiers
-	if required && jsonType == "string" {
-		if _, hasPattern := propMap["pattern"]; hasPattern {
-			return true
-		}
-	}
-	return false
-}
 
 // canonicalSchemaHash produces a deterministic SHA-256 hash of a JSON Schema.
 // The schema is re-serialised with sorted keys to ensure stability.

@@ -75,7 +75,7 @@ func cmdTenantCreate(args []string) {
 	dbPath := fs.String("db", "", "Path to the olu SQLite database (required)")
 	name := fs.String("name", "", "Tenant name (required)")
 	id := fs.Int("id", 0, "Tenant ID (optional; auto-assigns next available if omitted)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" || *name == "" {
 		fs.Usage()
@@ -145,7 +145,7 @@ func cmdTenantCreate(args []string) {
 func cmdTenantList(args []string) {
 	fs := flag.NewFlagSet("iolu tenant list", flag.ExitOnError)
 	dbPath := fs.String("db", "", "Path to the olu SQLite database (required)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" {
 		fs.Usage()
@@ -206,7 +206,7 @@ func cmdTenantInfo(args []string) {
 	dbPath := fs.String("db", "", "Path to the olu SQLite database (required)")
 	name := fs.String("name", "", "Tenant name (required)")
 	baseDir := fs.String("base-dir", "", "olu base directory (default: directory containing --db)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" || *name == "" {
 		fs.Usage()
@@ -292,7 +292,7 @@ func cmdTenantDelete(args []string) {
 	dbPath := fs.String("db", "", "Path to the olu SQLite database (required)")
 	name := fs.String("name", "", "Tenant name (required)")
 	force := fs.Bool("force", false, "Delete even if entity data exists (data becomes orphaned)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" || *name == "" {
 		fs.Usage()
@@ -371,7 +371,7 @@ func openDB(path string) *sql.DB {
 
 func dirSize(path string) int64 {
 	var size int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

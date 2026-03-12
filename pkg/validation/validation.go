@@ -180,7 +180,7 @@ func (v *JSONSchemaValidator) Validate(entity string, data map[string]interface{
 	}
 
 	ctx := queryfy.NewValidationContext(queryfy.Strict)
-	es.compiled.Validate(data, ctx)
+	_ = es.compiled.Validate(data, ctx)
 
 	if !ctx.HasErrors() {
 		return true, nil

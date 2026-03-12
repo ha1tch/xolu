@@ -316,14 +316,6 @@ func (s *Server) tenantStrictMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// getTenantID returns the tenant name string from context, or empty string if not set.
-// Kept for backward compatibility with code that needs the string form.
-func getTenantID(ctx context.Context) string {
-	if v := ctx.Value(tenantContextKey); v != nil {
-		return v.(string)
-	}
-	return ""
-}
 
 // corsMiddleware returns a handler that sets CORS headers for the given origins.
 // It handles preflight OPTIONS requests and adds appropriate headers to all responses.
@@ -863,7 +855,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Default to Prometheus format
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(s.metrics.PrometheusFormat()))
+	_, _ = w.Write([]byte(s.metrics.PrometheusFormat()))
 }
 
 // handleCreate creates a new entity

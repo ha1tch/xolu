@@ -105,7 +105,7 @@ func calibrationSetup(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck // no-op if commit succeeded
 
 	ins, err := tx.PrepareContext(ctx,
 		`INSERT INTO _olu_calibration (id, data, region, category, quantity) VALUES (?, ?, ?, ?, ?)`)
@@ -151,7 +151,7 @@ func calibrationSetup(ctx context.Context, db *sql.DB) error {
 
 // calibrationTeardown drops the temp table.
 func calibrationTeardown(db *sql.DB) {
-	db.Exec("DROP TABLE IF EXISTS _olu_calibration")
+	_, _ = db.Exec("DROP TABLE IF EXISTS _olu_calibration")
 }
 
 // benchGoPath measures the per-row cost of fetching all blobs and
@@ -174,7 +174,7 @@ func benchGoPath(ctx context.Context, db *sql.DB) (float64, error) {
 				return 0, err
 			}
 			var m map[string]interface{}
-			json.Unmarshal([]byte(blob), &m)
+			_ = json.Unmarshal([]byte(blob), &m) // error means empty map — handled by zero count
 			count++
 		}
 		rows.Close()
@@ -204,7 +204,7 @@ func benchSQLPath(ctx context.Context, db *sql.DB) (float64, error) {
 		for rows.Next() {
 			var region string
 			var quantity int
-			rows.Scan(&region, &quantity)
+			_ = rows.Scan(&region, &quantity)
 			count++
 		}
 		rows.Close()
@@ -239,7 +239,7 @@ func benchTempBTree(ctx context.Context, db *sql.DB) (float64, error) {
 		for rows.Next() {
 			var region, category string
 			var count, sum int
-			rows.Scan(&region, &category, &count, &sum)
+			_ = rows.Scan(&region, &category, &count, &sum)
 		}
 		rows.Close()
 		totalNs += time.Since(start).Nanoseconds()

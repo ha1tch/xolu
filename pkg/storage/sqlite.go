@@ -153,37 +153,6 @@ func (s *SQLiteStore) withRetry(fn func() error) error {
 	return err
 }
 
-// withRetryVal is like withRetry but for functions that return a value and an error.
-func (s *SQLiteStore) withRetryVal(fn func() (map[string]interface{}, error)) (map[string]interface{}, error) {
-	if locked := s.alock.Lock(); locked {
-		defer s.alock.Unlock()
-	}
-	val, err := fn()
-	if err == nil {
-		s.alock.RecordSuccess()
-		return val, nil
-	}
-	if !isSQLiteBusy(err) {
-		return val, err
-	}
-	s.alock.RecordFailure()
-	backoff := 25 * time.Millisecond
-	for attempt := 0; attempt < sqliteBusyRetries; attempt++ {
-		jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
-		time.Sleep(backoff + jitter)
-		backoff *= 2
-		val, err = fn()
-		if err == nil {
-			s.alock.RecordSuccess()
-			return val, nil
-		}
-		if !isSQLiteBusy(err) {
-			return val, err
-		}
-		s.alock.RecordFailure()
-	}
-	return val, err
-}
 
 // withRetryRead executes a read operation, using the adaptive lock's RLock
 // when engaged. Reads don't retry — SQLITE_BUSY on reads is extremely rare

@@ -207,7 +207,7 @@ func (e *integrationEnv) oqlData(path, query string) []interface{} {
 }
 
 // graphStats returns node_count and edge_count.
-func (e *integrationEnv) graphStats() (int, int) {
+func (e *integrationEnv) graphStats() (int, int) { //nolint:unused
 	e.t.Helper()
 	_, result := e.doJSON("GET", "/api/v1/graph/stats", nil)
 	nodes := int(result["node_count"].(float64))

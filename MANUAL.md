@@ -1485,7 +1485,7 @@ curl http://localhost:9090/api/v1/users
 
 Olu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.9.7-patched65`.
+or API. The current version is `0.9.7-patched67`.
 
 ### Database Format Stability
 

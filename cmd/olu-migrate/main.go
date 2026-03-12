@@ -75,7 +75,7 @@ func cmdSchema(args []string) {
 	dbPath := fs.String("db", "", "Path to olu SQLite database (required)")
 	dryRun := fs.Bool("dry-run", false, "Show what would be done without making changes")
 	verbose := fs.Bool("verbose", false, "Verbose output")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: olu-migrate schema -db /path/to/olu.db [-dry-run] [-verbose]")
@@ -119,7 +119,7 @@ func cmdBackfill(args []string) {
 	tenantField := fs.String("tenant-field", "tenant_id", "JSON field containing tenant identifier")
 	dryRun := fs.Bool("dry-run", false, "Show what would be done without making changes")
 	verbose := fs.Bool("verbose", false, "Verbose output")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if *dbPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: olu-migrate backfill -db /path/to/olu.db -tenant-field <field> [-dry-run]")
@@ -292,7 +292,7 @@ func migrateEntitySequences(tx *sql.Tx, verbose bool) error {
 
 func migrateFTS(tx *sql.Tx, verbose bool) error {
 	var ftsExists int
-	tx.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entities_fts'").Scan(&ftsExists)
+	_ = tx.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entities_fts'").Scan(&ftsExists)
 
 	if ftsExists == 0 {
 		if verbose {
@@ -357,7 +357,7 @@ func migrateFTS(tx *sql.Tx, verbose bool) error {
 			continue
 		}
 
-		tx.Exec(
+		_, _ = tx.Exec(
 			"INSERT INTO entities_fts (tenant_id, entity_type, entity_id, content) VALUES (?, ?, ?, ?)",
 			"0", entityType, fmt.Sprintf("%d", id), content,
 		)
@@ -457,7 +457,7 @@ func backfillTenantIDs(db *sql.DB, field string, dryRun, verbose bool) error {
 
 	// Fix sequences: for each (tenant_id, entity_type), set next_id = max(id) + 1
 	for _, tid := range tenantMap {
-		tx.Exec(`INSERT OR IGNORE INTO entity_sequences (tenant_id, entity_type, next_id)
+		_, _ = tx.Exec(`INSERT OR IGNORE INTO entity_sequences (tenant_id, entity_type, next_id)
 			SELECT ?, entity_type, MAX(id) + 1
 			FROM entities WHERE tenant_id = ?
 			GROUP BY entity_type`, tid, tid)

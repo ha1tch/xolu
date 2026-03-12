@@ -126,6 +126,15 @@ if [ $TEST_EXIT -ne 0 ]; then
 fi
 ok "All tests passed"
 
+# 5a. Lint
+step "Running linter"
+if command -v golangci-lint >/dev/null 2>&1; then
+    golangci-lint run --timeout=5m
+    ok "Lint clean"
+else
+    warn "golangci-lint not found -- skipping lint (install from https://golangci-lint.run)"
+fi
+
 # 6. Generate TESTING.md
 step "Generating TESTING.md"
 python3 scripts/gen_testing_md.py \

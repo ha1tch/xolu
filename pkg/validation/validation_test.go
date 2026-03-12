@@ -234,7 +234,7 @@ func TestValidateStringConstraints(t *testing.T) {
 	}
 
 	// Too long
-	valid, errors = v.Validate("users", map[string]interface{}{
+	valid, _ = v.Validate("users", map[string]interface{}{
 		"username": "thisusernameiswaytoolong",
 	})
 	if valid {
