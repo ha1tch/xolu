@@ -257,7 +257,13 @@ func (jm *JobManager) ExecuteSyncWithStore(ctx context.Context, query string, st
 func (jm *JobManager) GetJob(id string) *Job {
 	jm.mu.RLock()
 	defer jm.mu.RUnlock()
-	return jm.jobs[id]
+	job, exists := jm.jobs[id]
+	if !exists {
+		return nil
+	}
+	// Return a copy so callers can safely read fields without holding the lock.
+	copy := *job
+	return &copy
 }
 
 // GetJobResult returns the result of a completed job

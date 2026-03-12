@@ -789,7 +789,7 @@ func (s *Server) handleTenantSulpherQueryAsync(w http.ResponseWriter, r *http.Re
 
 	s.writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"query_id":   job.ID,
-		"status":     job.Status,
+		"status":     sulpher.StatusPending, // always pending at submission time; avoid reading from shared pointer
 		"created_at": job.CreatedAt,
 	})
 }

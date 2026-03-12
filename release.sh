@@ -185,7 +185,7 @@ if $CUT_ZIP; then
     # list is the primary guard against container/workspace contamination.
     ZIP_SOURCES=(
         README.md CHANGELOG.md MANUAL.md TESTING.md VERSION LICENSE
-        Makefile Dockerfile docker-compose.yml
+        Makefile Dockerfile docker-compose.yml .golangci.yml
         run_tests.sh syncver.sh release.sh
         go.mod go.sum
         cmd/ pkg/ docs/ scripts/ .github/

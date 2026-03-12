@@ -29,9 +29,8 @@ func TestJobManager_SubmitAndWait(t *testing.T) {
 	if job.ID == "" {
 		t.Error("Expected non-empty job ID")
 	}
-	if job.Status != StatusPending && job.Status != StatusRunning {
-		t.Errorf("Expected pending or running status, got %s", job.Status)
-	}
+	// Do not read job.Status here — the background goroutine may have already
+	// written StatusRunning to the shared pointer. Use GetJob for all status reads.
 
 	// Wait for completion
 	deadline := time.After(5 * time.Second)

@@ -105,26 +105,21 @@ func (jm *JobManager) ExecuteSync(ctx context.Context, queryStr string, maxDepth
 	if err != nil {
 		return nil, err
 	}
-
-	// Temporarily set max depth if provided
-	originalMaxDepth := jm.executor.maxDepth
-	if maxDepth > 0 {
-		jm.executor.maxDepth = maxDepth
-	}
-	defer func() {
-		jm.executor.maxDepth = originalMaxDepth
-	}()
-
-	return jm.executor.Execute(ctx, query)
+	// ExecuteWithDepth is concurrent-safe; it does not mutate shared executor state.
+	return jm.executor.ExecuteWithDepth(ctx, query, maxDepth)
 }
 
 // GetJob retrieves a job by ID
-func (jm *JobManager) GetJob(id string) (*Job, bool) {
+func (jm *JobManager) GetJob(id string) (Job, bool) {
 	jm.mu.RLock()
 	defer jm.mu.RUnlock()
 
 	job, exists := jm.jobs[id]
-	return job, exists
+	if !exists {
+		return Job{}, false
+	}
+	// Return a copy so callers can safely read fields without holding the lock.
+	return *job, true
 }
 
 // GetJobResult retrieves the result of a completed job
@@ -159,17 +154,11 @@ func (jm *JobManager) executeJob(job *Job) {
 	}
 
 	// Set max depth for this execution
-	originalMaxDepth := jm.executor.maxDepth
-	if job.MaxDepth > 0 {
-		jm.executor.maxDepth = job.MaxDepth
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), jm.queryTimeout)
 	defer cancel()
 
-	result, err := jm.executor.Execute(ctx, query)
-
-	jm.executor.maxDepth = originalMaxDepth
+	// ExecuteWithDepth is concurrent-safe; it does not mutate shared executor state.
+	result, err := jm.executor.ExecuteWithDepth(ctx, query, job.MaxDepth)
 
 	if err != nil {
 		jm.failJob(job, err.Error())
