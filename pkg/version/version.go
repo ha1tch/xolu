@@ -6,4 +6,4 @@ package version
 
 // Version is the current version of olu.
 // This MUST match the contents of the VERSION file.
-const Version = "0.9.7-patched73"
+const Version = "0.9.7-patched74"
