@@ -1,18 +1,25 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ----
-FROM golang:1.22-alpine AS builder
+# Always build on the native runner platform; use Go cross-compilation
+# to target the requested architecture. This avoids QEMU emulation for
+# the compile step, which can be 10-20x slower on arm64.
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+
+ARG TARGETARCH
 
 # modernc.org/sqlite is pure Go; no CGO or sqlite-dev headers required.
 ENV GONOSUMDB=*
 ENV GOFLAGS=-mod=mod
+ENV CGO_ENABLED=0
+ENV GOOS=linux
 
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux \
+RUN GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/olu ./cmd/olu
 
