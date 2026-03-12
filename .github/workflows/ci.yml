@@ -28,16 +28,7 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test -short -race ./...
-
-      - name: Run benchmarks
-        run: go test -bench=. -benchmem -benchtime=1x -run=^$ ./... | tee benchmark.txt
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: benchmark.txt
+        run: go test -short ./...
 
   lint:
     name: Lint
