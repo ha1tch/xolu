@@ -31,7 +31,7 @@ jobs:
         run: go test -short -race ./...
 
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -run=^$ ./... | tee benchmark.txt
+        run: go test -bench=. -benchmem -benchtime=1x -run=^$ ./... | tee benchmark.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
