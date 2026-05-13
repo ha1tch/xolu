@@ -172,6 +172,39 @@ const (
 	// jsonfile backend, which provides only best-effort atomicity and has
 	// been deprecated for production use.
 	ErrCMNotAvailable Code = "OLU-CM009"
+
+	// ErrCMTSDisabled is returned when timeseries events are included in a
+	// CommitRequest but OLU_TIMESERIES_ENABLED is false or the server was
+	// started without a timeseries manager.
+	ErrCMTSDisabled Code = "OLU-CM010"
+
+	// ErrCMTSNotProvisioned is returned when timeseries events are included
+	// but the tenant has not been provisioned for timeseries storage via
+	// POST /ts/provision.
+	ErrCMTSNotProvisioned Code = "OLU-CM011"
+
+	// ErrCMTSBadTimeline is returned when a CommitTSEvent references a
+	// timeline that is not defined for the tenant.
+	ErrCMTSBadTimeline Code = "OLU-CM012"
+
+	// ErrCMTSBadDims is returned when a CommitTSEvent carries the wrong
+	// number of dimension values for its declared timeline.
+	ErrCMTSBadDims Code = "OLU-CM013"
+
+	// ErrCMTSBatchTooLarge is returned when the timeseries array in a
+	// CommitRequest exceeds OLU_TS_MAX_BATCH_SIZE.
+	ErrCMTSBatchTooLarge Code = "OLU-CM014"
+
+	// ErrCMTSWriteFailed is returned when the Pebble timeseries write fails.
+	// The SQLite transaction was not opened; the caller may retry the entire
+	// /commit request safely.
+	ErrCMTSWriteFailed Code = "OLU-CM015"
+
+	// ErrCMTSRollbackFailed is returned when the Pebble write succeeded but
+	// the SQLite transaction failed AND the subsequent DeleteKeys tombstone
+	// call also failed. Entity state is unchanged; the timeseries store may
+	// contain an orphaned entry. Manual remediation is required.
+	ErrCMTSRollbackFailed Code = "OLU-CM016"
 )
 
 // ---------------------------------------------------------------------------

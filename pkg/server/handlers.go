@@ -27,6 +27,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/xolu/pkg/sulpher"
 	"github.com/ha1tch/xolu/pkg/tenant"
+	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/version"
 )
 
@@ -1876,8 +1877,9 @@ func (s *Server) handleGraphRebuild(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// handleCommit executes an atomic upsert + one or more appends in a single
-// storage transaction. See docs/COMMIT_ENDPOINT_DESIGN.md for full spec.
+// handleCommit executes an atomic upsert + optional entity appends + optional
+// timeseries events in a single logical operation.
+// See docs/COMMIT_ENDPOINT.md for the full spec.
 //
 //	POST /api/v1/tenant/{tenant_id}/commit
 //	POST /api/v1/commit
@@ -1889,6 +1891,14 @@ func (s *Server) handleGraphRebuild(w http.ResponseWriter, r *http.Request) {
 // graph cycle prechecks are run before the storage transaction, matching the
 // guarantees of save/create/patch. Set OLU_STRICT_COMMIT=false only when the
 // caller is trusted infrastructure that manages its own invariants.
+//
+// Timeseries write ordering:
+//  1. Validate all fields (entity + TS) — no writes yet.
+//  2. If req.Timeseries is non-empty: write to Pebble first.
+//     On Pebble failure → return OLU-CM015; SQLite is untouched; caller retries.
+//  3. Execute SQLite transaction (upsert + appends).
+//     On SQLite failure → call DeleteKeys to tombstone the Pebble writes
+//     synchronously before returning OLU-CM008 or OLU-CM016.
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 	var req storage.CommitRequest
@@ -1897,7 +1907,8 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Structural validation (always, regardless of strict mode).
+	// --- Structural validation (always, regardless of strict mode) ----------
+
 	if req.Update.Entity == "" {
 		s.writeError(w, http.StatusBadRequest, oluerr.ErrCMUpdateMissing, "update object is required")
 		return
@@ -1911,8 +1922,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidID, "update.id must be a positive integer")
 		return
 	}
-	if len(req.Append) == 0 {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrCMAppendEmpty, "append array must contain at least one entry")
+
+	// At least one of append or timeseries must carry work.
+	if len(req.Append) == 0 && len(req.Timeseries) == 0 {
+		s.writeError(w, http.StatusBadRequest, oluerr.ErrCMAppendEmpty,
+			"at least one of append or timeseries must be non-empty")
 		return
 	}
 	if len(req.Append) > 25 {
@@ -1938,10 +1952,98 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Strict mode: schema validation + graph cycle prechecks, matching the
-	// guarantees of the normal write surface.
+	// --- Timeseries pre-flight validation ------------------------------------
+	//
+	// All TS checks fire before any write so that a misconfigured request gets
+	// a clean 400 without touching either store.
+
+	var (
+		tsStore      timeseries.Store // non-nil only when req.Timeseries non-empty
+		tsEvents     []timeseries.Event
+		tsEncodedKeys [][]byte
+	)
+
+	if len(req.Timeseries) > 0 {
+		if s.tsManager == nil {
+			s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSDisabled,
+				"timeseries array requires timeseries to be enabled (OLU-CM010)")
+			return
+		}
+
+		tenantID := getTenantIDNumeric(r.Context())
+		if !s.tsManager.IsProvisioned(tenantID) {
+			s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSNotProvisioned,
+				"tenant not provisioned for timeseries; POST /ts/provision first (OLU-CM011)")
+			return
+		}
+
+		var err error
+		tsStore, err = s.tsManager.StoreFor(tenantID)
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, oluerr.ErrCMTSWriteFailed,
+				fmt.Sprintf("could not obtain timeseries store: %s", err.Error()))
+			return
+		}
+
+		maxBatch := s.config.TSMaxBatchSize
+		if maxBatch <= 0 {
+			maxBatch = 5000
+		}
+		if len(req.Timeseries) > maxBatch {
+			s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBatchTooLarge,
+				fmt.Sprintf("timeseries array exceeds OLU_TS_MAX_BATCH_SIZE (%d events, max %d) (OLU-CM014)",
+					len(req.Timeseries), maxBatch))
+			return
+		}
+
+		// Validate each event and pre-encode keys so we have them for rollback
+		// without re-encoding under error conditions.
+		tsEvents = make([]timeseries.Event, len(req.Timeseries))
+		tsEncodedKeys = make([][]byte, len(req.Timeseries))
+		for i, e := range req.Timeseries {
+			if e.Timeline == 0 {
+				s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBadTimeline,
+					fmt.Sprintf("timeseries[%d]: timeline 0x0000 is reserved (OLU-CM012)", i))
+				return
+			}
+			tid := timeseries.TimelineID(e.Timeline)
+			cfg, ok := tsStore.Timeline(tid)
+			if !ok {
+				s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBadTimeline,
+					fmt.Sprintf("timeseries[%d]: timeline %d not defined for tenant (OLU-CM012)", i, e.Timeline))
+				return
+			}
+			if uint8(len(e.Dims)) != cfg.Dims {
+				s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBadDims,
+					fmt.Sprintf("timeseries[%d]: timeline %d expects %d dims, got %d (OLU-CM013)",
+						i, e.Timeline, cfg.Dims, len(e.Dims)))
+				return
+			}
+			if e.Time.IsZero() {
+				s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBadTimeline,
+					fmt.Sprintf("timeseries[%d]: time must not be zero (OLU-CM012)", i))
+				return
+			}
+			key, err := timeseries.EncodeKey(tid, cfg.Dims, e.Dims, e.Time)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, oluerr.ErrCMTSBadTimeline,
+					fmt.Sprintf("timeseries[%d]: %s", i, err.Error()))
+				return
+			}
+			tsEncodedKeys[i] = key
+			tsEvents[i] = timeseries.Event{
+				Timeline: tid,
+				Dims:     e.Dims,
+				Time:     e.Time,
+				Nums:     e.Nums,
+				Payload:  e.Payload,
+			}
+		}
+	}
+
+	// --- Strict mode: schema validation + graph cycle prechecks --------------
+
 	if s.config.StrictCommit {
-		// Validate update payload.
 		updateData := make(map[string]interface{}, len(req.Update.Data)+1)
 		for k, v := range req.Update.Data {
 			updateData[k] = v
@@ -1969,7 +2071,6 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Validate each append payload.
 		for i, a := range req.Append {
 			appendData := make(map[string]interface{}, len(a.Data)+1)
 			for k, v := range a.Data {
@@ -2004,9 +2105,48 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	store := s.getStore(r.Context())
-	result, err := store.Commit(r.Context(), req)
+	// --- Step 1: Write timeseries to Pebble (before SQLite) ------------------
+	//
+	// If this fails, SQLite is untouched and the caller can retry the whole
+	// request safely — no rollback needed.
+
+	if tsStore != nil {
+		if _, err := tsStore.AppendBatch(r.Context(), tsEvents, s.config.TSMaxBatchSize); err != nil {
+			s.logger.Error().Err(err).Msg("handleCommit: Pebble timeseries write failed; SQLite not touched")
+			s.writeError(w, http.StatusInternalServerError, oluerr.ErrCMTSWriteFailed,
+				"timeseries write failed; SQLite state unchanged — retry is safe (OLU-CM015)")
+			return
+		}
+	}
+
+	// --- Step 2: SQLite transaction ------------------------------------------
+	//
+	// On failure, tombstone the Pebble writes we issued in step 1 before
+	// returning the error. The tombstone is synchronous and must complete
+	// before the response is sent so that no query can observe an orphaned
+	// timeseries entry whose entity state was never advanced.
+
+	entityStore := s.getStore(r.Context())
+	result, err := entityStore.Commit(r.Context(), req)
 	if err != nil {
+		// Tombstone any Pebble writes that succeeded in step 1.
+		if tsStore != nil && len(tsEncodedKeys) > 0 {
+			if rbErr := tsStore.DeleteKeys(r.Context(), tsEncodedKeys); rbErr != nil {
+				// The entity is unchanged (SQLite failed) but the timeseries
+				// store now has an orphaned entry we could not tombstone.
+				// Log at error level and return a distinct code so operators
+				// can identify the situation unambiguously.
+				s.logger.Error().
+					Err(rbErr).
+					AnErr("sqliteErr", err).
+					Msg("handleCommit: SQLite failed AND Pebble rollback (DeleteKeys) failed — orphaned TS entry possible (OLU-CM016)")
+				s.writeError(w, http.StatusInternalServerError, oluerr.ErrCMTSRollbackFailed,
+					"commit failed and timeseries rollback also failed; manual remediation may be required (OLU-CM016)")
+				return
+			}
+			s.logger.Warn().Err(err).Msg("handleCommit: SQLite failed; Pebble TS writes tombstoned cleanly")
+		}
+
 		if errors.Is(err, storage.ErrNotSupported) {
 			s.writeError(w, http.StatusNotImplemented, oluerr.ErrCMNotAvailable,
 				"POST /commit is not available with the current storage backend. "+
@@ -2031,15 +2171,19 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 				"an append entry specifies an ID that already exists; commit rolled back")
 			return
 		}
-		s.logger.Error().Err(err).Msg("handleCommit: transaction failed")
+		s.logger.Error().Err(err).Msg("handleCommit: SQLite transaction failed")
 		s.writeError(w, http.StatusInternalServerError, oluerr.ErrCMTransactionFailed, "commit transaction failed")
 		return
 	}
 
-	// Update in-memory graph for the upserted entity and all appended entities.
-	// This is unconditional (not gated on strict mode) because a stale FlatGraph
-	// after a successful write is a correctness bug, not a "relax guarantees" choice.
-	if merged, err := store.Get(r.Context(), req.Update.Entity, result.Update.ID); err == nil {
+	result.TSAccepted = len(tsEvents)
+
+	// --- Post-commit: update in-memory graph and invalidate caches -----------
+	//
+	// Unconditional (not gated on strict mode): a stale FlatGraph after a
+	// successful write is a correctness bug, not a "relax guarantees" choice.
+
+	if merged, err := entityStore.Get(r.Context(), req.Update.Entity, result.Update.ID); err == nil {
 		s.updateGraph(r.Context(), req.Update.Entity, result.Update.ID, merged)
 	} else {
 		s.logger.Warn().Err(err).
@@ -2047,7 +2191,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			Msg("handleCommit: post-commit Get for graph update failed; in-memory graph may be stale")
 	}
 	for _, a := range result.Appended {
-		if appended, err := store.Get(r.Context(), a.Entity, a.ID); err == nil {
+		if appended, err := entityStore.Get(r.Context(), a.Entity, a.ID); err == nil {
 			s.updateGraph(r.Context(), a.Entity, a.ID, appended)
 		} else {
 			s.logger.Warn().Err(err).

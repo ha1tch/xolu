@@ -6,8 +6,14 @@ package timeseries
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
+
+// ErrDeleteNotSupported is returned by Store implementations that do not
+// support event deletion. Callers must not assume the targeted event was
+// removed when this error is received.
+var ErrDeleteNotSupported = fmt.Errorf("ts: delete not supported by this backend")
 
 // TimelineID is a uint16 identifier for a timeline within a tenant store.
 // ID 0x0000 is reserved; valid IDs are 0x0001–0xFFFF.
@@ -209,6 +215,34 @@ type Store interface {
 	// Write
 	Append(ctx context.Context, e Event) error
 	AppendBatch(ctx context.Context, events []Event, maxBatch int) (int, error)
+
+	// Delete removes the event identified by e from the store by computing its
+	// encoded key from (Timeline, Dims, Time) and issuing a hard delete.
+	// The event counter for the timeline is decremented on success.
+	//
+	// Implementors: returning nil from a backend that does not actually delete
+	// the event is a silent correctness bug. The /commit endpoint calls Delete
+	// and DeleteKeys as a rollback mechanism; a no-op implementation means
+	// orphaned timeseries events will silently survive a SQLite failure and
+	// become permanently inconsistent with entity state. Always return
+	// ErrDeleteNotSupported if your backend cannot honour the deletion.
+	Delete(ctx context.Context, e Event) error
+
+	// DeleteKeys removes events by their pre-encoded keys. Keys must be produced
+	// by EncodeKey; passing arbitrary byte slices produces undefined behaviour.
+	// This is the preferred path when the caller already holds encoded keys
+	// (e.g. during /commit rollback) and wants to avoid re-encoding overhead.
+	// Because raw keys carry no Go-level timeline identity, implementations that
+	// successfully delete via this method do NOT adjust event counters — the
+	// counter is already documented as approximate (see storeMeta). Callers that
+	// require an exact counter decrement should use Delete instead.
+	//
+	// Implementors: the same obligation as Delete applies. A silent no-op here
+	// is not safe — it will cause /commit to silently succeed the rollback path
+	// while leaving orphaned Pebble entries in place. Return ErrDeleteNotSupported
+	// if your backend cannot delete by raw key; the /commit handler will log
+	// OLU-CM016 and alert operators rather than silently corrupting the store.
+	DeleteKeys(ctx context.Context, keys [][]byte) error
 
 	// Read
 	QueryRange(ctx context.Context, q RangeQuery) ([]Event, error)

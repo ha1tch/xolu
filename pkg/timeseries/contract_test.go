@@ -342,6 +342,157 @@ func runContractSuite(t *testing.T, factory storeFactory) {
 			t.Errorf("TotalEvents: got %d want >= 1", stats.TotalEvents)
 		}
 	})
+
+	t.Run("Delete_RemovesEvent", func(t *testing.T) {
+		// Append an event then Delete it; it must not appear in subsequent reads.
+		store := newContractStore(t, factory)
+		store.DefineTimeline(1, TimelineConfig{Dims: 1})
+		ctx := context.Background()
+		ts := time.Unix(6_000_000, 0).UTC()
+
+		if err := store.Append(ctx, Event{
+			Timeline: 1, Dims: []uint64{1}, Time: ts, Nums: []float64{1.0},
+		}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+
+		// Confirm it is present.
+		before, err := store.QueryRange(ctx, RangeQuery{
+			Timeline: 1, Dims: []uint64{1},
+			From: ts.Add(-time.Second), To: ts.Add(time.Second),
+		})
+		if err != nil {
+			t.Fatalf("QueryRange before delete: %v", err)
+		}
+		if len(before) != 1 {
+			t.Fatalf("expected 1 event before delete, got %d", len(before))
+		}
+
+		// Delete it.
+		if err := store.Delete(ctx, Event{
+			Timeline: 1, Dims: []uint64{1}, Time: ts,
+		}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+
+		// Must not appear in reads.
+		after, err := store.QueryRange(ctx, RangeQuery{
+			Timeline: 1, Dims: []uint64{1},
+			From: ts.Add(-time.Second), To: ts.Add(time.Second),
+		})
+		if err != nil {
+			t.Fatalf("QueryRange after delete: %v", err)
+		}
+		if len(after) != 0 {
+			t.Errorf("event still present after Delete: got %d events, want 0", len(after))
+		}
+	})
+
+	t.Run("Delete_NonExistentKey_IsNoOp", func(t *testing.T) {
+		// Deleting a key that was never written must succeed (Pebble tombstone
+		// semantics: writing a deletion marker for an absent key is safe).
+		store := newContractStore(t, factory)
+		store.DefineTimeline(1, TimelineConfig{Dims: 1})
+		ctx := context.Background()
+		ghost := time.Unix(6_100_000, 0).UTC()
+
+		if err := store.Delete(ctx, Event{
+			Timeline: 1, Dims: []uint64{1}, Time: ghost,
+		}); err != nil {
+			t.Errorf("Delete of non-existent key returned error: %v", err)
+		}
+	})
+
+	t.Run("Delete_UnknownTimeline_ReturnsError", func(t *testing.T) {
+		store := newContractStore(t, factory)
+		// Timeline 99 is never defined.
+		ctx := context.Background()
+		err := store.Delete(ctx, Event{
+			Timeline: 99, Dims: []uint64{1}, Time: time.Unix(7_000_000, 0).UTC(),
+		})
+		if err == nil {
+			t.Error("expected error deleting event for undefined timeline, got nil")
+		}
+	})
+
+	t.Run("DeleteKeys_RemovesEvents", func(t *testing.T) {
+		// Append two events, collect their pre-encoded keys, then DeleteKeys;
+		// both must be absent from subsequent reads.
+		store := newContractStore(t, factory)
+		store.DefineTimeline(1, TimelineConfig{Dims: 1})
+		ctx := context.Background()
+		base := time.Unix(8_000_000, 0).UTC()
+		ts0 := base
+		ts1 := base.Add(time.Second)
+
+		store.Append(ctx, Event{Timeline: 1, Dims: []uint64{1}, Time: ts0})
+		store.Append(ctx, Event{Timeline: 1, Dims: []uint64{1}, Time: ts1})
+
+		cfg, _ := store.Timeline(1)
+		key0, err := EncodeKey(1, cfg.Dims, []uint64{1}, ts0)
+		if err != nil {
+			t.Fatalf("EncodeKey ts0: %v", err)
+		}
+		key1, err := EncodeKey(1, cfg.Dims, []uint64{1}, ts1)
+		if err != nil {
+			t.Fatalf("EncodeKey ts1: %v", err)
+		}
+
+		if err := store.DeleteKeys(ctx, [][]byte{key0, key1}); err != nil {
+			t.Fatalf("DeleteKeys: %v", err)
+		}
+
+		remaining, err := store.QueryRange(ctx, RangeQuery{
+			Timeline: 1, Dims: []uint64{1},
+			From: base.Add(-time.Second), To: base.Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("QueryRange after DeleteKeys: %v", err)
+		}
+		if len(remaining) != 0 {
+			t.Errorf("DeleteKeys: %d events remain, want 0", len(remaining))
+		}
+	})
+
+	t.Run("DeleteKeys_EmptySlice_IsNoOp", func(t *testing.T) {
+		store := newContractStore(t, factory)
+		ctx := context.Background()
+		if err := store.DeleteKeys(ctx, nil); err != nil {
+			t.Errorf("DeleteKeys(nil) returned error: %v", err)
+		}
+		if err := store.DeleteKeys(ctx, [][]byte{}); err != nil {
+			t.Errorf("DeleteKeys([]) returned error: %v", err)
+		}
+	})
+
+	t.Run("DeleteKeys_PartialOverlapWithExisting", func(t *testing.T) {
+		// Keys for two events; only one was actually appended. The other key
+		// is a phantom — DeleteKeys must still succeed and leave no events.
+		store := newContractStore(t, factory)
+		store.DefineTimeline(1, TimelineConfig{Dims: 1})
+		ctx := context.Background()
+		base := time.Unix(9_000_000, 0).UTC()
+		real := base
+		phantom := base.Add(time.Second)
+
+		store.Append(ctx, Event{Timeline: 1, Dims: []uint64{1}, Time: real})
+
+		cfg, _ := store.Timeline(1)
+		keyReal, _ := EncodeKey(1, cfg.Dims, []uint64{1}, real)
+		keyPhantom, _ := EncodeKey(1, cfg.Dims, []uint64{1}, phantom)
+
+		if err := store.DeleteKeys(ctx, [][]byte{keyReal, keyPhantom}); err != nil {
+			t.Fatalf("DeleteKeys with phantom key: %v", err)
+		}
+
+		remaining, _ := store.QueryRange(ctx, RangeQuery{
+			Timeline: 1, Dims: []uint64{1},
+			From: base.Add(-time.Second), To: base.Add(time.Minute),
+		})
+		if len(remaining) != 0 {
+			t.Errorf("real event not deleted: %d remain", len(remaining))
+		}
+	})
 }
 
 // newContractStore creates a fresh PebbleStore in a temp dir via factory.

@@ -61,7 +61,7 @@ type Server struct {
 	logger         zerolog.Logger
 	router         *chi.Mux
 	tenantRegistry *tenant.Registry
-	tsManager      *timeseries.DefaultManager // nil when timeseries disabled
+	tsManager      timeseries.Manager // nil when timeseries disabled; production value is *DefaultManager
 	tsRetention    *timeseries.RetentionWorker          // nil when retention disabled
 	httpServer     *http.Server
 	metricsServer  *http.Server // non-nil only when config.MetricsPort > 0
@@ -88,6 +88,21 @@ type Server struct {
 // server.
 func (s *Server) TenantRegistry() *tenant.Registry {
 	return s.tenantRegistry
+}
+
+// TSManager returns the server's timeseries Manager. Returns nil when
+// timeseries is disabled. Exposed primarily for testing — production code
+// should not replace the manager after the server has started serving requests.
+func (s *Server) TSManager() timeseries.Manager {
+	return s.tsManager
+}
+
+// SetTSManager replaces the server's timeseries Manager. Intended for testing
+// only: it allows injecting a fake or failing manager after construction so
+// that failure paths (e.g. OLU-CM016) can be exercised deterministically.
+// Must not be called concurrently with request handling.
+func (s *Server) SetTSManager(m timeseries.Manager) {
+	s.tsManager = m
 }
 // the same underlying database but scopes all queries. Stores are
 // created once per tenant and reused across requests, avoiding the

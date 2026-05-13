@@ -244,7 +244,58 @@ func (s *PebbleStore) AppendBatch(ctx context.Context, events []Event, maxBatch 
 	return len(events), nil
 }
 
-// --- Read ---
+// Delete removes the event identified by e from the store. The key is encoded
+// from (Timeline, Dims, Time); if no event exists at that key the delete is a
+// no-op (Pebble tombstones are written regardless, which is correct — the key
+// is then absent from all subsequent reads). The timeline event counter is
+// decremented on success; the counter is approximate by design so a small
+// discrepancy from a missed write is acceptable.
+func (s *PebbleStore) Delete(ctx context.Context, e Event) error {
+	cfg, ok := s.reg.get(e.Timeline)
+	if !ok {
+		return fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", e.Timeline)
+	}
+	if len(e.Dims) != int(cfg.Dims) {
+		return fmt.Errorf("ts: timeline %d expects %d dims, got %d (OLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
+	}
+	key, err := EncodeKey(e.Timeline, cfg.Dims, e.Dims, e.Time)
+	if err != nil {
+		return err
+	}
+	if err := s.db.Delete(key, pebble.Sync); err != nil {
+		return fmt.Errorf("ts: pebble delete: %w", err)
+	}
+	s.counter(e.Timeline).Add(-1)
+	return nil
+}
+
+// DeleteKeys removes events by their pre-encoded Pebble keys. Keys must have
+// been produced by EncodeKey; passing arbitrary byte slices is undefined
+// behaviour. All deletes are issued in a single Pebble batch committed with
+// Sync durability, so either all succeed or none do.
+//
+// Event counters are NOT adjusted — they are approximate by design and the
+// caller is expected to use Delete when an exact decrement matters. This
+// method exists as a fast rollback path for /commit, where the keys are
+// already in hand and counter precision is not required.
+func (s *PebbleStore) DeleteKeys(ctx context.Context, keys [][]byte) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for _, key := range keys {
+		if err := batch.Delete(key, nil); err != nil {
+			return fmt.Errorf("ts: batch delete: %w", err)
+		}
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("ts: batch delete commit: %w", err)
+	}
+	return nil
+}
+
+
 
 func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, error) {
 	cfg, ok := s.reg.get(q.Timeline)

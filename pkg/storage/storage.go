@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -95,11 +96,30 @@ type Store interface {
 }
 
 // CommitRequest is the payload for the atomic commit endpoint.
-// It performs one conditional upsert (Update) and one or more unconditional
-// inserts (Append) in a single storage transaction.
+// It performs one conditional upsert (Update), zero or more unconditional
+// entity inserts (Append), and zero or more timeseries events (Timeseries).
+// At least one of Append or Timeseries must be non-empty.
+//
+// When Timeseries is non-empty the server writes those events to the Pebble
+// timeseries store BEFORE opening the SQLite transaction. If the Pebble write
+// succeeds but the SQLite transaction subsequently fails, the server issues a
+// synchronous DeleteKeys call to tombstone the written events before returning
+// the error to the caller. See docs/COMMIT_ENDPOINT.md.
 type CommitRequest struct {
-	Update CommitUpdate   `json:"update"`
-	Append []CommitAppend `json:"append"`
+	Update     CommitUpdate    `json:"update"`
+	Append     []CommitAppend  `json:"append"`
+	Timeseries []CommitTSEvent `json:"timeseries,omitempty"`
+}
+
+// CommitTSEvent is one timeseries event carried inside a CommitRequest.
+// It maps directly onto timeseries.Event; the Timeline must already be defined
+// for the tenant via POST /ts/timelines before /commit is called.
+type CommitTSEvent struct {
+	Timeline uint16    `json:"timeline"`
+	Dims     []uint64  `json:"dims"`
+	Time     time.Time `json:"time"`
+	Nums     []float64 `json:"nums,omitempty"`
+	Payload  []byte    `json:"payload,omitempty"`
 }
 
 // CommitUpdate describes the entity to upsert in a Commit operation.
@@ -124,8 +144,9 @@ type CommitAppend struct {
 
 // CommitResult is returned on a successful Commit.
 type CommitResult struct {
-	Update   CommitUpdateResult   `json:"update"`
-	Appended []CommitAppendResult `json:"appended"`
+	Update     CommitUpdateResult   `json:"update"`
+	Appended   []CommitAppendResult `json:"appended"`
+	TSAccepted int                  `json:"ts_accepted,omitempty"`
 }
 
 // CommitUpdateResult describes the outcome of the upsert in a Commit.
