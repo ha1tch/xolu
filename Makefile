@@ -1,4 +1,4 @@
-.PHONY: build build-iolu run clean test install deps fmt lint benchmark test-race test-unit test-integration
+.PHONY: build build-olu build-iolu run clean test install deps fmt lint benchmark test-race test-unit test-integration
 
 # Binary name
 BINARY_NAME=olu
@@ -8,8 +8,20 @@ MAIN_PATH=./cmd/olu
 ADMIN_PATH=./cmd/iolu
 MIGRATE_PATH=./cmd/olu-migrate
 
-# Build the application
+# Build all binaries (olu, iolu, olu-migrate)
 build: deps
+	@echo "Building ${BINARY_NAME}..."
+	@go build -o ${BINARY_NAME} ${MAIN_PATH}
+	@echo "Build complete: ${BINARY_NAME}"
+	@echo "Building ${ADMIN_BINARY}..."
+	@go build -o ${ADMIN_BINARY} ${ADMIN_PATH}
+	@echo "Build complete: ${ADMIN_BINARY}"
+	@echo "Building ${MIGRATE_BINARY}..."
+	@go build -o ${MIGRATE_BINARY} ${MIGRATE_PATH}
+	@echo "Build complete: ${MIGRATE_BINARY}"
+
+# Build olu only
+build-olu: deps
 	@echo "Building ${BINARY_NAME}..."
 	@go build -o ${BINARY_NAME} ${MAIN_PATH}
 	@echo "Build complete: ${BINARY_NAME}"
@@ -359,7 +371,8 @@ help:
 	@echo "Available targets:"
 	@echo ""
 	@echo "Build & Run:"
-	@echo "  build           - Build the application"
+	@echo "  build           - Build olu, iolu, and olu-migrate"
+	@echo "  build-olu       - Build olu only"
 	@echo "  build-iolu      - Build admin CLI (iolu)"
 	@echo "  build-migrate   - Build migration tool"
 	@echo "  build-all-tools - Build all binaries"

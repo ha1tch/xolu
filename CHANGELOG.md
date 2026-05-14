@@ -4,6 +4,148 @@ All notable changes to olu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.7-patched86] - 2026-05-13
+
+### Build — add `build-olu` target for single-binary builds
+
+patched85 removed the ability to build only `olu` since `make build` now
+builds all three binaries. Added `build-olu` as an explicit single-binary
+target for situations where only `olu` is needed (fast iteration, CI jobs
+that test only the server binary, etc.).
+
+## [0.9.7-patched85] - 2026-05-13
+
+### Build — `make build` now builds olu, iolu, and olu-migrate by default
+
+Previously `make build` built only `olu`. `iolu` and `olu-migrate` required
+separate `make build-iolu` and `make build-migrate` invocations, or the
+combined `make build-all-tools`. The `release.sh` script called `make build`
+directly, so only `olu` was verified to compile on each release.
+
+`make build` now builds all three binaries in sequence. The individual
+`build-iolu`, `build-migrate`, and `build-all-tools` targets are unchanged.
+The `help` target description for `build` is updated accordingly.
+
+## [0.9.7-patched84] - 2026-05-13
+
+### Docs — OQL JOIN push-down implementation specification
+
+Added `docs/OQL_JOIN_PUSHDOWN.md` (613 lines): a complete implementation
+specification for SQLite-pushed JOIN queries in OQL.
+
+Covers the full phased implementation plan (planner, SQL generator, executor,
+validator, tests), the per-entity adapted/blob path decision, SQL shapes for
+all supported join types (INNER, LEFT, RIGHT, FULL OUTER), NULL result row
+handling for outer joins, the out-of-scope items (CROSS JOIN, Go-path
+fallback, three-table joins), and a PostgreSQL compatibility section addressing
+dialect mediation, `AggregateQuery` opacity, and the adapted/blob table
+co-location assumption.
+
+No code changes.
+
+## [0.9.7-patched83] - 2026-05-13
+
+### Tests — HTTP-layer graph path/pathExists/shortestPath coverage + cyclic termination + concurrent counter accuracy
+
+Added `pkg/server/graph_path_e2e_test.go` (16 new tests). This addresses two
+gaps identified in the graph test-suite review:
+
+**Gap 1: no server-layer coverage of /graph/path, /graph/pathExists, or
+/graph/shortestPath**
+
+These three endpoints existed only in the unit-level contract suite
+(pkg/graph/graph_contract_test.go). If the HTTP handlers misparse `max_depth`,
+return wrong status codes on the no-path case, or leak the XXXX@ tenant prefix
+in responses, no test would catch it.
+
+Tests added per endpoint:
+
+- `/graph/path`: happy path (chain of 4, length 3), self-path (length 0),
+  no-path → 404, max_depth exceeded → 404 / sufficient → 200, missing params
+  → 400, no XXXX@ prefix in response, tenant isolation (alpha chain invisible
+  from beta routes).
+- `/graph/shortestPath`: found (exists:true), not-found (200 + exists:false,
+  unlike /path which returns 404), missing params → 400. Verifies the semantic
+  difference between the two path endpoints is preserved at the HTTP layer.
+- `/graph/pathExists`: found (exists:true + correct length), not-found
+  (exists:false + length 0), missing params → 400, absent node → 404.
+
+**Gap 2: no HTTP-layer cyclic-graph termination test**
+
+`TestContract_PathExists_CyclicGraph_Terminates` existed in the unit contract
+but had no server-layer analogue. `TestGraphPath_CyclicGraph_Terminates`
+seeds a forward chain (node:1→node:2→node:3) via HTTP entity writes, then
+injects the back-edge (node:3→node:1) directly via `s.graph` to close the
+cycle. It then exercises both `/graph/pathExists` and `/graph/path` against
+the cyclic graph and asserts: correct results, no hang within the test timeout,
+and no XXXX@ prefix in responses.
+
+**Gap 3: counter accuracy under concurrent writes (server layer)**
+
+The unit contract tests verify counter correctness sequentially.
+`TestGraphCounters_ConcurrentAccuracy` fires 80 concurrent goroutines writing
+entities under two tenants (50 alpha, 30 beta), then cross-checks the HTTP
+stats endpoint (`node_count`/`edge_count`) against direct calls to
+`NodeCountForTenant`/`EdgeCountForTenant` on `s.graph`. Counter drift between
+the HTTP layer and the underlying per-tenant maps under write concurrency is
+the most likely production failure mode and was untested at this layer.
+
+Also fixed: one incidental bug found during test authorship — `node_count` and
+`edge_count` are the correct JSON field names in the stats response (not
+`nodes`/`edges`).
+
+**Files changed:**
+
+- `pkg/server/graph_path_e2e_test.go` — new file, 16 tests
+
+## [0.9.7-patched82] - 2026-05-13
+
+### Fix — CommitTS test harness and missing POST /ts/query/range route
+
+Two bugs introduced with the patched78-era CommitTS tests were found on this
+checkpoint's first `make test` run.
+
+**Bug 1: `commitTSEnv.registerTenant` used a non-existent HTTP route**
+
+`commit_ts_e2e_test.go`'s test harness was calling
+`POST /api/v1/tenant/{name}` over HTTP to register tenants, but no such
+registration-only route exists in strict-mode olu. The result was a 404 on
+every `registerTenant` call, which caused the downstream `POST /ts/provision`
+call to fail with OLU-ST001 (unknown tenant), taking down all 15 `TestCommitTS_*`
+tests.
+
+Fix: rewrote `commitTSEnv.registerTenant` to call
+`srv.TenantRegistry().GetOrRegister(ctx, name)` directly, matching the pattern
+used by `tsEnv.registerTenant` in `ts_e2e_test.go`. Added `"context"` import.
+
+**Bug 2: `tsQueryRange` in the test harness called `POST /ts/query/range`,
+which was not a registered route**
+
+The four remaining failing tests (`HappyPath_WithAppendAndTS`,
+`SQLiteFailure_TombstonesEvents`, `SQLiteFailure_MultipleEvents_AllTombstoned`,
+`SuccessfulCommit_EventPersists`) all queried Pebble via the helper, which sent
+`POST /ts/query/range`. The only registered range-query route was
+`GET /ts/events` (query-string parameters), so the POST returned 404.
+
+Fix: added `HandleTSQueryRangePost` to `pkg/server/ts_handlers.go`. The handler
+accepts a JSON body with the same logical parameters as `GET /events`
+(`timeline`, `dims`, `from`, `to`, `limit`, `order`) and produces an identical
+response. Registered as `POST /ts/query/range` in the `/ts` sub-router in
+`server.go`.
+
+`POST /ts/query/range` is the correct REST shape for complex range queries:
+it avoids URL-length limits on large dimension arrays and is more ergonomic
+for callers that already compose JSON payloads (such as `/commit` clients).
+The `GET /events` endpoint is unchanged and remains supported for simple queries.
+
+**Result:** all 15 `TestCommitTS_*` tests pass; full suite green.
+
+**Files changed:**
+
+- `pkg/server/commit_ts_e2e_test.go` — `registerTenant` rewritten; `"context"` import added
+- `pkg/server/ts_handlers.go` — `HandleTSQueryRangePost` added (~90 lines)
+- `pkg/server/server.go` — `POST /query/range` registered in `/ts` sub-router
+
 ## [0.9.7-patched64] - 2026-03-11
 
 ### Hygiene — Remove application-specific references from documentation and source

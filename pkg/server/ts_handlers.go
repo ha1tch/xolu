@@ -653,6 +653,112 @@ func (s *Server) HandleTSQueryRange(w http.ResponseWriter, r *http.Request) {
 	s.tsWriteJSON(w, http.StatusOK, resp, limits.maxRespBytes)
 }
 
+// HandleTSQueryRangePost is the POST equivalent of HandleTSQueryRange.
+// It accepts the same parameters as a JSON body instead of query-string values,
+// which is more ergonomic for complex queries and avoids URL-length limits.
+//
+//	POST /api/v1/tenant/{tenant_id}/ts/query/range
+//
+// Request body:
+//
+//	{
+//	  "timeline": 1,
+//	  "dims":     [42],
+//	  "from":     "2026-01-01T00:00:00Z",
+//	  "to":       "2026-01-02T00:00:00Z",
+//	  "limit":    1000,   // optional; default 1000, max TSMaxQueryEvents
+//	  "order":    "asc"   // optional; "asc" (default) or "desc"
+//	}
+func (s *Server) HandleTSQueryRangePost(w http.ResponseWriter, r *http.Request) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return
+	}
+
+	var body struct {
+		Timeline uint64    `json:"timeline"`
+		Dims     []uint64  `json:"dims"`
+		From     string    `json:"from"`
+		To       string    `json:"to"`
+		Limit    int       `json:"limit"`
+		Order    string    `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "invalid JSON body: "+err.Error())
+		return
+	}
+
+	if body.Timeline == 0 || body.Timeline > 0xFFFF {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "missing or invalid timeline field")
+		return
+	}
+	if len(body.Dims) == 0 {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS007"), "dims must be a non-empty array")
+		return
+	}
+
+	from, err := parseTSTime(body.From)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), "invalid from: "+err.Error())
+		return
+	}
+	to, err := parseTSTime(body.To)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), "invalid to: "+err.Error())
+		return
+	}
+
+	limits := s.tsQueryLimits()
+
+	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
+		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS011"),
+			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
+		return
+	}
+
+	limit := body.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > limits.maxEvents {
+		limit = limits.maxEvents
+	}
+
+	order := body.Order
+	if order == "" {
+		order = "asc"
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
+	defer cancel()
+
+	rq := timeseries.RangeQuery{
+		Timeline:      timeseries.TimelineID(body.Timeline),
+		Dims:          body.Dims,
+		From:          from,
+		To:            to,
+		Limit:         limit,
+		Order:         order,
+		MaxScanEvents: limits.maxScanEvents,
+	}
+	events, err := store.QueryRange(ctx, rq)
+	if err != nil {
+		code := classifyTSError(err)
+		status := http.StatusBadRequest
+		if ctx.Err() != nil {
+			status = http.StatusGatewayTimeout
+			code = "OLU-TS013"
+		}
+		s.writeError(w, status, oluerr.Code(code), err.Error())
+		return
+	}
+	resp := tsRangeResponse{Count: uint64(len(events)), Events: make([]tsEventResponse, len(events))}
+	for i, e := range events {
+		resp.Events[i] = eventToResponse(e)
+	}
+	s.tsWriteJSON(w, http.StatusOK, resp, limits.maxRespBytes)
+}
+
 // HandleTSLatest returns the N most recent events.
 //
 //	GET /api/v1/tenant/{tenant_id}/ts/events/latest

@@ -606,6 +606,7 @@ func (s *Server) setupRoutes() {
 					tsr.Post("/events", s.HandleTSAppend)
 					tsr.Post("/events/batch", s.HandleTSBatchAppend)
 					tsr.Get("/events", s.HandleTSQueryRange)
+					tsr.Post("/query/range", s.HandleTSQueryRangePost)
 					tsr.Get("/events/latest", s.HandleTSLatest)
 					// Aggregate
 					tsr.Post("/aggregate", s.HandleTSAggregate)

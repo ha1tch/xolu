@@ -24,6 +24,7 @@ package server_test
 // commit_ts_rollback_test.go.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -142,12 +143,11 @@ func newCommitTSEnv(t *testing.T, overrides func(*config.Config)) *commitTSEnv {
 
 func (e *commitTSEnv) registerTenant(name string) {
 	e.t.Helper()
-	// Use the HTTP API: POST /api/v1/tenant registers the tenant in strict mode.
-	status, _ := doJSONRequest(e.t, "POST",
-		fmt.Sprintf("%s/api/v1/tenant/%s", e.ts.URL, name), nil)
-	// 201 = created; 409 = already exists. Both are fine for test setup.
-	if status != http.StatusCreated && status != http.StatusConflict && status != http.StatusOK {
-		e.t.Logf("registerTenant %q returned %d (may be OK)", name, status)
+	// Register directly via the registry — no HTTP route exists for explicit
+	// tenant registration in strict mode. Mirrors tsEnv.registerTenant.
+	_, err := e.srv.TenantRegistry().GetOrRegister(context.Background(), name)
+	if err != nil {
+		e.t.Fatalf("registerTenant %q: %v", name, err)
 	}
 }
 
