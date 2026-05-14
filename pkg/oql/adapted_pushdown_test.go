@@ -239,6 +239,8 @@ func TestAdaptedPushDown(t *testing.T) {
 		{"WhereOr", "SELECT region, product FROM items WHERE region = 'north' OR region = 'south'"},
 		{"WhereLike", "SELECT region, product FROM items WHERE product LIKE 'gad%'"},
 		{"WhereBetween", "SELECT region, product, quantity FROM items WHERE quantity BETWEEN 20 AND 60"},
+		{"WhereBetween_string", "SELECT region, product, quantity FROM items WHERE product BETWEEN 'gadget' AND 'gizmo'"},
+		{"WhereNotBetween_string", "SELECT region, product FROM items WHERE product NOT BETWEEN 'gadget' AND 'gizmo'"},
 		{"WhereIn", "SELECT region, product FROM items WHERE region IN ('north', 'east')"},
 		{"WhereIsNull", "SELECT region, product FROM items WHERE unit_price IS NOT NULL"},
 		{"OrderByAsc", "SELECT region, product, quantity FROM items ORDER BY quantity"},

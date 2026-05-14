@@ -171,7 +171,13 @@ func DecodeValue(val []byte) (nums []float64, payload []byte, err error) {
 		if pos+plen > len(val) {
 			return nil, nil, fmt.Errorf("timeseries: DecodeValue: truncated at payload body")
 		}
-		payload = val[pos : pos+plen]
+		// Copy payload out of the Pebble-managed value buffer. iter.Value()
+		// returns a slice into Pebble's internal memory which is only valid
+		// for the current iterator position; retaining a sub-slice past
+		// iter.Close() or iter.Next() is undefined behaviour and produces
+		// corruption under concurrent access or race-detector timing.
+		payload = make([]byte, plen)
+		copy(payload, val[pos:pos+plen])
 	}
 	return nums, payload, nil
 }

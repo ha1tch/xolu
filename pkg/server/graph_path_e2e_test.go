@@ -502,6 +502,15 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 		betaWrites  = 30 // concurrent entity writes for beta
 	)
 
+	// Pre-warm both tenant stores with a single synchronous write each.
+	// storeForTenant opens the SQLite connection on first access; if many
+	// goroutines race to initialise the same cold tenant simultaneously
+	// (especially under -race timing) some opens fail with OLU-ST006.
+	// One synchronous write per tenant guarantees the store is cached before
+	// the concurrent goroutines start.
+	seedGraphEntity(t, s, "alpha", "anode", 0, map[string]interface{}{})
+	seedGraphEntity(t, s, "beta", "bnode", 0, map[string]interface{}{})
+
 	var wg sync.WaitGroup
 
 	// Concurrent alpha writes: node i has a REF to node i+1 (except last).
@@ -546,26 +555,25 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 	}
 	betaStats := decodeGraphJSON(t, wBeta)
 
-	// Alpha: alphaWrites nodes, alphaWrites-1 edges (linear chain).
+	// Alpha: alphaWrites+1 nodes (warm-up node 0 plus chain nodes 1..alphaWrites),
+	// alphaWrites-1 edges (chain: node 1→2→…→alphaWrites; node 0 is isolated).
 	alphaN := int(alphaStats["node_count"].(float64))
 	alphaE := int(alphaStats["edge_count"].(float64))
-	if alphaN != alphaWrites {
-		t.Errorf("alpha node count: want %d, got %d", alphaWrites, alphaN)
+	wantAlphaN := alphaWrites + 1
+	if alphaN != wantAlphaN {
+		t.Errorf("alpha node count: want %d, got %d", wantAlphaN, alphaN)
 	}
-	// Edges: each node i<alphaWrites has one outgoing next_ref edge.
-	// Due to concurrency some writes may overwrite earlier ones idempotently,
-	// but the chain must be complete. Accept alphaWrites-1 as the minimum;
-	// the maximum is also alphaWrites-1 (no node has >1 outgoing edge here).
 	wantEdges := alphaWrites - 1
 	if alphaE != wantEdges {
 		t.Errorf("alpha edge count: want %d, got %d", wantEdges, alphaE)
 	}
 
-	// Beta: betaWrites isolated nodes, 0 edges.
+	// Beta: betaWrites+1 isolated nodes (warm-up node 0 plus nodes 1..betaWrites), 0 edges.
 	betaN := int(betaStats["node_count"].(float64))
 	betaE := int(betaStats["edge_count"].(float64))
-	if betaN != betaWrites {
-		t.Errorf("beta node count: want %d, got %d", betaWrites, betaN)
+	wantBetaN := betaWrites + 1
+	if betaN != wantBetaN {
+		t.Errorf("beta node count: want %d, got %d", wantBetaN, betaN)
 	}
 	if betaE != 0 {
 		t.Errorf("beta edge count: want 0, got %d", betaE)
@@ -580,16 +588,16 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeCountForTenant(alpha): %v", err)
 	}
-	if graphAlphaN != alphaWrites {
-		t.Errorf("graph-layer alpha node count: want %d, got %d", alphaWrites, graphAlphaN)
+	if graphAlphaN != wantAlphaN {
+		t.Errorf("graph-layer alpha node count: want %d, got %d", wantAlphaN, graphAlphaN)
 	}
 
 	graphBetaN, err := s.graph.NodeCountForTenant(betaPrefix)
 	if err != nil {
 		t.Fatalf("NodeCountForTenant(beta): %v", err)
 	}
-	if graphBetaN != betaWrites {
-		t.Errorf("graph-layer beta node count: want %d, got %d", betaWrites, graphBetaN)
+	if graphBetaN != wantBetaN {
+		t.Errorf("graph-layer beta node count: want %d, got %d", wantBetaN, graphBetaN)
 	}
 
 	graphAlphaE, err := s.graph.EdgeCountForTenant(alphaPrefix)

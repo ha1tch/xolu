@@ -23,6 +23,7 @@ const (
 	PushLimit                         // Push TOP/LIMIT to storage
 	PushAggregate                     // Push GROUP BY + aggregates to storage (adapted tables only)
 	PushFull                          // Push entire SELECT to storage (adapted tables, fully translatable)
+	PushJoin                          // Push a two-table JOIN to SQLite
 )
 
 func (pd PushDecision) String() string {
@@ -39,6 +40,8 @@ func (pd PushDecision) String() string {
 		return "AGGREGATE"
 	case PushFull:
 		return "FULL"
+	case PushJoin:
+		return "JOIN"
 	default:
 		return fmt.Sprintf("PushDecision(%d)", int(pd))
 	}
@@ -51,6 +54,11 @@ type QueryPlan struct {
 	EstimatedN  int                      // Estimated input cardinality
 	BackendCaps storage.QueryCapabilities // What the backend can do
 	Reason      string                   // Human-readable explanation for debug log
+
+	// Join is non-nil when Push contains PushJoin.
+	Join         *joinSpec
+	LeftAdapted  bool // true when the left-side entity uses an adapted table
+	RightAdapted bool // true when the right-side entity uses an adapted table
 }
 
 // hasPush returns true if any operation is being pushed down.
@@ -198,6 +206,11 @@ func (p *Planner) effectiveProfile() *HardwareProfile {
 // For non-SELECT statements (UPDATE, DELETE), use PlanMutation.
 func (p *Planner) Plan(ctx context.Context, s *ast.SelectStatement, store storage.Store) QueryPlan {
 	entity := extractEntityFromSelect(s)
+
+	// --- JOIN path: two-table JOIN pushed entirely to SQLite ---
+	if js, err := extractJoinSpec(s); js != nil && err == nil {
+		return p.planJoin(ctx, s, js, store)
+	}
 
 	// --- Fast path: adapted entity push-down (no CountEntities needed) ---
 	if p.dialect != nil {
@@ -535,4 +548,231 @@ func isOrderByPushable(orderBy []*ast.OrderByItem) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// JOIN push-down helpers
+// ---------------------------------------------------------------------------
+
+// joinSpec holds the parsed components of a two-table JOIN FROM clause.
+type joinSpec struct {
+	LeftEntity  string              // e.g. "post"
+	LeftAlias   string              // e.g. "a" (falls back to entity name)
+	RightEntity string              // e.g. "author"
+	RightAlias  string              // e.g. "b"
+	JoinType    string              // "INNER", "LEFT", "RIGHT", "FULL"
+	Condition   *ast.InfixExpression // the ON a.x = b.y expression
+}
+
+// extractJoinSpec inspects a SelectStatement and returns a populated
+// joinSpec if the FROM clause is exactly one JoinClause with a simple
+// equality ON condition between two plain TableName references.
+// Returns (nil, nil) when the query is not a supported join shape — the
+// caller treats this as "not a join query" rather than an error.
+func extractJoinSpec(s *ast.SelectStatement) (*joinSpec, error) {
+	if s.From == nil || len(s.From.Tables) != 1 {
+		return nil, nil
+	}
+	jc, ok := s.From.Tables[0].(*ast.JoinClause)
+	if !ok {
+		return nil, nil
+	}
+
+	// Supported join types only; CROSS has no ON condition.
+	switch jc.Type {
+	case "INNER", "LEFT", "RIGHT", "FULL":
+		// supported
+	default:
+		return nil, nil
+	}
+
+	leftTable, ok := jc.Left.(*ast.TableName)
+	if !ok {
+		return nil, nil
+	}
+	rightTable, ok := jc.Right.(*ast.TableName)
+	if !ok {
+		return nil, nil
+	}
+
+	// ON condition must be a simple equality between two qualified identifiers.
+	cond, ok := jc.Condition.(*ast.InfixExpression)
+	if !ok || cond.Operator != "=" {
+		return nil, nil
+	}
+	_, lOk := cond.Left.(*ast.QualifiedIdentifier)
+	_, rOk := cond.Right.(*ast.QualifiedIdentifier)
+	if !lOk || !rOk {
+		return nil, nil
+	}
+
+	leftEntity := normalizeEntityName(leftTable.Name.String())
+	rightEntity := normalizeEntityName(rightTable.Name.String())
+
+	leftAlias := leftEntity
+	if leftTable.Alias != nil && leftTable.Alias.Value != "" {
+		leftAlias = leftTable.Alias.Value
+	}
+	rightAlias := rightEntity
+	if rightTable.Alias != nil && rightTable.Alias.Value != "" {
+		rightAlias = rightTable.Alias.Value
+	}
+
+	return &joinSpec{
+		LeftEntity:  leftEntity,
+		LeftAlias:   leftAlias,
+		RightEntity: rightEntity,
+		RightAlias:  rightAlias,
+		JoinType:    jc.Type,
+		Condition:   cond,
+	}, nil
+}
+
+// isJoinConditionPushable returns true if the ON condition is a simple
+// equality where both sides are qualified identifiers (alias.field) whose
+// table qualifiers belong to the known left or right alias.
+func isJoinConditionPushable(cond ast.Expression, leftAlias, rightAlias string) bool {
+	infix, ok := cond.(*ast.InfixExpression)
+	if !ok || infix.Operator != "=" {
+		return false
+	}
+	lqi, lOk := infix.Left.(*ast.QualifiedIdentifier)
+	rqi, rOk := infix.Right.(*ast.QualifiedIdentifier)
+	if !lOk || !rOk {
+		return false
+	}
+	lTable := qualifiedTable(lqi)
+	rTable := qualifiedTable(rqi)
+	known := map[string]bool{leftAlias: true, rightAlias: true}
+	return known[lTable] && known[rTable]
+}
+
+// isJoinWherePushable is the same as isWherePushable but additionally
+// accepts QualifiedIdentifiers of the form alias.field as valid left-hand
+// field references (the join aliases qualify both sides).
+func isJoinWherePushable(expr ast.Expression, leftAlias, rightAlias string) bool {
+	aliases := map[string]bool{leftAlias: true, rightAlias: true}
+	var walk func(ast.Expression) bool
+	walk = func(e ast.Expression) bool {
+		switch ex := e.(type) {
+		case *ast.InfixExpression:
+			switch ex.Operator {
+			case "AND", "OR":
+				return walk(ex.Left) && walk(ex.Right)
+			default:
+				return isJoinField(ex.Left, aliases) && isLiteralOrParam(ex.Right)
+			}
+		case *ast.PrefixExpression:
+			if ex.Operator == "NOT" {
+				return walk(ex.Right)
+			}
+			return false
+		case *ast.IsNullExpression:
+			return isJoinField(ex.Expr, aliases)
+		case *ast.BetweenExpression:
+			return isJoinField(ex.Expr, aliases) && isLiteralOrParam(ex.Low) && isLiteralOrParam(ex.High)
+		case *ast.InExpression:
+			if !isJoinField(ex.Expr, aliases) {
+				return false
+			}
+			for _, v := range ex.Values {
+				if !isLiteralOrParam(v) {
+					return false
+				}
+			}
+			return true
+		case *ast.LikeExpression:
+			return isJoinField(ex.Expr, aliases) && isLiteralOrParam(ex.Pattern)
+		default:
+			return false
+		}
+	}
+	return walk(expr)
+}
+
+// isJoinField returns true if expr is a simple Identifier or a
+// QualifiedIdentifier whose table qualifier is one of the join aliases.
+func isJoinField(expr ast.Expression, aliases map[string]bool) bool {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return true
+	case *ast.QualifiedIdentifier:
+		return aliases[qualifiedTable(e)]
+	default:
+		return false
+	}
+}
+
+// qualifiedTable extracts the table/alias part from a QualifiedIdentifier
+// (the first part of a dotted name, e.g. "a" from "a.field").
+func qualifiedTable(qi *ast.QualifiedIdentifier) string {
+	if len(qi.Parts) >= 2 {
+		return qi.Parts[0].Value
+	}
+	return ""
+}
+
+// qualifiedField extracts the field part from a QualifiedIdentifier
+// (the last part of a dotted name, e.g. "field" from "a.field").
+func qualifiedField(qi *ast.QualifiedIdentifier) string {
+	if len(qi.Parts) >= 2 {
+		return qi.Parts[len(qi.Parts)-1].Value
+	}
+	return qi.String()
+}
+
+// planJoin attempts to build a PushJoin plan for a two-table join query.
+// Returns PushNone with a reason if push-down is not possible.
+func (p *Planner) planJoin(ctx context.Context, s *ast.SelectStatement, js *joinSpec, store storage.Store) QueryPlan {
+	noPush := func(reason string) QueryPlan {
+		log.Debug().
+			Str("leftEntity", js.LeftEntity).
+			Str("rightEntity", js.RightEntity).
+			Str("push", "none").
+			Str("reason", reason).
+			Msg("Query planner: join")
+		return QueryPlan{
+			Push:   []PushDecision{PushNone},
+			Reason: reason,
+		}
+	}
+
+	aggStore, ok := store.(storage.AggregateQueryable)
+	if !ok {
+		return noPush("store does not support AggregateQueryable")
+	}
+
+	leftAdapted := aggStore.IsAdaptedEntity(js.LeftEntity)
+	rightAdapted := aggStore.IsAdaptedEntity(js.RightEntity)
+
+	if !isJoinConditionPushable(js.Condition, js.LeftAlias, js.RightAlias) {
+		return noPush("ON condition is not a simple qualified-field equality")
+	}
+
+	if s.Where != nil && !isJoinWherePushable(s.Where, js.LeftAlias, js.RightAlias) {
+		return noPush("WHERE clause contains non-pushable expressions for join")
+	}
+
+	plan := QueryPlan{
+		Push: []PushDecision{PushJoin},
+		Reason: fmt.Sprintf(
+			"join %s(%s) %s %s(%s): left_adapted=%v right_adapted=%v",
+			js.LeftEntity, js.LeftAlias, js.JoinType,
+			js.RightEntity, js.RightAlias,
+			leftAdapted, rightAdapted,
+		),
+		Join:         js,
+		LeftAdapted:  leftAdapted,
+		RightAdapted: rightAdapted,
+	}
+	log.Debug().
+		Str("leftEntity", js.LeftEntity).
+		Str("rightEntity", js.RightEntity).
+		Str("joinType", js.JoinType).
+		Bool("leftAdapted", leftAdapted).
+		Bool("rightAdapted", rightAdapted).
+		Str("push", plan.pushNames()).
+		Str("reason", plan.Reason).
+		Msg("Query planner: join")
+	return plan
 }

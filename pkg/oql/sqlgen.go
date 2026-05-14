@@ -31,6 +31,15 @@ type SQLDialect interface {
 	// For Postgres: CAST(data->>'field' AS NUMERIC)
 	JSONFieldNumeric(fieldPath string) string
 
+	// JSONFieldAliased emits a field extraction from the JSON data column
+	// where the data column is qualified by a table alias. Used in JOIN
+	// queries where both sides reference the same physical table (entities)
+	// under different aliases. The alias qualifies the data column, not the
+	// whole expression.
+	// For SQLite: json_extract(alias.data, '$.field')
+	// For Postgres: alias.data->>'field'
+	JSONFieldAliased(alias, fieldPath string) string
+
 	// Placeholder emits a parameter placeholder for the n-th argument (1-based).
 	// For SQLite: ?
 	// For Postgres: $1, $2, ...
@@ -81,6 +90,10 @@ func (d *SQLiteDialect) JSONField(fieldPath string) string {
 
 func (d *SQLiteDialect) JSONFieldNumeric(fieldPath string) string {
 	return fmt.Sprintf("CAST(json_extract(data, '$.%s') AS REAL)", fieldPath)
+}
+
+func (d *SQLiteDialect) JSONFieldAliased(alias, fieldPath string) string {
+	return fmt.Sprintf("json_extract(%s.data, '$.%s')", alias, fieldPath)
 }
 
 func (d *SQLiteDialect) Placeholder(_ int) string {
@@ -313,8 +326,19 @@ func (g *SQLGenerator) translateExpr(expr ast.Expression) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// BETWEEN always uses numeric comparison (range implies ordering)
-		jsonField := g.dialect.JSONFieldNumeric(field)
+		// Choose the field extraction based on bound types.
+		// When both bounds are numeric, use JSONFieldNumeric (CAST AS REAL) so
+		// that stored numeric strings sort numerically. When either bound is a
+		// string, use JSONField (no cast) so that lexicographic ordering is
+		// preserved — CAST(date_string AS REAL) silently coerces to the year
+		// portion (e.g. "2025-06-01" → 2025.0), making all date strings within
+		// the same year compare equal and producing incorrect results.
+		var jsonField string
+		if isNumericValue(lowVal) && isNumericValue(highVal) {
+			jsonField = g.dialect.JSONFieldNumeric(field)
+		} else {
+			jsonField = g.dialect.JSONField(field)
+		}
 		lowPh := g.addArg(lowVal)
 		highPh := g.addArg(highVal)
 		sql := fmt.Sprintf("%s BETWEEN %s AND %s", jsonField, lowPh, highPh)

@@ -2121,23 +2121,43 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 	return &PagedResult{Data: results, TotalItems: total}, nil
 }
 
-// ListEntities returns all distinct entity types in the database
+// ListEntities returns all distinct entity types in the database.
+// It unions blob entities (from the entities table) with adapted entities
+// (from the in-memory registry), so that adapted entity types are visible
+// to the OQL validator even when they have no blob rows.
 func (s *SQLiteStore) ListEntities(ctx context.Context) ([]string, error) {
-
-	rows, err := s.readDB.QueryContext(ctx, "SELECT DISTINCT entity_type FROM entities WHERE tenant_id = ? ORDER BY entity_type", int(s.config.TenantID))
+	rows, err := s.readDB.QueryContext(ctx,
+		"SELECT DISTINCT entity_type FROM entities WHERE tenant_id = ? ORDER BY entity_type",
+		int(s.config.TenantID))
 	if err != nil {
 		return nil, fmt.Errorf("query entity types: %w", err)
 	}
 	defer rows.Close()
 
+	seen := map[string]bool{}
 	var entities []string
 	for rows.Next() {
 		var entityType string
 		if err := rows.Scan(&entityType); err != nil {
 			return nil, fmt.Errorf("scan entity type: %w", err)
 		}
-		entities = append(entities, entityType)
+		if !seen[entityType] {
+			seen[entityType] = true
+			entities = append(entities, entityType)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	return entities, rows.Err()
+	// Also include adapted entities — they live in separate tables and
+	// have no rows in the entities table, so the query above misses them.
+	for _, name := range s.adapted.Entities() {
+		if !seen[name] {
+			seen[name] = true
+			entities = append(entities, name)
+		}
+	}
+
+	return entities, nil
 }

@@ -1,6 +1,6 @@
 # OQL API Documentation
 
-**Version:** 0.8.0  
+**Version:** 0.9.7  
 **Status:** Active
 
 OQL (Olu Query Language) provides SQL-compatible query and mutation capabilities for olu. It uses a subset of T-SQL syntax powered by the [tsqlparser](https://github.com/ha1tch/tsqlparser) library.
@@ -267,6 +267,114 @@ DELETE FROM items WHERE category_id = 5 AND last_value < '2024-01-01'
 
 ---
 
+## JOIN Queries
+
+OQL supports two-table joins when the store backend is SQLite. All four standard
+join types are pushed to SQLite as a single SQL statement — no application-side
+stitching.
+
+### Supported join types
+
+| Type | Keyword | Behaviour |
+|------|---------|-----------|
+| Inner join | `INNER JOIN` or `JOIN` | Only rows with a match on both sides |
+| Left outer join | `LEFT JOIN` | All left rows; NULL for right fields when no match |
+| Right outer join | `RIGHT JOIN` | All right rows; NULL for left fields when no match |
+| Full outer join | `FULL JOIN` or `FULL OUTER JOIN` | All rows from both sides; NULL for unmatched |
+
+### Syntax
+
+```sql
+SELECT <alias>.<field> [AS <alias>], ...
+FROM   <left_entity>  [AS <alias>]
+{INNER | LEFT | RIGHT | FULL [OUTER]} JOIN
+       <right_entity> [AS <alias>]
+ON     <alias>.<field> = <alias>.<field>
+[WHERE ...]
+```
+
+The `ON` condition must be a simple equality between two qualified field
+references (`alias.field = alias.field`). Compound ON conditions and
+non-equality comparisons are not supported.
+
+Both table references must be plain entity names. Subqueries and derived
+tables in the FROM clause are rejected by the validator.
+
+### Entity classification
+
+Each entity in a join is classified independently:
+
+- **Adapted entity** (registered with a schema via `POST /api/v1/schema/<entity>`):
+  fields are accessed as native SQL columns.
+- **Blob entity** (no schema registration): fields are accessed via
+  `json_extract`.
+
+Mixed joins (one adapted, one blob) are supported. The two classifications
+can be combined freely.
+
+### Examples
+
+```sql
+-- INNER JOIN: published posts with author names
+SELECT a.title, b.name AS author
+FROM   posts AS a
+INNER JOIN authors AS b ON a.author_id = b.id
+WHERE  a.status = 'published'
+
+-- LEFT JOIN: all customers, orders where they exist
+SELECT b.name, a.amount
+FROM   orders AS a
+RIGHT JOIN customers AS b ON a.customer_id = b.id
+
+-- Blob entities (no schema registered)
+SELECT a.post_id, b.label
+FROM   tag_links AS a
+INNER JOIN tags AS b ON a.tag_id = b.id
+WHERE  b.label = 'go'
+```
+
+### Column aliases in results
+
+Result row keys are determined by the column alias:
+
+- With an explicit `AS alias`: the result key is `alias`.
+- Without `AS`: the result key is the bare field name (`title`, not `a.title`).
+
+Use explicit `AS` aliases when field names are ambiguous across both entities:
+
+```sql
+SELECT a.name AS post_name, b.name AS author_name
+FROM   posts AS a
+INNER JOIN authors AS b ON a.author_id = b.id
+```
+
+### Constraints and unsupported forms
+
+- **Two tables only.** Three-or-more-table joins are not supported.
+- **Plain table names only.** Subquery tables (`(SELECT ...) AS t`) are rejected.
+- **Simple ON condition.** The `ON` clause must be a single equality between
+  two qualified identifiers. Compound conditions (`ON a.x = b.y AND a.z = b.w`)
+  are not supported.
+- **SQLite store only.** JOIN push-down requires the SQLite backend. The
+  JSON-file backend does not support JOINs.
+- **CROSS JOIN is not supported.** Use a filtered INNER JOIN instead.
+
+### JOIN vs Sulpher
+
+JOINs address flat correlation: "give me posts with their author name." Use
+Sulpher when the question involves graph structure — variable-depth
+traversals, path finding, cycle detection, or multi-hop relationships.
+
+| Query shape | Use |
+|-------------|-----|
+| Posts with author name | OQL JOIN |
+| All users reachable within 3 hops from user 42 | Sulpher |
+| Orders joined to customers | OQL JOIN |
+| Shortest path between two nodes | Sulpher |
+
+
+---
+
 ## Limitations
 
 | Feature | Status |
@@ -278,7 +386,13 @@ DELETE FROM items WHERE category_id = 5 AND last_value < '2024-01-01'
 | GROUP BY, HAVING | ✓ Supported |
 | ORDER BY, TOP | ✓ Supported |
 | DISTINCT | ✓ Supported |
-| JOINs | ✗ Not supported (use Sulpher for relationships) |
+| INNER JOIN | ✓ Supported (SQLite store only) |
+| LEFT JOIN | ✓ Supported (SQLite store only) |
+| RIGHT JOIN | ✓ Supported (SQLite store only) |
+| FULL OUTER JOIN | ✓ Supported (SQLite store only) |
+| CROSS JOIN | ✗ Not supported |
+| Three-or-more-table joins | ✗ Not supported |
+| JOIN with subquery table | ✗ Not supported |
 | Subqueries | ✗ Not supported |
 | INSERT ... SELECT | ✗ Not supported |
 | UPDATE without WHERE | ✗ Rejected |
@@ -378,6 +492,7 @@ curl http://localhost:8080/api/v1/oql/query/$QUERY_ID/result
 | Bulk update/delete | OQL |
 | Batch insert | OQL |
 | Find paths between nodes | Sulpher |
+| Flat cross-entity correlation | OQL JOIN |
 | Traverse relationships | Sulpher |
 | Variable-length paths | Sulpher |
 | Graph pattern matching | Sulpher |

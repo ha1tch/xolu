@@ -32,12 +32,20 @@ prerequisites for adding a second storage backend, which is not planned.
 | PostgreSQL backend | `StorageDialect` implementation, connection pooling, JSONB extraction, native decimal aggregation. | Large | Business need for PostgreSQL |
 
 
-## Future work: JOIN push-down (exploration)
+## JOIN push-down — implemented in v0.9.7-patched89/90
 
-OQL currently validates that queries reference exactly one table
-(`validator.go`, line 137: `len(s.From.Tables) != 1`). Cross-entity
-queries require multiple round trips through OQL and manual client-side
-stitching, or use of the graph API for traversal.
+JOIN push-down was implemented in v0.9.7-patched89 (design, planner, SQL
+generator, executor, validator) and v0.9.7-patched90/91 (integration tests,
+five bug fixes). The section below is preserved as a record of the design
+analysis; the recommendations were followed. See `docs/OQL_JOIN_PUSHDOWN.md`
+for the implementation specification and `docs/OQL_API.md` for the user-facing
+documentation.
+
+The original analysis noted that OQL validated that queries reference exactly
+one table (`validator.go`, `len(s.From.Tables) != 1`). That constraint has
+been relaxed to allow two-table JoinClause FROM clauses. Cross-entity queries
+no longer require multiple round trips or graph API traversal for the flat
+correlational case.
 
 Both adapted entities live in the same SQLite database as `olu_{entity}`
 tables with extracted columns. SQLite can JOIN them natively. This
@@ -48,10 +56,10 @@ section captures the design analysis for potential JOIN support.
 | Component | Work | Complexity |
 |---|---|---|
 | Relationship metadata | Schema annotations declaring foreign-key mappings between adapted entities (e.g., `orders.customer_id` references `customers.id`). The graph layer knows *that* entities relate but not *how* at the field level. | New concept |
-| Validator relaxation | Allow 2+ tables in FROM when all referenced entities are adapted and have declared relationships. | Small |
-| SQL generation | Extend `sqlgen_adapted.go` to emit `FROM olu_orders JOIN olu_customers ON ...`. Mechanical extension of existing generators. | Medium |
-| Planner extension | Complexity estimator must account for JOIN cost. The EXPLAIN-based approach extends naturally — SQLite reports nested loop vs index lookup for JOINs. | Medium |
-| Alias/qualification | Column references must be qualified (`orders.amount`, `customers.name`) to avoid ambiguity. Requires AST-level awareness in projection, WHERE, ORDER BY, GROUP BY. | Medium |
+| Validator relaxation | Allow 2+ tables in FROM when all referenced entities are adapted and have declared relationships. | ✓ Done |
+| SQL generation | New `sqlgen_join.go` (not an extension of `sqlgen_adapted.go` — self-contained file). Handles all four entity combinations (both adapted, mixed, both blob). | ✓ Done |
+| Planner extension | New `planJoin` method and `PushJoin` decision; joins the existing planner decision chain. Complexity gating not applied (join cardinality is naturally bounded). | ✓ Done |
+| Alias/qualification | `joinColumnAlias` strips table qualifier for bare field aliases; `joinFieldRef` resolves per-entity adapted/blob classification. | ✓ Done |
 
 ### The backend-compatibility tension
 
@@ -72,18 +80,17 @@ without building an in-memory join engine.
 | 2. Build Go-path join | Nested-loop join in Go: List entity A, for each row look up entity B by key | Correct but slow; maintenance burden for a backend already 12x slower on simple searches |
 | 3. Deprecate JSON backend | JOINs become the forcing function for SQLite-only | Clean but removes the zero-dependency mode useful for debugging and tiny deployments |
 
-**Recommended path**: Option 1 (SQLite-only JOINs) with a long-term
-lean toward option 3. The JSON backend retains value as a
-zero-dependency mode, but trying to maintain feature parity across
-both backends will drag development pace as query capabilities grow.
+**Chosen path**: Option 1 (SQLite-only JOINs). The JSON backend retains
+value as a zero-dependency mode for debugging and tiny deployments.
+The validator rejects JOIN queries on the JSON-file backend with a clear error.
 
 ### Entity combination matrix
 
-| Left | Right | JOIN feasibility |
-|---|---|---|
-| Adapted | Adapted | Full push-down — both have extracted columns in SQLite |
-| Adapted | Blob | Partial — push adapted side, materialise, client-side match on blob |
-| Blob | Blob | No push-down — neither side has columns to join on |
+| Left | Right | JOIN feasibility | Implemented |
+|---|---|---|---|
+| Adapted | Adapted | Full push-down — both have extracted columns in SQLite | ✓ Yes |
+| Adapted | Blob | Mixed — adapted side uses native columns, blob side uses `json_extract(alias.data, ...)` | ✓ Yes |
+| Blob | Blob | Both sides use `entities` table under separate aliases, `json_extract` throughout | ✓ Yes |
 
 ### Relationship with the graph layer
 
@@ -95,8 +102,10 @@ trips through OQL + graph is unnecessary overhead.
 
 ### Status
 
-Exploration only. No implementation planned for v0.9.x. This section
-exists to capture the analysis so it does not need to be re-derived.
+**Implemented.** Design, planner, SQL generator, executor, validator, and full
+test suite (planner unit tests, SQL generator golden tests, server integration
+tests, regression tests for five bugs found during integration) completed in
+v0.9.7-patched89 through v0.9.7-patched91.
 
 
 ## Architecture rules

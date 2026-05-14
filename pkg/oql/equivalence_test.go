@@ -237,6 +237,14 @@ func TestEquivalence(t *testing.T) {
 		{"EmptyResult", "SELECT * FROM sensors WHERE status = 'nonexistent_status'", false},
 		{"SelectSpecificColumns", "SELECT code, status, value FROM sensors WHERE status = 'active'", false},
 		{"NotBetween", "SELECT * FROM sensors WHERE value NOT BETWEEN 200.0 AND 400.0", false},
+		// String BETWEEN: regression test for silent numeric coercion.
+		// ISO-8601 timestamps are stored as strings. CAST(ts AS REAL) on
+		// "2026-02-15T..." yields 2026.0 for every row, so the old code
+		// returned 0 rows for any date range. Correct output requires text
+		// comparison (no CAST), which is what the fix produces.
+		{"StringBetween_timestamps", "SELECT * FROM readings WHERE timestamp BETWEEN '2026-02-05T00:00:00Z' AND '2026-02-15T00:00:00Z'", false},
+		{"StringNotBetween_timestamps", "SELECT * FROM readings WHERE timestamp NOT BETWEEN '2026-02-01T00:00:00Z' AND '2026-02-10T00:00:00Z'", false},
+		{"StringBetween_codes", "SELECT * FROM sensors WHERE code BETWEEN 'SENS-0100' AND 'SENS-0200'", false},
 		{"NotIn", "SELECT * FROM sensors WHERE status NOT IN ('inactive', 'decommissioned')", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -88,7 +88,7 @@ func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig) (Store, erro
 		pcfg.MaxOpenFiles = 500
 	}
 
-	pebbleDir := filepath.Join(dir, "pebble")
+	tsDir := filepath.Join(dir, "db")
 	opts := &pebble.Options{
 		MaxOpenFiles:          pcfg.MaxOpenFiles,
 		MemTableSize:          uint64(pcfg.MemtableSize),
@@ -104,9 +104,9 @@ func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig) (Store, erro
 		opts.Levels = []pebble.LevelOptions{{Compression: pebble.NoCompression, BlockSize: pcfg.BlockSize}}
 	}
 
-	db, err := pebble.Open(pebbleDir, opts)
+	db, err := pebble.Open(tsDir, opts)
 	if err != nil {
-		return nil, fmt.Errorf("ts: pebble open %s: %w", pebbleDir, err)
+		return nil, fmt.Errorf("ts: open %s: %w", tsDir, err)
 	}
 
 	s := &PebbleStore{

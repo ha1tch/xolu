@@ -173,6 +173,30 @@ if [ "$CHANGELOG_TOP" != "$VERSION" ]; then
 fi
 ok "All version strings consistent: $VERSION"
 
+# 9. Clean test artifacts from pkg/ before zipping.
+# Some tests write SQLite databases and other artifacts relative to
+# their package directory rather than a temp dir. Clean all known
+# patterns from every subdirectory of pkg/ so the working tree stays
+# tidy after a release run.
+step "Cleaning test artifacts"
+find pkg/ -type f \( \
+    -name "*.db"          -o \
+    -name "*.db-wal"      -o \
+    -name "*.db-shm"      -o \
+    -name "*.db-journal"  -o \
+    -name "*.db-tmp"      -o \
+    -name "*-wal"         -o \
+    -name "*-shm"         -o \
+    -name "*-journal"     -o \
+    -name "graph.data"    -o \
+    -name "graph.index"   -o \
+    -name "*.golden"      -o \
+    -name "*.pprof"       -o \
+    -name "*.prof"        -o \
+    -name "*.test"        \
+\) -delete 2>/dev/null || true
+ok "Test artifacts removed"
+
 # 9. Cut zip
 if $CUT_ZIP; then
     step "Cutting checkpoint"
@@ -194,16 +218,20 @@ if $CUT_ZIP; then
     [ -f TS_PROGRESS.md ] && ZIP_SOURCES+=(TS_PROGRESS.md)
 
     zip -X -r "$ZIPNAME" "${ZIP_SOURCES[@]}" \
-        -x "*.db" -x "*.db-shm" -x "*.db-wal" -x "*.db-journal" -x "*.tmp" \
-        -x "test-output.json" -x "test-errors.txt" -x "cover.out" -x "cover-summary.txt" \
-        -x "*.so" -x "*.dylib" -x "*.dll" -x "*.exe" -x "*.a" -x "*.o" \
+        -x "*.db"         -x "*.db-wal"     -x "*.db-shm"    -x "*.db-journal" -x "*.db-tmp" \
+        -x "*-wal"        -x "*-shm"        -x "*-journal"   \
+        -x "graph.data"   -x "graph.index"  \
+        -x "*.golden"     -x "*.pprof"      -x "*.prof"      -x "*.test" \
+        -x "*.tmp"        -x "test-output.json" -x "test-errors.txt" \
+        -x "cover.out"    -x "cover-summary.txt" \
+        -x "*.so"         -x "*.dylib"      -x "*.dll"       -x "*.exe" -x "*.a" -x "*.o" \
         > /dev/null 2>&1
 
     # Post-zip sanity checks.
 
-    # 1. No database files.
-    DB_COUNT=$(unzip -l "$ZIPNAME" | grep -cE '\.db$|\.db-shm$|\.db-wal$' || true)
-    [ "$DB_COUNT" -gt 0 ] && fail "Checkpoint contains $DB_COUNT .db file(s)"
+    # 1. No database or test artifact files.
+    DB_COUNT=$(unzip -l "$ZIPNAME" | grep -cE '\.db$|\.db-wal$|\.db-shm$|\.db-journal$|\.db-tmp$|-wal$|-shm$|-journal$|graph\.data$|graph\.index$|\.golden$|\.pprof$|\.prof$|\.test$' || true)
+    [ "$DB_COUNT" -gt 0 ] && fail "Checkpoint contains $DB_COUNT test artifact file(s)"
 
     # 2. No ELF/Mach-O/PE binaries (sniff magic bytes via xxd + unzip -p).
     #    We test only the first 4 bytes of each entry; this catches compiled

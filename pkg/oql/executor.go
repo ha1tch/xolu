@@ -224,6 +224,32 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		}
 		fetched = true
 
+	case plan.pushed(PushJoin):
+		// JOIN push-down: translate the two-table SELECT into a single SQL
+		// statement. No Go-path fallback — if push-down fails, return an error.
+		aggStore, ok := e.store.(storage.AggregateQueryable)
+		if !ok {
+			return nil, fmt.Errorf("JOIN queries require a store that implements AggregateQueryable")
+		}
+		joinSQL, genErr := GenerateJoinSQL(s, plan, sqlTID, aggStore, e.dialect)
+		if genErr != nil {
+			return nil, fmt.Errorf("JOIN SQL generation failed: %w", genErr)
+		}
+		joinRecords, queryErr := aggStore.AggregateQuery(ctx, joinSQL.SQL, joinSQL.Args, joinSQL.Aliases)
+		if queryErr != nil {
+			log.Debug().Err(queryErr).Str("sql", joinSQL.SQL).Msg("JOIN push-down query failed")
+			return nil, fmt.Errorf("JOIN query failed: %w", queryErr)
+		}
+		// Guard against NULL blob rows from outer joins — treat as empty map.
+		for i, rec := range joinRecords {
+			if rec == nil {
+				joinRecords[i] = map[string]interface{}{}
+			}
+		}
+		records = joinRecords
+		scanned = len(records)
+		fetched = true
+
 	case plan.hasPush() && e.dialect != nil:
 		// Blob push-down: generate SQL for pushed operations (WHERE, ORDER BY,
 		// LIMIT) against the entities table using json_extract().
@@ -337,7 +363,16 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 	}
 
 	// 9. Project columns
-	rows := e.projectColumns(records, s.Columns)
+	// For PushJoin the records are already correctly shaped by AggregateQuery
+	// using joinSQL.Aliases — projectColumns would re-key them using
+	// columnAlias (which returns "a.title" for qualified identifiers without
+	// an explicit AS), producing duplicate qualified keys. Skip it.
+	var rows []map[string]interface{}
+	if plan.pushed(PushJoin) {
+		rows = records
+	} else {
+		rows = e.projectColumns(records, s.Columns)
+	}
 
 	return NewSelectResult(rows, scanned, time.Since(startTime)), nil
 }

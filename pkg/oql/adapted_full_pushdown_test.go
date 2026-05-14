@@ -203,6 +203,11 @@ func TestFullPD(t *testing.T) {
 		{"WhereOr", "SELECT region, quantity FROM items WHERE region = 'north' OR region = 'south'"},
 		{"WhereLike", "SELECT region, product FROM items WHERE product LIKE 'gad%'"},
 		{"WhereBetween", "SELECT region, quantity FROM items WHERE quantity BETWEEN 20 AND 40"},
+		// String BETWEEN on a native adapted column: must produce correct results
+		// without any CAST. "gadget" < "gizmo" < "widget" lexicographically, so
+		// this range selects "gadget" and "gizmo" but not "widget" or others.
+		{"WhereBetween_string", "SELECT region, product, quantity FROM items WHERE product BETWEEN 'gadget' AND 'gizmo'"},
+		{"WhereBetween_string_notbetween", "SELECT region, product FROM items WHERE product NOT BETWEEN 'gadget' AND 'gizmo'"},
 		{"WhereIn", "SELECT region, product, quantity FROM items WHERE region IN ('north', 'east')"},
 		{"WhereIsNull", "SELECT region, product FROM items WHERE category IS NOT NULL"},
 		{"Distinct", "SELECT DISTINCT region FROM items"},

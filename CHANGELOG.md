@@ -4,6 +4,353 @@ All notable changes to olu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.7-patched95] - 2026-05-14
+
+### Fix — release.sh cleans all test artifact types from pkg/ before packaging
+
+Some tests write SQLite files and other artifacts relative to their package
+directory. `release.sh` now removes all known patterns from every subdirectory
+of `pkg/` before zipping, and excludes all the same patterns from the zip.
+
+**Cleaned and excluded:**
+
+| Pattern | What it is |
+|---|---|
+| `*.db`, `*.db-wal`, `*.db-shm`, `*.db-journal`, `*.db-tmp` | SQLite database + WAL sidecars |
+| `*-wal`, `*-shm`, `*-journal` | SQLite sidecars without `.db` base (some drivers) |
+| `graph.data`, `graph.index` | FlatGraph persistence files (default from `config.Default()`) |
+| `*.golden`, `*.pprof`, `*.prof`, `*.test` | Go test output formats |
+
+The post-zip sanity check was also widened to catch any of these patterns
+if they somehow slip through the exclusions.
+
+
+## [0.9.7-patched94] - 2026-05-14
+
+### Tests — complete BETWEEN coverage across all three execution paths
+
+patched93 added string BETWEEN tests for the Go path and the blob
+push-down path. This patch adds the adapted entity paths, completing
+the matrix.
+
+| Path | Numeric BETWEEN | String BETWEEN |
+|---|---|---|
+| Go path | ✓ pre-existing | ✓ added in patched93 |
+| Blob push-down (`PushWhere` / `json_extract`) | ✓ pre-existing | ✓ added in patched93 |
+| Adapted full push-down (`PushFull` / native columns) | ✓ pre-existing | ✓ added here |
+| Adapted aggregate push-down (`PushAggregate`) | ✓ pre-existing | ✓ added here |
+
+New test cases:
+
+`TestFullPD/WhereBetween_string` and `TestFullPD/WhereBetween_string_notbetween`
+(`adapted_full_pushdown_test.go`) — `product BETWEEN 'gadget' AND 'gizmo'`
+on the adapted `items` entity. The adapted path uses native SQL columns with
+no CAST, so the code was correct; the test makes that claim testable.
+
+`TestAdaptedPushDown/WhereBetween_string` and
+`TestAdaptedPushDown/WhereNotBetween_string`
+(`adapted_pushdown_test.go`) — same query through the Go vs adapted
+comparative harness.
+
+All tests are equivalence-style: they run the same query through the Go path
+and the push-down path and assert identical result sets.
+
+
+## [0.9.7-patched93] - 2026-05-14
+
+### Fix — BETWEEN with string bounds silently coerced to REAL, returning wrong results
+
+**Bug:** `sqlgen.go` used `JSONFieldNumeric` (i.e. `CAST(json_extract(data,
+'$.field') AS REAL)`) for every BETWEEN expression, regardless of whether the
+bounds were numeric or string literals. SQLite's CAST of a date string like
+`"2026-02-15T00:00:00Z"` to REAL yields `2026.0` (the leading numeric prefix)
+for every value in the same year. The result: any query of the form
+`WHERE timestamp BETWEEN '2026-01-01' AND '2026-06-30'` returned zero rows,
+with no error message.
+
+The Go evaluation path (`compareValues` in `aggregator.go`) was unaffected —
+it tries numeric parsing and falls back to string comparison, so Go-path and
+push-down path diverged silently on the same query.
+
+**Root cause:** The comment `// BETWEEN always uses numeric comparison (range
+implies ordering)` was wrong. Lexicographic ordering is valid for strings;
+ISO-8601 timestamps and zero-padded codes (SENS-0001, SENS-0200) compare
+correctly without any cast.
+
+**Fix (`pkg/oql/sqlgen.go`):** Inspect the types of the low and high bound
+literals. When both bounds are numeric (`int`, `int64`, `float64`, `float32`),
+use `JSONFieldNumeric` as before. When either bound is a string, use
+`JSONField` (no CAST). This matches the logic already in `chooseFieldExtraction`
+for `>`, `<`, `>=`, `<=` operators.
+
+**Tests added:**
+
+`TestSQLGen_BetweenStringBoundsUseTextExtraction` (`pkg/oql/sqlgen_test.go`) —
+four sub-tests asserting the generated SQL contains `json_extract(...) BETWEEN`
+(no CAST) for string bounds, and `CAST(... AS REAL) BETWEEN` for numeric
+bounds. Includes NOT BETWEEN and mixed-name cases.
+
+Three sub-tests added to `TestEquivalence` (`pkg/oql/equivalence_test.go`):
+- `StringBetween_timestamps` — ISO-8601 timestamp range against the `readings`
+  entity. Would have returned 0 rows from push-down before the fix.
+- `StringNotBetween_timestamps` — NOT BETWEEN on timestamps.
+- `StringBetween_codes` — zero-padded code strings (`SENS-0100` to `SENS-0200`).
+
+These are equivalence tests: they assert Go-path and push-down produce
+identical result sets, so any future regression in type-aware field extraction
+will be caught immediately.
+
+
+## [0.9.7-patched92] - 2026-05-14
+
+### Docs — JOIN support documented, stale "not supported" language removed
+
+Updated all locations that stated or implied OQL does not support JOIN
+statements.
+
+**`docs/OQL_API.md`** (primary user doc):
+- Version bumped to 0.9.7.
+- Limitations table: four JOIN rows now show ✓ Supported (INNER, LEFT, RIGHT,
+  FULL OUTER); CROSS JOIN and three-table joins explicitly marked ✗ Not
+  supported; subquery tables in FROM added as ✗.
+- New "JOIN Queries" section added before Limitations, covering: supported join
+  types, syntax, entity classification (adapted vs blob), examples for all
+  cases (both adapted, blob entities, right join with nulls), column alias
+  rules, constraints, and a JOIN vs Sulpher decision table.
+- "When to Use OQL vs Sulpher" table: added "Flat cross-entity correlation →
+  OQL JOIN" row.
+
+**`docs/QUERY_OPTIMISATION_PROGRESS.md`**:
+- Section renamed from "Future work: JOIN push-down (exploration)" to
+  "JOIN push-down — implemented in v0.9.7-patched89/90".
+- Opening paragraph updated to describe what was built and where to find the
+  spec and user docs.
+- "What would be needed" table: all four rows marked ✓ Done.
+- Entity combination matrix: all three combinations (adapted+adapted,
+  adapted+blob, blob+blob) marked ✓ Yes (blob-to-blob feasibility corrected
+  from "No push-down" to implemented).
+- Status block changed from "Exploration only. No implementation planned"
+  to "Implemented."
+
+**`docs/QUERY_PLANNER.md`**:
+- Section 13 future-work table: two JOIN rows collapsed into one marked
+  "Implemented in v0.9.7-patched89–91."
+
+**`pkg/oql/oql.go`** (package comment):
+- Added JOIN to the bullet list of supported features.
+- Added "JOIN support" sub-section clarifying push-down to SQLite, all four
+  join types, per-entity adapted/blob classification, and explicit list of
+  unsupported forms.
+
+**`MANUAL.md`**:
+- Supported Features list: added JOIN, BETWEEN, IS NULL, DISTINCT, and
+  INSERT/UPDATE/DELETE (previously omitted).
+- Added JOIN example (orders with customer name).
+- Added "Not supported" paragraph listing CROSS JOIN, three-table joins,
+  subqueries, CTEs, window functions, and the SQLite-only constraint.
+
+
+## [0.9.7-patched91] - 2026-05-14
+
+### Tests — regression coverage for five bugs found in patched90
+
+Six regression tests added, one per bug from the patched90 join push-down
+implementation, to prevent silent re-introduction.
+
+| Test | Bug guarded | File |
+|---|---|---|
+| `TestRegression_BlobJoinUsesJSONFieldAliased` | Bug 1: `a.json_extract(...)` form rejected by SQLite | `pkg/oql/sqlgen_join_test.go` |
+| `TestRegression_JoinColumnAliasNoDots` | Bug 2: dotted alias `AS a.title` rejected by SQLite | `pkg/oql/sqlgen_join_test.go` |
+| `TestRegression_SystemColumnIDResolvedForAdapted` | Bug 3: `id` not found in adapted entity registry | `pkg/oql/sqlgen_join_test.go` |
+| `TestRegression_ListEntitiesIncludesAdapted` | Bug 4: adapted entities absent from `ListEntities` | `pkg/storage/list_entities_regression_test.go` |
+| `TestRegression_ListEntitiesNoDuplicates` | Bug 4 (complementary): adapted entity appears at most once | `pkg/storage/list_entities_regression_test.go` |
+| `TestRegression_JoinResultKeysAreBareName` | Bug 5: `projectColumns` re-keyed join rows as `a.title` | `pkg/server/join_e2e_test.go` |
+
+
+## [0.9.7-patched90] - 2026-05-14
+
+### Feature — OQL JOIN push-down (tests + bug fixes)
+
+All three test suites specified in `docs/OQL_JOIN_PUSHDOWN.md` are now
+implemented and passing. In the process, four bugs were found and fixed.
+
+#### Tests added
+
+**`pkg/oql/planner_join_test.go`** — 20 tests covering:
+- `TestPlanner_Join`: PushJoin returned for all join types (INNER, LEFT, RIGHT,
+  FULL) and all entity combinations (both adapted, both blob, mixed); PushNone
+  when store lacks `AggregateQueryable`; join spec fields verified.
+- `TestExtractJoinSpec`: nil-FROM guard, correct spec extraction, INNER JOIN.
+- `TestIsJoinConditionPushable`: forward and reversed operand order.
+- `TestIsJoinWherePushable`: qualified comparisons, AND, IN, IS NULL.
+
+**`pkg/oql/sqlgen_join_test.go`** — 12 tests covering:
+- Both adapted: native columns, no `json_extract`.
+- Both blob: `json_extract` throughout, `entities` aliased twice.
+- Left adapted / right blob and mirror case.
+- WHERE clause (adapted and blob paths).
+- Tenant scoping (two `tenant_id` clauses).
+- No-WHERE produces clean SQL with zero args.
+- FULL JOIN → `FULL OUTER JOIN`; LEFT JOIN preserved.
+- Alias list matches SELECT column count.
+- Nil plan.Join returns error.
+
+**`pkg/server/join_e2e_test.go`** — 4 tests covering:
+- `TestJoinPushdown_BothAdapted`: INNER JOIN two adapted entities end-to-end,
+  correct cross-entity field values, `rows_scanned` sanity check.
+- `TestJoinPushdown_BlobFallback`: INNER JOIN two blob entities via the
+  `json_extract` path.
+- `TestJoinPushdown_OuterJoin_NullRows`: RIGHT JOIN with unmatched left rows;
+  Carol (no orders) appears with nil amount, no crash.
+- `TestJoinPushdown_ValidatorRejectsUnsupported`: CROSS JOIN returns 4xx, not 5xx.
+
+#### Bugs found and fixed
+
+**1. `json_extract` with unqualified `data` in joins** (`pkg/oql/sqlgen_join.go`).
+In the blob-path join, both sides reference the `entities` table under
+different aliases. `joinFieldRef` was emitting `a.json_extract(data, '$.x')`
+(prepending alias before the whole expression) instead of
+`json_extract(a.data, '$.x')` (alias qualifying just the `data` column).
+Fix: added `JSONFieldAliased(alias, field string) string` to the `SQLDialect`
+interface (SQLite: `json_extract(alias.data, '$.field')`), and updated
+`joinFieldRef` to use it for blob sides.
+
+**2. Dotted column aliases rejected by SQLite** (`pkg/oql/sqlgen_join.go`).
+Without explicit `AS` aliases, `columnAlias` returned the full qualified name
+`a.title` for a `QualifiedIdentifier`, producing `SELECT ... AS a.title`
+which SQLite rejects. Fix: `joinColumnAlias` strips the table qualifier for
+unaliased `QualifiedIdentifier` columns, emitting `AS title`.
+
+**3. System column `id` not found in adapted entity** (`pkg/oql/sqlgen_join.go`).
+`AdaptedColumnInfo` only knows user-declared schema fields; the `id` PK column
+is a system column absent from the registry. ON conditions like `a.author_id =
+b.id` failed with "field id not found". Fix: `adaptedNativeColumn` helper
+recognises `id`, `_version`, and `tenant_id` as system columns and returns them
+directly without a registry lookup.
+
+**4. `ListEntities` missed adapted entities** (`pkg/storage/sqlite.go`).
+The OQL validator calls `ListEntities` to check entity existence. Adapted
+entities live in their own tables (`olu_posts`, etc.) and have no rows in
+the `entities` table, so the original `SELECT DISTINCT entity_type FROM
+entities` query did not return them. The validator then rejected JOIN queries
+targeting adapted entities with "entity does not exist". Fix: `ListEntities`
+now unions blob entity names with `s.adapted.Entities()`.
+
+**5. `projectColumns` re-keyed join results with dotted names** (`pkg/oql/executor.go`).
+After push-down, the executor always called `projectColumns`, which used
+`columnAlias` (returning `a.title`) to look up and output keys. The join
+records were already correctly shaped with bare aliases (`title`), but
+`projectColumns` re-keyed them as `a.title`. Fix: `PushJoin` records bypass
+`projectColumns`; the `AggregateQuery` result is used directly.
+
+
+## [0.9.7-patched89] - 2026-05-13
+
+### Rename — timeseries Pebble subdirectory `pebble/` → `db/`
+
+The directory created inside each tenant's timeseries store directory was
+named `pebble/` — an implementation detail (the storage engine name) leaking
+into the filesystem layout. Renamed to `db/` in `NewPebbleStore`.
+
+Layout before:  `data/ts/t0001/pebble/`
+Layout after:   `data/ts/t0001/db/`
+
+This is a breaking change for any deployment with existing timeseries data.
+To migrate, rename the `pebble/` subdirectory to `db/` inside each tenant's
+timeseries directory before restarting olu.
+
+### Docs — SQLite per-file tenant isolation implementation plan
+
+Added `docs/SQLITE_PER_FILE_TENANTS.md` (437 lines): full implementation
+plan for the optional `SQLitePerFileTenants` mode, updated to reflect the
+agreed filesystem layout:
+
+```
+data/
+  olu.db            ← tenant 0 base store
+  ts/
+    t0001/          ← per-tenant timeseries
+      db/           ← Pebble LSM (all timelines as key ranges)
+      registry.json
+      meta.json
+  sql/              ← per-tenant SQLite (when SQLitePerFileTenants = true)
+    t0001/
+      olu.db
+    t0002/
+      olu.db
+```
+
+Key decisions recorded in the plan:
+- `sql/` (not `sqlite/`) for backend-agnostic naming
+- `db/` (not `pebble/`) for the Pebble LSM directory
+- Timelines are key-prefix ranges inside a single Pebble instance per
+  tenant, not per-timeline directories or files
+- `tenantDBPath` mirrors the timeseries `tenantDir` pattern exactly
+- `os.MkdirAll` called before opening a new per-file tenant store
+
+## [0.9.7-patched88] - 2026-05-13
+
+### Fix — codec.go: payload dangling slice into Pebble-managed buffer
+
+`DecodeValue` was returning `payload = val[pos : pos+plen]` — a direct
+sub-slice of the `val` byte slice passed in by the caller. In all call sites
+in `store.go`, `val` comes from `iter.Value()`, which returns a slice into
+Pebble's internal memory. That memory is only valid for the current iterator
+position; it is recycled when the iterator advances or closes.
+
+`decodeEntry` is called inside iterator loops and the returned `Event` values
+(including their `Payload` slices) are accumulated in a results slice. After
+the loop, `defer iter.Close()` fires, at which point the payload slices in
+the results are dangling references into Pebble's memory. Under normal timing
+the memory is not immediately reused, so the bug was silent. Under race-detector
+timing (which widens scheduling windows) the buffer was overwritten before the
+caller read the payload, producing `\xff\xff\xff\xff\xff` corruption
+(Pebble's tombstone fill pattern) instead of the written payload bytes.
+
+The failure was first observed as a flaky `TestContract_Pebble/AppendQueryRange_FullPrefix`
+failure (roughly 4/20 runs under `-race`). It also affects any caller that
+retains `Event.Payload` after an iterator advance, including `Latest`,
+`Aggregate`, and the full aggregate scan functions — all of which use
+`DecodeValue` against `iter.Value()`.
+
+Fix: replace the sub-slice assignment with an explicit copy:
+
+    payload = make([]byte, plen)
+    copy(payload, val[pos:pos+plen])
+
+This is the only safe contract for callers who retain decoded data past the
+iterator's lifetime. The comment in `DecodeValue` documents why.
+
+**Also fixed in this patch:** the stale TODO comment in
+`commit_ts_rollback_test.go` referring to `tsManager` being a concrete type
+— it is already `timeseries.Manager` (interface) and `SetTSManager` already
+exists. The TODO was not removed when the injection point was added.
+That comment is left as-is for now; removing it is a documentation task.
+
+## [0.9.7-patched87] - 2026-05-13
+
+### Fix — TestGraphCounters_ConcurrentAccuracy: cold-store race under -race detector
+
+The test fired 80 concurrent goroutines that all hit `storeForTenant` before
+any tenant store was cached. Under race-detector timing (which widens goroutine
+scheduling windows significantly) multiple goroutines simultaneously took the
+slow path in `storeForTenant` and called `NewStoreFromConfig` concurrently
+against the same SQLite file, causing some opens to fail with OLU-ST006
+("Failed to initialise tenant context"). This caused writes to drop silently
+and the count assertions to fail with unexpected totals.
+
+The bug is in the test, not in `storeForTenant`. The `LoadOrStore` race guard
+in `storeForTenant` is correct for steady-state operation; the problem is that
+`NewStoreFromConfig` is not safe to call concurrently for the same file before
+any connection is cached.
+
+Fix: add a single synchronous `seedGraphEntity` call per tenant before
+launching the concurrent goroutines. This pre-warms the `tenantStores` cache
+so all 80 goroutines hit the fast path. Expected node counts updated to
+reflect the two warmup nodes (one per tenant, ID 0).
+
+Verified stable across 10 consecutive runs under `-race`.
+
 ## [0.9.7-patched86] - 2026-05-13
 
 ### Build — add `build-olu` target for single-binary builds

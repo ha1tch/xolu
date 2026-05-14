@@ -139,19 +139,26 @@ func (v *Validator) validateSelect(s *ast.SelectStatement) error {
 		return fmt.Errorf("FROM clause required")
 	}
 
-	// Validate single table (no JOINs)
 	if len(s.From.Tables) != 1 {
 		return fmt.Errorf("OQL supports single table queries only")
 	}
 
-	tableName, ok := s.From.Tables[0].(*ast.TableName)
-	if !ok {
-		return fmt.Errorf("invalid table reference")
-	}
+	switch ref := s.From.Tables[0].(type) {
+	case *ast.TableName:
+		// Single-table SELECT — existing path.
+		entity := normalizeEntityName(ref.Name.String())
+		if !v.EntityExists(entity) {
+			return fmt.Errorf("entity '%s' does not exist", entity)
+		}
 
-	entity := normalizeEntityName(tableName.Name.String())
-	if !v.EntityExists(entity) {
-		return fmt.Errorf("entity '%s' does not exist", entity)
+	case *ast.JoinClause:
+		// Two-table JOIN SELECT.
+		if err := v.validateJoinClause(ref); err != nil {
+			return err
+		}
+
+	default:
+		return fmt.Errorf("invalid table reference")
 	}
 
 	// Validate no unsupported features
@@ -160,6 +167,46 @@ func (v *Validator) validateSelect(s *ast.SelectStatement) error {
 	}
 
 	// Validate columns reference valid fields (optional - could defer to runtime)
+
+	return nil
+}
+
+// validateJoinClause validates a two-table JOIN in a SELECT FROM clause.
+// Both sides must be plain TableName references (no subqueries or derived
+// tables), each referencing a known entity. The ON condition is required
+// for all join types except CROSS JOIN; CROSS JOIN itself is rejected.
+func (v *Validator) validateJoinClause(jc *ast.JoinClause) error {
+	if jc.Type == "CROSS" || jc.Type == "CROSS APPLY" || jc.Type == "OUTER APPLY" {
+		return fmt.Errorf("CROSS JOIN and APPLY are not supported; use INNER, LEFT, RIGHT, or FULL JOIN")
+	}
+
+	leftTable, ok := jc.Left.(*ast.TableName)
+	if !ok {
+		return fmt.Errorf("JOIN left side must be a plain table reference, not a subquery or derived table")
+	}
+	rightTable, ok := jc.Right.(*ast.TableName)
+	if !ok {
+		return fmt.Errorf("JOIN right side must be a plain table reference, not a subquery or derived table")
+	}
+	if leftTable.Name == nil || leftTable.Name.String() == "" {
+		return fmt.Errorf("JOIN left table must have a name")
+	}
+	if rightTable.Name == nil || rightTable.Name.String() == "" {
+		return fmt.Errorf("JOIN right table must have a name")
+	}
+
+	leftEntity := normalizeEntityName(leftTable.Name.String())
+	if !v.EntityExists(leftEntity) {
+		return fmt.Errorf("entity '%s' does not exist", leftEntity)
+	}
+	rightEntity := normalizeEntityName(rightTable.Name.String())
+	if !v.EntityExists(rightEntity) {
+		return fmt.Errorf("entity '%s' does not exist", rightEntity)
+	}
+
+	if jc.Condition == nil {
+		return fmt.Errorf("JOIN requires an ON condition")
+	}
 
 	return nil
 }

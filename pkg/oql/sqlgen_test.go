@@ -642,3 +642,82 @@ func TestSQLGen_PushNone(t *testing.T) {
 		t.Errorf("expected 1 arg, got %d", len(gen.Args))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// BETWEEN type-aware field extraction tests
+// ---------------------------------------------------------------------------
+//
+// Regression tests for the bug where BETWEEN always used JSONFieldNumeric
+// (CAST AS REAL), silently corrupting results for string bounds.
+// "2025-06-01" cast to REAL becomes 2025.0, making all same-year dates
+// equal and causing every WHERE date BETWEEN '...' AND '...' to return
+// zero rows.
+
+func TestSQLGen_BetweenStringBoundsUseTextExtraction(t *testing.T) {
+	tests := []struct {
+		name      string
+		oql       string
+		wantSQL   string // substring expected in generated SQL
+		wantNoSQL string // substring that must NOT appear
+	}{
+		{
+			name:      "string_bounds_no_cast",
+			oql:       "SELECT * FROM events WHERE created_at BETWEEN '2025-01-01' AND '2025-12-31'",
+			wantSQL:   "json_extract(data, '$.created_at') BETWEEN ? AND ?",
+			wantNoSQL: "CAST(json_extract(data, '$.created_at') AS REAL)",
+		},
+		{
+			name:      "not_between_string_bounds_no_cast",
+			oql:       "SELECT * FROM logs WHERE ts NOT BETWEEN '2025-06-01' AND '2025-06-30'",
+			wantSQL:   "NOT (json_extract(data, '$.ts') BETWEEN ? AND ?)",
+			wantNoSQL: "CAST",
+		},
+		{
+			name:      "numeric_bounds_still_cast",
+			oql:       "SELECT * FROM sensors WHERE value BETWEEN 10 AND 100",
+			wantSQL:   "CAST(json_extract(data, '$.value') AS REAL) BETWEEN ? AND ?",
+			wantNoSQL: "",
+		},
+		{
+			name:    "mixed_bounds_string_low_uses_text",
+			// Low is string, high is string — uses text extraction
+			oql:     "SELECT * FROM items WHERE name BETWEEN 'apple' AND 'mango'",
+			wantSQL: "json_extract(data, '$.name') BETWEEN ? AND ?",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := parseSQLGen(t, tc.oql)
+			gen, err := GenerateSQL(s, "events", "", wherePush(), sqlite())
+			if err != nil {
+				// Try other entity names
+				gen, err = GenerateSQL(s, extractEntityName(tc.oql), "", wherePush(), sqlite())
+				if err != nil {
+					t.Fatalf("GenerateSQL: %v", err)
+				}
+			}
+			if tc.wantSQL != "" && !strings.Contains(gen.SQL, tc.wantSQL) {
+				t.Errorf("expected SQL to contain %q\ngot: %s", tc.wantSQL, gen.SQL)
+			}
+			if tc.wantNoSQL != "" && strings.Contains(gen.SQL, tc.wantNoSQL) {
+				t.Errorf("SQL must NOT contain %q (regression: string coercion)\ngot: %s", tc.wantNoSQL, gen.SQL)
+			}
+		})
+	}
+}
+
+// extractEntityName pulls the FROM entity from a simple OQL string for test use.
+func extractEntityName(oql string) string {
+	upper := strings.ToUpper(oql)
+	idx := strings.Index(upper, " FROM ")
+	if idx < 0 {
+		return "items"
+	}
+	rest := strings.TrimSpace(oql[idx+6:])
+	end := strings.IndexAny(rest, " \t\n")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}

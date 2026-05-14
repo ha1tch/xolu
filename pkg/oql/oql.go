@@ -8,11 +8,20 @@
 //
 //   - SELECT with aggregates (COUNT, SUM, AVG, MIN, MAX)
 //   - GROUP BY, HAVING, ORDER BY, TOP
+//   - INNER, LEFT, RIGHT, and FULL OUTER JOIN (two tables, SQLite store only)
 //   - INSERT with VALUES
 //   - UPDATE with WHERE (required)
 //   - DELETE with WHERE (required)
 //
-// JOINs are not supported as relationships are handled by the graph layer.
+// JOIN support
+//
+// Two-table joins are pushed to SQLite as a single SQL statement. All four
+// standard join types are supported. Each entity is classified independently
+// as adapted (schema registered, native columns) or blob (json_extract path);
+// mixed joins work correctly.
+//
+// Not supported: CROSS JOIN, three-or-more-table joins, subquery tables in
+// FROM, compound ON conditions. JOIN queries require the SQLite backend.
 package oql
 
 import (

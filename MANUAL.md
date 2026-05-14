@@ -638,10 +638,13 @@ Content-Type: application/json
 #### Supported Features
 
 - `SELECT` with field selection and `*`
-- `WHERE` with operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`
+- `WHERE` with operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`
 - `ORDER BY` with `ASC`/`DESC`
 - `LIMIT` and `OFFSET`
 - `GROUP BY` with aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+- `DISTINCT`
+- `INNER`, `LEFT`, `RIGHT`, and `FULL OUTER JOIN` (two tables, SQLite store)
+- `INSERT`, `UPDATE`, `DELETE`
 
 #### Examples
 
@@ -659,7 +662,19 @@ SELECT * FROM products WHERE name LIKE '%widget%'
 
 -- Sorting and pagination
 SELECT * FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 40
+
+-- JOIN: orders with customer name
+SELECT a.amount, b.name AS customer
+FROM orders AS a
+INNER JOIN customers AS b ON a.customer_id = b.id
+WHERE a.status = 'pending'
 ```
+
+#### Not supported
+
+CROSS JOIN, three-or-more-table joins, subqueries, CTEs, window functions.
+JOINs require the SQLite store. See `docs/OQL_API.md` for the full feature
+matrix.
 
 #### Async Queries
 
@@ -1485,7 +1500,7 @@ curl http://localhost:9090/api/v1/users
 
 Olu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.9.7-patched86`.
+or API. The current version is `0.9.7-patched95`.
 
 ### Database Format Stability
 

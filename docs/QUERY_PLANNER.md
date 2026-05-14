@@ -525,8 +525,7 @@ If the threshold ever needs to be configurable at runtime:
 
 | Feature | Why deferred | When to add |
 |---|---|---|
-| JOIN push-down (adapted-to-adapted) | Requires relationship metadata (FK annotations between adapted entities), multi-table SQL generation, and qualified column resolution. Feasible — both entities live in the same SQLite DB. See `QUERY_OPTIMISATION_PROGRESS.md` for full analysis. | When cross-entity queries become a regular pattern. Breaks backend-agnostic contract (JSON backend cannot support JOINs without an in-memory join engine). |
-| JOIN push-down (adapted-to-blob or blob-to-blob) | One or both sides lack extracted columns. Would require materialise-and-match in Go. | Only if adapted-to-adapted JOINs prove insufficient |
+| JOIN push-down (all entity combinations) | **Implemented in v0.9.7-patched89–91.** All four combinations (adapted+adapted, adapted+blob, blob+adapted, blob+blob) are pushed to SQLite as a single SQL statement. See `docs/OQL_JOIN_PUSHDOWN.md` and `docs/OQL_API.md`. | — |
 | Partial WHERE push-down | e.g., push `status = 'active'` and filter `UPPER(name) = 'FOO'` in Go | v2, if mixed pushable/non-pushable queries become common |
 | Expression indexes | `CREATE INDEX ... ON entities(entity_type, json_extract(data, '$.field'))` | When any entity type regularly exceeds 50,000 records |
 | JSONFile push-down | JSONFile has no query engine | Not planned |
