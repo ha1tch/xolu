@@ -4,7 +4,24 @@ All notable changes to olu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.7-patched98] - 2026-05-14
+## [0.9.7-patched99] - 2026-05-14
+
+### Change — iolu included in standard Docker image
+
+`Dockerfile` now builds and ships `iolu` alongside `olu` in the runtime
+stage. Both binaries are available in `ghcr.io/ha1tch/xolu:latest`:
+
+- `/usr/local/bin/olu`  — the olu server (unchanged)
+- `/usr/local/bin/iolu` — the iolu administrative CLI
+
+This allows downstream projects (nolu and others) that use iolu as a
+Docker init container to simply override the entrypoint of the runtime
+image rather than maintaining a separate build context or vendored source
+tree.
+
+No code changes — build and tests unaffected.
+
+
 
 ### Tests — Stronger per-file tenant test coverage (7 new tests, 4 OQL variants)
 

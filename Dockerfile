@@ -23,6 +23,10 @@ RUN GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/olu ./cmd/olu
 
+RUN GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/iolu ./cmd/iolu
+
 # ---- runtime stage ----
 FROM alpine:3.19
 
@@ -32,7 +36,8 @@ RUN apk add --no-cache ca-certificates tzdata \
 # Data directory — mount a volume here for persistent storage.
 RUN mkdir -p /data && chown olu:olu /data
 
-COPY --from=builder /out/olu /usr/local/bin/olu
+COPY --from=builder /out/olu  /usr/local/bin/olu
+COPY --from=builder /out/iolu /usr/local/bin/iolu
 
 USER olu
 WORKDIR /data
