@@ -101,6 +101,7 @@ func main() {
 		SQLiteMaxIdleConns:        cfg.SQLiteMaxIdleConns,
 		SQLiteReadPoolSize:        cfg.SQLiteReadPoolSize,
 		SQLiteContentionThreshold: cfg.SQLiteContentionThreshold,
+		SQLitePerFileTenants:      cfg.SQLitePerFileTenants,
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize storage")
@@ -557,10 +558,11 @@ func loadTenantEntitiesFromStore(
 	} else {
 		baseCfg := store.Config()
 		scopedStore, err = storage.NewStoreFromConfig(storage.StoreConfig{
-			Type:     baseCfg.Type,
-			BaseDir:  baseCfg.BaseDir,
-			Schema:   baseCfg.Schema,
-			TenantID: tid,
+			Type:                 baseCfg.Type,
+			BaseDir:              baseCfg.BaseDir,
+			Schema:               baseCfg.Schema,
+			TenantID:             tid,
+			SQLitePerFileTenants: baseCfg.SQLitePerFileTenants,
 		})
 		if err != nil {
 			logger.Warn().Err(err).Uint16("tenant", tid).Msg("loadTenantEntitiesFromStore: could not create scoped store; skipping tenant")

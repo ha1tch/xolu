@@ -4,6 +4,133 @@ All notable changes to olu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.7-patched98] - 2026-05-14
+
+### Tests — Stronger per-file tenant test coverage (7 new tests, 4 OQL variants)
+
+Addresses the coverage gaps identified after patched97. All tests target
+code paths that were changed during the per-file implementation but were
+either untested or tested only on the happy path.
+
+**`pkg/oql/per_file_pushdown_test.go`** — 4 tests:
+
+`TestGenerateSQL_PushWhere_PerFileNoTenantID`: the golden SQL test the spec
+required. Calls `GenerateSQL` with `PushWhere` and a real WHERE predicate,
+asserts `tenant_id` is absent from the SQL string AND that `len(Args) == 2`
+(not 3), which would catch a spurious tenant_id arg injected even if not
+named in SQL. Paired with `TestGenerateSQL_PushWhere_SharedModeArgCount`
+(regression guard: shared mode must still emit 3 args). Two compound-WHERE
+variants repeat the same arg-count assertion for multi-predicate queries.
+
+**`pkg/storage/sqlite_per_file_stronger_test.go`** — 7 tests:
+
+`TestPerFile_FTSDeleteIsolation`: per-file equivalent of the existing
+`TestSQLiteTenantIsolation_FTSUpdateDelete`. Two stores at separate file
+paths — update+delete in store A, assert store B's FTS index is untouched.
+Directly covers the `deleteInner` FTS path that caused the patched96 regression.
+
+`TestPerFile_AdaptedCRUDRoundTrip`: exercises all four adapted-table
+mutations (Create, Get, Update, Delete, List, Patch) in per-file mode.
+`dialectIsPerFile()` in `adapted_crud.go` changes the arg lists for
+Update (id only, not tenantID+id), Delete (same), and List (no args). All
+branches are now exercised.
+
+`TestPerFile_CommitRoundTrip`: exercises `createInTx` (auto-ID and
+explicit-ID append) and `saveInTx` (exists→update and !exists→insert)
+paths, covering the sequence-branching and INSERT-branching code in the
+Commit transactional batch.
+
+`TestPerFile_SequencePrimaryKeyConstraint`: raw SQL verification of the
+`PRIMARY KEY (entity_type, id)` semantics — same (type, id) fails; same
+id different type succeeds; also confirms `entity_sequences` has no
+`tenant_id` column via a raw insert.
+
+`TestPerFile_GraphIntegrityAndRebuild`: verifies `VerifyGraphIntegrity`
+and `RebuildGraph` in per-file mode. Creates REF relationships, deletes
+the edge table manually, rebuilds, asserts edge count. The entity scan in
+both methods uses `WHERE 1=1` (via `tenantWhere()`) in per-file mode —
+this test would catch a broken scan silently returning zero edges. Also
+checks cross-contamination: a second store at a different path has zero edges.
+
+`TestPerFile_AdaptedHasExtra`: verifies the `_extra` overflow column path
+in adapted tables (extra fields beyond the schema) works in per-file mode,
+and confirms no `tenant_id` column in the resulting table.
+
+**`pkg/server/per_file_tenant_test.go`** (appended) — 1 test:
+
+`TestPerFileTenant_MutationsAndCrossTenantIsolation`: HTTP-level PUT, PATCH,
+DELETE in per-file mode. After DELETE in tenant mu1, tenant mu2's entity at
+the same ID is still accessible — the key cross-tenant isolation assertion
+at the HTTP level, covering the `deleteInner` path end-to-end.
+
+All 2490+ tests pass.
+
+
+
+### Fix + Tests — SQLite per-file tenant isolation complete
+
+Fixes two bugs from patched96 and adds Phase 4 tests from the spec.
+
+**Bug fixes:**
+
+- `NewSQLiteStore` was not copying `PerFileTenants` into `storeConfig`, so
+  `Config().SQLitePerFileTenants` was always `false`. This meant
+  `storeForTenant` in `server.go` never derived the per-tenant file path.
+  Fixed by adding `SQLitePerFileTenants: config.PerFileTenants` to the
+  `storeConfig` literal.
+
+- `deleteInner` FTS delete was dropping the `tenant_id` filter in
+  shared mode (regression from patched96 patch). Fixed with proper
+  `PerFileTenants` branch in `deleteInner`.
+
+**New tests (Phase 4):**
+
+`pkg/storage/sqlite_per_file_test.go` — 9 tests covering: schema DDL
+without `tenant_id` column, CRUD round-trip, two-store isolation
+(independent sequences, invisible cross-tenant), `CountEntities`,
+`QueryWithPlan`, `IsPerFileTenant`, adapted table DDL, FTS, and Save.
+
+`pkg/oql/per_file_test.go` — 4 tests covering: `GenerateSQL` with empty
+`sqlTenantID` emits no `tenant_id` clause; `GenerateSQL` with non-empty
+tenant ID still emits the clause (shared-mode regression guard);
+`ExecuteWithStore` against per-file store succeeds without `tenant_id`
+column errors; two-store OQL isolation.
+
+`pkg/server/per_file_tenant_test.go` — 2 integration tests: per-file
+mode creates separate database files per tenant and GET from one tenant
+returns only its own data; shared mode (default) maintains `tenant_id`
+column isolation and does not create a `sql/` directory.
+
+All 2490+ tests pass.
+
+
+
+### Feature — SQLite per-file tenant isolation (`OLU_SQLITE_PER_FILE_TENANTS`)
+
+Implements the full `SQLITE_PER_FILE_TENANTS.md` spec. When
+`OLU_SQLITE_PER_FILE_TENANTS=true`, each tenant gets its own SQLite database
+file and the `tenant_id` column is absent from the schema entirely — the file
+itself is the isolation boundary.
+
+**Files changed:** `pkg/config/config.go`, `pkg/storage/storage.go`,
+`pkg/storage/factory.go`, `pkg/storage/sqlite.go` (schema split, helpers,
+all query methods), `pkg/storage/sqlite_field_query.go`,
+`pkg/storage/dialect_sqlite.go`, `pkg/storage/adapted_crud.go`,
+`pkg/oql/executor.go`, `pkg/server/server.go`, `cmd/olu/main.go`.
+
+Key design points:
+- `tenantWhere()` / `tenantArgs()` helpers make query method changes
+  mechanical — no SQL string is duplicated.
+- `createSchemaShared()` / `createSchemaPerFile()` implement both DDL paths.
+- `SQLiteStorageDialect.PerFileTenants` gates adapted table DDL/queries.
+- `dialectIsPerFile()` type assertion gates adapted CRUD arg lists.
+- `OQL executor`: `sqlTenantID` is suppressed when `IsPerFileTenant()` is
+  true; INSERT no longer injects `tenant_id` into the record map.
+- `server.go`: `tenantDBPath()` derives `<dir>/sql/tXXXX/<base>` paths;
+  `storeForTenant` creates the directory and passes the derived path.
+- Default is `false` — all existing deployments are unaffected.
+- All 2360+ tests pass.
+
 ## [0.9.7-patched95] - 2026-05-14
 
 ### Fix — release.sh cleans all test artifact types from pkg/ before packaging

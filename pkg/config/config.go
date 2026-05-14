@@ -144,6 +144,20 @@ type Config struct {
 	SQLiteBusyTimeout         int // Milliseconds to wait on locked database (0 = use default 5000)
 	SQLiteCacheSize           int // Page cache size in KB (0 = use default 2000)
 
+	// SQLitePerFileTenants controls whether each tenant gets its own SQLite
+	// database file. When false (default), all tenants share one file and
+	// are isolated by the tenant_id column. When true, each tenant's data
+	// lives in a separate file derived from the base DBPath:
+	//
+	//   tenant 0 (unscoped): <DBPath>                   (e.g. data/olu.db)
+	//   tenant 1:            <DBDir>/sql/t0001/<base>   (e.g. data/sql/t0001/olu.db)
+	//   tenant 2:            <DBDir>/sql/t0002/<base>   (e.g. data/sql/t0002/olu.db)
+	//
+	// The two modes use different schemas. Choose at deployment time and do
+	// not change while data exists — migration requires an explicit export/import.
+	// Ignored when StorageType is not "sqlite".
+	SQLitePerFileTenants bool
+
 	// Performance tuning — query planner
 	// PerformanceProfile selects hardware-specific thresholds for the
 	// query planner's push-down decisions. Accepted values:
@@ -637,6 +651,9 @@ func LoadFromEnv(cfg *Config) {
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.SQLiteCacheSize = n
 		}
+	}
+	if val := os.Getenv("OLU_SQLITE_PER_FILE_TENANTS"); val != "" {
+		cfg.SQLitePerFileTenants = val == "true" || val == "1" || val == "yes"
 	}
 
 	// Performance tuning — query planner

@@ -65,6 +65,32 @@ func (s *SQLiteStore) Config() StoreConfig {
 	return s.storeConfig
 }
 
+// IsPerFileTenant reports whether this store operates in per-file tenant mode.
+// Implements TenantModeProvider. When true, each tenant has its own database
+// file and the tenant_id column is absent from the schema.
+func (s *SQLiteStore) IsPerFileTenant() bool {
+	return s.config.PerFileTenants
+}
+
+// tenantWhere returns the WHERE fragment for tenant scoping in shared mode,
+// or an empty string in per-file mode (isolation is provided by the file itself).
+// Always ends with "AND " so callers can append the next predicate directly.
+func (s *SQLiteStore) tenantWhere() string {
+	if s.config.PerFileTenants {
+		return ""
+	}
+	return "tenant_id = ? AND "
+}
+
+// tenantArgs prepends the tenant_id argument in shared mode, or returns extra
+// unchanged in per-file mode. Use in conjunction with tenantWhere().
+func (s *SQLiteStore) tenantArgs(extra ...interface{}) []interface{} {
+	if s.config.PerFileTenants {
+		return extra
+	}
+	return append([]interface{}{int(s.config.TenantID)}, extra...)
+}
+
 // AdaptedRegistry returns the store's adapted table registry.
 // Returns nil only if the store was not properly initialized.
 func (s *SQLiteStore) AdaptedRegistry() *AdaptedRegistry {
@@ -104,6 +130,12 @@ type SQLiteConfig struct {
 	MaxIdleConns        int // Max idle write connections (0 = backend default)
 	ReadPoolSize        int // Max open read connections (0 = backend default)
 	ContentionThreshold int // Adaptive lock threshold 0-100 (default 95)
+
+	// PerFileTenants mirrors StoreConfig.SQLitePerFileTenants.
+	// When true, tenant isolation is provided by separate database files
+	// rather than a tenant_id column; schema DDL and all query methods
+	// omit tenant_id accordingly.
+	PerFileTenants bool
 }
 
 // sqliteBusyRetries is the number of times to retry an operation that fails
@@ -283,10 +315,11 @@ func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 			SQLiteMaxOpenConns:        maxOpen,
 			SQLiteMaxIdleConns:        maxIdle,
 			SQLiteContentionThreshold: contentionThreshold,
+			SQLitePerFileTenants:      config.PerFileTenants,
 		},
 		alock:     NewAdaptiveLock(contentionThreshold),
 		adapted:   NewAdaptedRegistry(),
-		dialect:   &SQLiteStorageDialect{},
+		dialect:   &SQLiteStorageDialect{PerFileTenants: config.PerFileTenants},
 		stmtCache: NewStmtCache(readDB, 0), // default size; prepares against reader pool
 		logger:    zerolog.Nop(),           // silent until WithLogger is called
 	}
@@ -313,6 +346,129 @@ func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 }
 
 // initialize creates the necessary tables and triggers
+
+// createSchemaShared creates the shared-mode schema (all tenants in one file,
+// isolated by the tenant_id column). This is the default mode.
+func (s *SQLiteStore) createSchemaShared(ctx context.Context) error {
+	schema := `
+		-- Main entities table (JSON blob approach)
+		CREATE TABLE IF NOT EXISTS entities (
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			entity_type TEXT NOT NULL,
+			id INTEGER NOT NULL,
+			data TEXT NOT NULL, -- JSON stored as TEXT
+			_version INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, entity_type, id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(entity_type);
+		CREATE INDEX IF NOT EXISTS idx_updated_at ON entities(updated_at);
+		CREATE INDEX IF NOT EXISTS idx_tenant_entity ON entities(tenant_id, entity_type);
+
+		-- Tenant-scoped ID sequences
+		CREATE TABLE IF NOT EXISTS entity_sequences (
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			entity_type TEXT NOT NULL,
+			next_id INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (tenant_id, entity_type)
+		);
+
+		-- Schema metadata table (optional schema storage)
+		CREATE TABLE IF NOT EXISTS schemas (
+			entity_type TEXT PRIMARY KEY,
+			schema TEXT NOT NULL, -- JSON schema
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Version tracking for migrations
+		CREATE TABLE IF NOT EXISTS schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Tenant registry: stable name-to-ID mapping across restarts
+		CREATE TABLE IF NOT EXISTS tenants (
+			id INTEGER NOT NULL PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Full-text search virtual table (FTS5) with tenant_id
+		CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+			tenant_id UNINDEXED,
+			entity_type UNINDEXED,
+			entity_id UNINDEXED,
+			content
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("failed to create shared schema: %w", err)
+	}
+	return nil
+}
+
+// createSchemaPerFile creates the per-file-tenant schema. In this mode each
+// tenant has its own SQLite file so the tenant_id column is omitted.
+func (s *SQLiteStore) createSchemaPerFile(ctx context.Context) error {
+	schema := `
+		-- Main entities table — no tenant_id column (file = isolation boundary)
+		CREATE TABLE IF NOT EXISTS entities (
+			entity_type TEXT NOT NULL,
+			id INTEGER NOT NULL,
+			data TEXT NOT NULL,
+			_version INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (entity_type, id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(entity_type);
+		CREATE INDEX IF NOT EXISTS idx_updated_at ON entities(updated_at);
+
+		-- ID sequences — no tenant_id column
+		CREATE TABLE IF NOT EXISTS entity_sequences (
+			entity_type TEXT NOT NULL,
+			next_id INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (entity_type)
+		);
+
+		-- Schema metadata table (unchanged)
+		CREATE TABLE IF NOT EXISTS schemas (
+			entity_type TEXT PRIMARY KEY,
+			schema TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Version tracking for migrations (unchanged)
+		CREATE TABLE IF NOT EXISTS schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Tenant registry (lives in base store; created here for uniformity)
+		CREATE TABLE IF NOT EXISTS tenants (
+			id INTEGER NOT NULL PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- Full-text search virtual table (FTS5) — no tenant_id column
+		CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+			entity_type UNINDEXED,
+			entity_id UNINDEXED,
+			content
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("failed to create per-file schema: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) initialize(ctx context.Context) error {
 	// Apply pragmas for performance and consistency
 	pragmas := []string{
@@ -329,64 +485,15 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 		}
 	}
 	
-	// Create schema
-	schema := `
-		-- Main entities table (JSON blob approach)
-		CREATE TABLE IF NOT EXISTS entities (
-			tenant_id INTEGER NOT NULL DEFAULT 0,
-			entity_type TEXT NOT NULL,
-			id INTEGER NOT NULL,
-			data TEXT NOT NULL, -- JSON stored as TEXT
-			_version INTEGER NOT NULL DEFAULT 1,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, entity_type, id)
-		);
-		
-		CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(entity_type);
-		CREATE INDEX IF NOT EXISTS idx_updated_at ON entities(updated_at);
-		CREATE INDEX IF NOT EXISTS idx_tenant_entity ON entities(tenant_id, entity_type);
-		
-		-- Tenant-scoped ID sequences
-		CREATE TABLE IF NOT EXISTS entity_sequences (
-			tenant_id INTEGER NOT NULL DEFAULT 0,
-			entity_type TEXT NOT NULL,
-			next_id INTEGER NOT NULL DEFAULT 1,
-			PRIMARY KEY (tenant_id, entity_type)
-		);
-		
-		-- Schema metadata table (optional schema storage)
-		CREATE TABLE IF NOT EXISTS schemas (
-			entity_type TEXT PRIMARY KEY,
-			schema TEXT NOT NULL, -- JSON schema
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-		
-		-- Version tracking for migrations
-		CREATE TABLE IF NOT EXISTS schema_version (
-			version INTEGER PRIMARY KEY,
-			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Tenant registry: stable name-to-ID mapping across restarts
-		CREATE TABLE IF NOT EXISTS tenants (
-			id INTEGER NOT NULL PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-		
-		-- Full-text search virtual table (FTS5) with tenant_id
-		CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
-			tenant_id UNINDEXED,
-			entity_type UNINDEXED,
-			entity_id UNINDEXED,
-			content
-		);
-	`
-	
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("failed to create schema: %w", err)
+	// Create schema — branch on per-file vs shared mode.
+	if s.config.PerFileTenants {
+		if err := s.createSchemaPerFile(ctx); err != nil {
+			return err
+		}
+	} else {
+		if err := s.createSchemaShared(ctx); err != nil {
+			return err
+		}
 	}
 	
 	// Create per-tenant graph edge table when graph is enabled.
@@ -492,8 +599,6 @@ func (s *SQLiteStore) Create(ctx context.Context, entity string, data map[string
 
 func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[string]interface{}) (int, error) {
 	
-	tid := int(s.config.TenantID)
-	
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -502,12 +607,22 @@ func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[s
 	
 	// Get next ID (tenant-scoped sequence)
 	var nextID int
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO entity_sequences (tenant_id, entity_type, next_id) 
-		VALUES (?, ?, 1)
-		ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
-		RETURNING next_id
-	`, tid, entity).Scan(&nextID)
+	var seqSQL string
+	if s.config.PerFileTenants {
+		seqSQL = `
+			INSERT INTO entity_sequences (entity_type, next_id)
+			VALUES (?, 1)
+			ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
+			RETURNING next_id`
+		err = tx.QueryRowContext(ctx, seqSQL, entity).Scan(&nextID)
+	} else {
+		seqSQL = `
+			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
+			VALUES (?, ?, 1)
+			ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
+			RETURNING next_id`
+		err = tx.QueryRowContext(ctx, seqSQL, int(s.config.TenantID), entity).Scan(&nextID)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to get next ID: %w", err)
 	}
@@ -521,7 +636,7 @@ func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[s
 	
 	// Insert entity: adapted table or blob
 	if spec := s.adapted.Get(entity); spec != nil {
-		if err := adaptedCreate(ctx, tx, spec, s.dialect, tid, nextID, dataCopy); err != nil {
+		if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), nextID, dataCopy); err != nil {
 			return 0, err
 		}
 	} else {
@@ -530,12 +645,20 @@ func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[s
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal data: %w", err)
 		}
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO entities (tenant_id, entity_type, id, data) 
-			VALUES (?, ?, ?, ?)
-		`, tid, entity, nextID, string(jsonData))
-		if err != nil {
-			return 0, fmt.Errorf("failed to insert entity: %w", err)
+		var insErr error
+		if s.config.PerFileTenants {
+			_, insErr = tx.ExecContext(ctx, `
+				INSERT INTO entities (entity_type, id, data)
+				VALUES (?, ?, ?)
+			`, entity, nextID, string(jsonData))
+		} else {
+			_, insErr = tx.ExecContext(ctx, `
+				INSERT INTO entities (tenant_id, entity_type, id, data)
+				VALUES (?, ?, ?, ?)
+			`, int(s.config.TenantID), entity, nextID, string(jsonData))
+		}
+		if insErr != nil {
+			return 0, fmt.Errorf("failed to insert entity: %w", insErr)
 		}
 	}
 	
@@ -635,8 +758,8 @@ func (s *SQLiteStore) getInner(ctx context.Context, entity string, id int) (map[
 	var version int
 	err := s.readDB.QueryRowContext(ctx, `
 		SELECT data, _version FROM entities 
-		WHERE tenant_id = ? AND entity_type = ? AND id = ?
-	`, int(s.config.TenantID), entity, id).Scan(&jsonData, &version)
+		WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
+	`, s.tenantArgs(entity, id)...).Scan(&jsonData, &version)
 	
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -709,14 +832,14 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 			result, err = tx.ExecContext(ctx, `
 				UPDATE entities 
 				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE tenant_id = ? AND entity_type = ? AND id = ? AND _version = ?
-			`, string(jsonData), int(s.config.TenantID), entity, id, expectVersion)
+				WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?
+			`, append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id, expectVersion)...)...)
 		} else {
 			result, err = tx.ExecContext(ctx, `
 				UPDATE entities 
 				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE tenant_id = ? AND entity_type = ? AND id = ?
-			`, string(jsonData), int(s.config.TenantID), entity, id)
+				WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
+			`, append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id)...)...)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to update entity: %w", err)
@@ -732,8 +855,8 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 				var exists int
 				_ = tx.QueryRowContext(ctx, `
 					SELECT 1 FROM entities 
-					WHERE tenant_id = ? AND entity_type = ? AND id = ?
-				`, int(s.config.TenantID), entity, id).Scan(&exists)
+					WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
+				`, s.tenantArgs(entity, id)...).Scan(&exists)
 				if exists == 1 {
 					return ErrConflict
 				}
@@ -791,14 +914,13 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 		}
 	}
 	
-	tid := int(s.config.TenantID)
 	spec := s.adapted.Get(entity)
 
 	// Get existing data (adapted or blob path)
 	var existing map[string]interface{}
 	if spec != nil {
 		var currentVersion int
-		existing, currentVersion, err = adaptedGetInTx(ctx, tx, spec, s.dialect, tid, id)
+		existing, currentVersion, err = adaptedGetInTx(ctx, tx, spec, s.dialect, int(s.config.TenantID), id)
 		if err != nil {
 			return err
 		}
@@ -808,10 +930,9 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 		}
 	} else {
 		var jsonData string
-		err = tx.QueryRowContext(ctx, `
-			SELECT data FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? AND id = ?
-		`, tid, entity, id).Scan(&jsonData)
+		err = tx.QueryRowContext(ctx,
+			`SELECT data FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
+			s.tenantArgs(entity, id)...).Scan(&jsonData)
 		
 		if err == sql.ErrNoRows {
 			return ErrNotFound
@@ -851,7 +972,7 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 	// Write back: adapted or blob path
 	if spec != nil {
 		// For adapted path, use adaptedUpdate with version already checked above
-		if err := adaptedUpdate(ctx, tx, spec, s.dialect, tid, id, existing, 0, false); err != nil {
+		if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, existing, 0, false); err != nil {
 			return err
 		}
 	} else {
@@ -864,17 +985,13 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 		// Update with optional version check
 		var result sql.Result
 		if hasVersion {
-			result, err = tx.ExecContext(ctx, `
-				UPDATE entities 
-				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE tenant_id = ? AND entity_type = ? AND id = ? AND _version = ?
-			`, string(updatedJSON), tid, entity, id, expectVersion)
+			result, err = tx.ExecContext(ctx,
+				`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?`,
+				append([]interface{}{string(updatedJSON)}, s.tenantArgs(entity, id, expectVersion)...)...)
 		} else {
-			result, err = tx.ExecContext(ctx, `
-				UPDATE entities 
-				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE tenant_id = ? AND entity_type = ? AND id = ?
-			`, string(updatedJSON), tid, entity, id)
+			result, err = tx.ExecContext(ctx,
+				`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
+				append([]interface{}{string(updatedJSON)}, s.tenantArgs(entity, id)...)...)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to update entity: %w", err)
@@ -927,10 +1044,9 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) er
 			return err
 		}
 	} else {
-		result, err := tx.ExecContext(ctx, `
-			DELETE FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? AND id = ?
-		`, int(s.config.TenantID), entity, id)
+		result, err := tx.ExecContext(ctx,
+			`DELETE FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
+			s.tenantArgs(entity, id)...)
 		if err != nil {
 			return fmt.Errorf("failed to delete entity: %w", err)
 		}
@@ -958,9 +1074,17 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) er
 	}
 	
 	// Remove from FTS index
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
-	`, fmt.Sprintf("%d", int(s.config.TenantID)), entity, fmt.Sprintf("%d", id))
+	idStr := fmt.Sprintf("%d", id)
+	if s.config.PerFileTenants {
+		_, err = tx.ExecContext(ctx, `
+			DELETE FROM entities_fts WHERE entity_type = ? AND entity_id = ?
+		`, entity, idStr)
+	} else {
+		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
+		_, err = tx.ExecContext(ctx, `
+			DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
+		`, tidStr, entity, idStr)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to delete from FTS index: %w", err)
 	}
@@ -1012,18 +1136,17 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 	defer func() { _ = tx.Rollback() }()
 
 	// Check existence inside the transaction to prevent TOCTOU races.
-	tid := int(s.config.TenantID)
 	spec := s.adapted.Get(entity)
 
 	var exists bool
 	if spec != nil {
 		err = tx.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT EXISTS(SELECT 1 FROM %s WHERE tenant_id = ? AND id = ?)",
-			spec.TableName()), tid, id).Scan(&exists)
+			"SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)",
+			spec.TableName()), id).Scan(&exists)
 	} else {
-		err = tx.QueryRowContext(ctx, `
-			SELECT EXISTS(SELECT 1 FROM entities WHERE tenant_id = ? AND entity_type = ? AND id = ?)
-		`, tid, entity, id).Scan(&exists)
+		err = tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
+			s.tenantArgs(entity, id)...).Scan(&exists)
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to check existence: %w", err)
@@ -1032,7 +1155,7 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 	if exists {
 		// Overwrite path: conditional or unconditional update in place.
 		if spec != nil {
-			if err := adaptedUpdate(ctx, tx, spec, s.dialect, tid, id, dataCopy, expectVersion, hasVersion); err != nil {
+			if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy, expectVersion, hasVersion); err != nil {
 				return false, err
 			}
 		} else {
@@ -1042,17 +1165,13 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 			}
 			var result sql.Result
 			if hasVersion {
-				result, err = tx.ExecContext(ctx, `
-					UPDATE entities
-					SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP
-					WHERE tenant_id = ? AND entity_type = ? AND id = ? AND _version = ?
-				`, string(jsonData), tid, entity, id, expectVersion)
+				result, err = tx.ExecContext(ctx,
+					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?`,
+					append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id, expectVersion)...)...)
 			} else {
-				result, err = tx.ExecContext(ctx, `
-					UPDATE entities
-					SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP
-					WHERE tenant_id = ? AND entity_type = ? AND id = ?
-				`, string(jsonData), tid, entity, id)
+				result, err = tx.ExecContext(ctx,
+					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
+					append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id)...)...)
 			}
 			if err != nil {
 				return false, fmt.Errorf("failed to overwrite entity: %w", err)
@@ -1071,18 +1190,28 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 		// Create path: insert new record.
 
 		// Update sequence so future auto-IDs stay above this one.
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-			VALUES (?, ?, ?)
-			ON CONFLICT(tenant_id, entity_type) DO UPDATE
-			SET next_id = MAX(next_id, excluded.next_id + 1)
-		`, tid, entity, id+1)
-		if err != nil {
-			return false, fmt.Errorf("failed to update sequence: %w", err)
+		var seqErr error
+		if s.config.PerFileTenants {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (entity_type, next_id)
+				VALUES (?, ?)
+				ON CONFLICT(entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, entity, id+1)
+		} else {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
+				VALUES (?, ?, ?)
+				ON CONFLICT(tenant_id, entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, int(s.config.TenantID), entity, id+1)
+		}
+		if seqErr != nil {
+			return false, fmt.Errorf("failed to update sequence: %w", seqErr)
 		}
 
 		if spec != nil {
-			if err := adaptedCreate(ctx, tx, spec, s.dialect, tid, id, dataCopy); err != nil {
+			if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy); err != nil {
 				return false, err
 			}
 		} else {
@@ -1090,12 +1219,20 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 			if err != nil {
 				return false, fmt.Errorf("failed to marshal data: %w", err)
 			}
-			_, err = tx.ExecContext(ctx, `
-				INSERT INTO entities (tenant_id, entity_type, id, data)
-				VALUES (?, ?, ?, ?)
-			`, tid, entity, id, string(jsonData))
-			if err != nil {
-				return false, fmt.Errorf("failed to save entity: %w", err)
+			var insErr error
+			if s.config.PerFileTenants {
+				_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO entities (entity_type, id, data)
+					VALUES (?, ?, ?)
+				`, entity, id, string(jsonData))
+			} else {
+				_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO entities (tenant_id, entity_type, id, data)
+					VALUES (?, ?, ?, ?)
+				`, int(s.config.TenantID), entity, id, string(jsonData))
+			}
+			if insErr != nil {
+				return false, fmt.Errorf("failed to save entity: %w", insErr)
 			}
 		}
 	}
@@ -1168,8 +1305,6 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 // It mirrors saveInner but accepts a caller-owned *sql.Tx and returns the
 // resulting _version rather than committing.
 func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) (CommitUpdateResult, error) {
-	tid := int(s.config.TenantID)
-
 	dataCopy := make(map[string]interface{}, len(u.Data)+1)
 	for k, v := range u.Data {
 		if k == "_version" {
@@ -1185,12 +1320,12 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 	var existsErr error
 	if spec != nil {
 		existsErr = tx.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT EXISTS(SELECT 1 FROM %s WHERE tenant_id = ? AND id = ?)",
-			spec.TableName()), tid, u.ID).Scan(&exists)
+			"SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)",
+			spec.TableName()), u.ID).Scan(&exists)
 	} else {
-		existsErr = tx.QueryRowContext(ctx, `
-			SELECT EXISTS(SELECT 1 FROM entities WHERE tenant_id = ? AND entity_type = ? AND id = ?)
-		`, tid, u.Entity, u.ID).Scan(&exists)
+		existsErr = tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
+			s.tenantArgs(u.Entity, u.ID)...).Scan(&exists)
 	}
 	if existsErr != nil {
 		return CommitUpdateResult{}, fmt.Errorf("saveInTx: existence check: %w", existsErr)
@@ -1208,13 +1343,13 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 				hasVersion = true
 				expectVersion = *u.Version
 			}
-			if err := adaptedUpdate(ctx, tx, spec, s.dialect, tid, u.ID, dataCopy, expectVersion, hasVersion); err != nil {
+			if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), u.ID, dataCopy, expectVersion, hasVersion); err != nil {
 				return CommitUpdateResult{}, err
 			}
 			// Retrieve the new version from the adapted table column.
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(
-				"SELECT _version FROM %s WHERE tenant_id = ? AND id = ?",
-				spec.TableName()), tid, u.ID).Scan(&newVersion); err != nil {
+				"SELECT _version FROM %s WHERE id = ?",
+				spec.TableName()), u.ID).Scan(&newVersion); err != nil {
 				return CommitUpdateResult{}, fmt.Errorf("saveInTx: read adapted version: %w", err)
 			}
 		} else {
@@ -1223,19 +1358,13 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 				return CommitUpdateResult{}, fmt.Errorf("saveInTx: marshal: %w", err)
 			}
 			if u.Version != nil {
-				err = tx.QueryRowContext(ctx, `
-					UPDATE entities
-					SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP
-					WHERE tenant_id = ? AND entity_type = ? AND id = ? AND _version = ?
-					RETURNING _version
-				`, string(jsonData), tid, u.Entity, u.ID, *u.Version).Scan(&newVersion)
+				err = tx.QueryRowContext(ctx,
+					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ? RETURNING _version`,
+					append([]interface{}{string(jsonData)}, s.tenantArgs(u.Entity, u.ID, *u.Version)...)...).Scan(&newVersion)
 			} else {
-				err = tx.QueryRowContext(ctx, `
-					UPDATE entities
-					SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP
-					WHERE tenant_id = ? AND entity_type = ? AND id = ?
-					RETURNING _version
-				`, string(jsonData), tid, u.Entity, u.ID).Scan(&newVersion)
+				err = tx.QueryRowContext(ctx,
+					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? RETURNING _version`,
+					append([]interface{}{string(jsonData)}, s.tenantArgs(u.Entity, u.ID)...)...).Scan(&newVersion)
 			}
 			if err == sql.ErrNoRows && u.Version != nil {
 				return CommitUpdateResult{}, ErrConflict
@@ -1247,16 +1376,27 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 		created = false
 	} else {
 		// Create path — update sequence, then insert.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-			VALUES (?, ?, ?)
-			ON CONFLICT(tenant_id, entity_type) DO UPDATE
-			SET next_id = MAX(next_id, excluded.next_id + 1)
-		`, tid, u.Entity, u.ID+1); err != nil {
-			return CommitUpdateResult{}, fmt.Errorf("saveInTx: sequence: %w", err)
+		var seqErr error
+		if s.config.PerFileTenants {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (entity_type, next_id)
+				VALUES (?, ?)
+				ON CONFLICT(entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, u.Entity, u.ID+1)
+		} else {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
+				VALUES (?, ?, ?)
+				ON CONFLICT(tenant_id, entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, int(s.config.TenantID), u.Entity, u.ID+1)
+		}
+		if seqErr != nil {
+			return CommitUpdateResult{}, fmt.Errorf("saveInTx: sequence: %w", seqErr)
 		}
 		if spec != nil {
-			if err := adaptedCreate(ctx, tx, spec, s.dialect, tid, u.ID, dataCopy); err != nil {
+			if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), u.ID, dataCopy); err != nil {
 				return CommitUpdateResult{}, err
 			}
 		} else {
@@ -1264,10 +1404,18 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 			if err != nil {
 				return CommitUpdateResult{}, fmt.Errorf("saveInTx: marshal: %w", err)
 			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
-			`, tid, u.Entity, u.ID, string(jsonData)); err != nil {
-				return CommitUpdateResult{}, fmt.Errorf("saveInTx: insert: %w", err)
+			var insErr error
+			if s.config.PerFileTenants {
+				_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO entities (entity_type, id, data) VALUES (?, ?, ?)
+				`, u.Entity, u.ID, string(jsonData))
+			} else {
+				_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
+				`, int(s.config.TenantID), u.Entity, u.ID, string(jsonData))
+			}
+			if insErr != nil {
+				return CommitUpdateResult{}, fmt.Errorf("saveInTx: insert: %w", insErr)
 			}
 		}
 		newVersion = 1
@@ -1290,7 +1438,6 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 // If a.ID is nil, an ID is generated from the tenant sequence. If a.ID is
 // set and that ID already exists, ErrAlreadyExists is returned.
 func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend) (int, error) {
-	tid := int(s.config.TenantID)
 	spec := s.adapted.Get(a.Entity)
 
 	dataCopy := make(map[string]interface{}, len(a.Data)+1)
@@ -1304,31 +1451,53 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 	var id int
 	if a.ID == nil {
 		// Auto-generate via sequence.
-		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-			VALUES (?, ?, 1)
-			ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
-			RETURNING next_id
-		`, tid, a.Entity).Scan(&id); err != nil {
-			return 0, fmt.Errorf("createInTx: sequence: %w", err)
+		var seqErr error
+		if s.config.PerFileTenants {
+			seqErr = tx.QueryRowContext(ctx, `
+				INSERT INTO entity_sequences (entity_type, next_id)
+				VALUES (?, 1)
+				ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
+				RETURNING next_id
+			`, a.Entity).Scan(&id)
+		} else {
+			seqErr = tx.QueryRowContext(ctx, `
+				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
+				VALUES (?, ?, 1)
+				ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
+				RETURNING next_id
+			`, int(s.config.TenantID), a.Entity).Scan(&id)
+		}
+		if seqErr != nil {
+			return 0, fmt.Errorf("createInTx: sequence: %w", seqErr)
 		}
 	} else {
 		id = *a.ID
 		// Keep sequence ahead of explicit IDs.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-			VALUES (?, ?, ?)
-			ON CONFLICT(tenant_id, entity_type) DO UPDATE
-			SET next_id = MAX(next_id, excluded.next_id + 1)
-		`, tid, a.Entity, id+1); err != nil {
-			return 0, fmt.Errorf("createInTx: sequence bump: %w", err)
+		var seqErr error
+		if s.config.PerFileTenants {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (entity_type, next_id)
+				VALUES (?, ?)
+				ON CONFLICT(entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, a.Entity, id+1)
+		} else {
+			_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
+				VALUES (?, ?, ?)
+				ON CONFLICT(tenant_id, entity_type) DO UPDATE
+				SET next_id = MAX(next_id, excluded.next_id + 1)
+			`, int(s.config.TenantID), a.Entity, id+1)
+		}
+		if seqErr != nil {
+			return 0, fmt.Errorf("createInTx: sequence bump: %w", seqErr)
 		}
 	}
 
 	dataCopy["id"] = id
 
 	if spec != nil {
-		if err := adaptedCreate(ctx, tx, spec, s.dialect, tid, id, dataCopy); err != nil {
+		if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy); err != nil {
 			return 0, err
 		}
 	} else {
@@ -1336,13 +1505,21 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 		if err != nil {
 			return 0, fmt.Errorf("createInTx: marshal: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
-		`, tid, a.Entity, id, string(jsonData)); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		var insErr error
+		if s.config.PerFileTenants {
+			_, insErr = tx.ExecContext(ctx, `
+				INSERT INTO entities (entity_type, id, data) VALUES (?, ?, ?)
+			`, a.Entity, id, string(jsonData))
+		} else {
+			_, insErr = tx.ExecContext(ctx, `
+				INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
+			`, int(s.config.TenantID), a.Entity, id, string(jsonData))
+		}
+		if insErr != nil {
+			if strings.Contains(insErr.Error(), "UNIQUE constraint failed") {
 				return 0, ErrAlreadyExists
 			}
-			return 0, fmt.Errorf("createInTx: insert: %w", err)
+			return 0, fmt.Errorf("createInTx: insert: %w", insErr)
 		}
 	}
 
@@ -1364,11 +1541,9 @@ func (s *SQLiteStore) List(ctx context.Context, entity string) ([]map[string]int
 		return adaptedList(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID))
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, `
-		SELECT data, _version FROM entities 
-		WHERE tenant_id = ? AND entity_type = ?
-		ORDER BY id
-	`, int(s.config.TenantID), entity)
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT data, _version FROM entities WHERE `+s.tenantWhere()+`entity_type = ? ORDER BY id`,
+		s.tenantArgs(entity)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list entities: %w", err)
 	}
@@ -1403,9 +1578,9 @@ func (s *SQLiteStore) Exists(ctx context.Context, entity string, id int) bool {
 	}
 
 	var exists bool
-	err := s.readDB.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM entities WHERE tenant_id = ? AND entity_type = ? AND id = ?)
-	`, int(s.config.TenantID), entity, id).Scan(&exists)
+	err := s.readDB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
+		s.tenantArgs(entity, id)...).Scan(&exists)
 
 	return err == nil && exists
 }
@@ -1440,41 +1615,17 @@ func (s *SQLiteStore) Search(ctx context.Context, entity string, field string, q
 	
 	switch matchType {
 	case "exact":
-		sqlQuery = `
-			SELECT data, _version FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? 
-			  AND json_extract(data, '$.' || ?) = ?
-			ORDER BY id
-		`
-		args = []interface{}{int(s.config.TenantID), entity, field, query}
-		
+		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) = ? ORDER BY id`
+		args = s.tenantArgs(entity, field, query)
 	case "contains":
-		sqlQuery = `
-			SELECT data, _version FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? 
-			  AND json_extract(data, '$.' || ?) LIKE ?
-			ORDER BY id
-		`
-		args = []interface{}{int(s.config.TenantID), entity, field, "%" + query + "%"}
-		
+		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = s.tenantArgs(entity, field, "%"+query+"%")
 	case "starts":
-		sqlQuery = `
-			SELECT data, _version FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? 
-			  AND json_extract(data, '$.' || ?) LIKE ?
-			ORDER BY id
-		`
-		args = []interface{}{int(s.config.TenantID), entity, field, query + "%"}
-		
+		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = s.tenantArgs(entity, field, query+"%")
 	case "ends":
-		sqlQuery = `
-			SELECT data, _version FROM entities 
-			WHERE tenant_id = ? AND entity_type = ? 
-			  AND json_extract(data, '$.' || ?) LIKE ?
-			ORDER BY id
-		`
-		args = []interface{}{int(s.config.TenantID), entity, field, "%" + query}
-		
+		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = s.tenantArgs(entity, field, "%"+query)
 	default:
 		return nil, fmt.Errorf("invalid match type: %s", matchType)
 	}
@@ -1527,8 +1678,8 @@ func (s *SQLiteStore) VerifyGraphIntegrity(ctx context.Context) error {
 	expectedEdges := make(map[string]bool)
 
 	entityRows, err := tx.QueryContext(ctx,
-		"SELECT entity_type, id, data FROM entities WHERE tenant_id = ?",
-		int(s.config.TenantID))
+		"SELECT entity_type, id, data FROM entities WHERE "+s.tenantWhere()+"1=1",
+		s.tenantArgs()...)
 	if err != nil {
 		return fmt.Errorf("VerifyGraphIntegrity: query entities: %w", err)
 	}
@@ -1723,8 +1874,8 @@ func (s *SQLiteStore) RebuildGraph(ctx context.Context) error {
 	}
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT entity_type, id, data FROM entities WHERE tenant_id = ?",
-		int(s.config.TenantID))
+		"SELECT entity_type, id, data FROM entities WHERE "+s.tenantWhere()+"1=1",
+		s.tenantArgs()...)
 	if err != nil {
 		return err
 	}
@@ -1802,25 +1953,42 @@ func (s *SQLiteStore) indexForFTS(ctx context.Context, tx *sql.Tx, entity string
 	idStr := fmt.Sprintf("%d", id)
 
 	// First, delete any existing FTS entry for this entity
-	tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-	_, err := tx.ExecContext(ctx, `
-		DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
-	`, tidStr, entity, idStr)
-	if err != nil {
-		return err
+	var ftsDeleteErr error
+	if s.config.PerFileTenants {
+		_, ftsDeleteErr = tx.ExecContext(ctx, `
+			DELETE FROM entities_fts WHERE entity_type = ? AND entity_id = ?
+		`, entity, idStr)
+	} else {
+		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
+		_, ftsDeleteErr = tx.ExecContext(ctx, `
+			DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
+		`, tidStr, entity, idStr)
 	}
-	
+	if ftsDeleteErr != nil {
+		return ftsDeleteErr
+	}
+
 	// Extract searchable text content from the entity
 	content := extractTextContent(data)
 	if content == "" {
 		return nil // Nothing to index
 	}
-	
+
 	// Insert into FTS index
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO entities_fts (tenant_id, entity_type, entity_id, content)
-		VALUES (?, ?, ?, ?)
-	`, tidStr, entity, idStr, content)
+	var ftsInsertErr error
+	if s.config.PerFileTenants {
+		_, ftsInsertErr = tx.ExecContext(ctx, `
+			INSERT INTO entities_fts (entity_type, entity_id, content)
+			VALUES (?, ?, ?)
+		`, entity, idStr, content)
+	} else {
+		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
+		_, ftsInsertErr = tx.ExecContext(ctx, `
+			INSERT INTO entities_fts (tenant_id, entity_type, entity_id, content)
+			VALUES (?, ?, ?, ?)
+		`, tidStr, entity, idStr, content)
+	}
+	err := ftsInsertErr
 	
 	return err
 }
@@ -1889,24 +2057,44 @@ func (s *SQLiteStore) FullTextSearch(ctx context.Context, query string, entity s
 	
 	if entity != "" {
 		// Search within specific entity type
-		rows, err = s.readDB.QueryContext(ctx, `
-			SELECT e.entity_type, e.id, e.data
-			FROM entities_fts
-			JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-			WHERE entities_fts.tenant_id = ? AND entities_fts.entity_type = ? AND entities_fts MATCH ?
-			ORDER BY rank
-			LIMIT 100
-		`, int(s.config.TenantID), fmt.Sprintf("%d", int(s.config.TenantID)), entity, ftsQuery)
+		if s.config.PerFileTenants {
+			rows, err = s.readDB.QueryContext(ctx, `
+				SELECT e.entity_type, e.id, e.data
+				FROM entities_fts
+				JOIN entities e ON entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
+				WHERE entities_fts.entity_type = ? AND entities_fts MATCH ?
+				ORDER BY rank LIMIT 100
+			`, entity, ftsQuery)
+		} else {
+			tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
+			rows, err = s.readDB.QueryContext(ctx, `
+				SELECT e.entity_type, e.id, e.data
+				FROM entities_fts
+				JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
+				WHERE entities_fts.tenant_id = ? AND entities_fts.entity_type = ? AND entities_fts MATCH ?
+				ORDER BY rank LIMIT 100
+			`, int(s.config.TenantID), tidStr, entity, ftsQuery)
+		}
 	} else {
 		// Search across all entities
-		rows, err = s.readDB.QueryContext(ctx, `
-			SELECT e.entity_type, e.id, e.data
-			FROM entities_fts
-			JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-			WHERE entities_fts.tenant_id = ? AND entities_fts MATCH ?
-			ORDER BY rank
-			LIMIT 100
-		`, int(s.config.TenantID), fmt.Sprintf("%d", int(s.config.TenantID)), ftsQuery)
+		if s.config.PerFileTenants {
+			rows, err = s.readDB.QueryContext(ctx, `
+				SELECT e.entity_type, e.id, e.data
+				FROM entities_fts
+				JOIN entities e ON entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
+				WHERE entities_fts MATCH ?
+				ORDER BY rank LIMIT 100
+			`, ftsQuery)
+		} else {
+			tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
+			rows, err = s.readDB.QueryContext(ctx, `
+				SELECT e.entity_type, e.id, e.data
+				FROM entities_fts
+				JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
+				WHERE entities_fts.tenant_id = ? AND entities_fts MATCH ?
+				ORDER BY rank LIMIT 100
+			`, int(s.config.TenantID), tidStr, ftsQuery)
+		}
 	}
 	
 	if err != nil {
@@ -1986,26 +2174,35 @@ func (s *SQLiteStore) CountEntities(ctx context.Context, entity string) (int, er
 
 	// Adapted table path
 	if spec := s.adapted.Get(entity); spec != nil {
-		countSQL := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE tenant_id = ?`, spec.TableName())
-		stmt, err := s.stmtCache.Get(countSQL)
+		var cntSQL string
+		if s.config.PerFileTenants {
+			cntSQL = fmt.Sprintf(`SELECT COUNT(*) FROM %s`, spec.TableName())
+		} else {
+			cntSQL = fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE tenant_id = ?`, spec.TableName())
+		}
+		stmt, err := s.stmtCache.Get(cntSQL)
 		if err != nil {
 			return 0, fmt.Errorf("count adapted prepare: %w", err)
 		}
 		var count int
-		err = stmt.QueryRowContext(ctx, int(s.config.TenantID)).Scan(&count)
+		if s.config.PerFileTenants {
+			err = stmt.QueryRowContext(ctx).Scan(&count)
+		} else {
+			err = stmt.QueryRowContext(ctx, int(s.config.TenantID)).Scan(&count)
+		}
 		if err != nil {
 			return 0, fmt.Errorf("count adapted entities: %w", err)
 		}
 		return count, nil
 	}
 
-	const countSQL = `SELECT COUNT(*) FROM entities WHERE tenant_id = ? AND entity_type = ?`
-	stmt, err := s.stmtCache.Get(countSQL)
+	cntSQL := `SELECT COUNT(*) FROM entities WHERE ` + s.tenantWhere() + `entity_type = ?`
+	stmt, err := s.stmtCache.Get(cntSQL)
 	if err != nil {
 		return 0, fmt.Errorf("count prepare: %w", err)
 	}
 	var count int
-	err = stmt.QueryRowContext(ctx, int(s.config.TenantID), entity).Scan(&count)
+	err = stmt.QueryRowContext(ctx, s.tenantArgs(entity)...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count entities: %w", err)
 	}
@@ -2079,8 +2276,8 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 	// Count total
 	var total int
 	err := s.readDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entities WHERE tenant_id = ? AND entity_type = ?`,
-		int(s.config.TenantID), entity,
+		`SELECT COUNT(*) FROM entities WHERE `+s.tenantWhere()+`entity_type = ?`,
+		s.tenantArgs(entity)...,
 	).Scan(&total)
 	if err != nil {
 		return nil, fmt.Errorf("count entities: %w", err)
@@ -2092,8 +2289,8 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 
 	// Fetch page
 	rows, err := s.readDB.QueryContext(ctx,
-		`SELECT data, _version FROM entities WHERE tenant_id = ? AND entity_type = ? ORDER BY id LIMIT ? OFFSET ?`,
-		int(s.config.TenantID), entity, limit, offset,
+		`SELECT data, _version FROM entities WHERE `+s.tenantWhere()+`entity_type = ? ORDER BY id LIMIT ? OFFSET ?`,
+		s.tenantArgs(entity, limit, offset)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list paged: %w", err)
@@ -2127,8 +2324,8 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 // to the OQL validator even when they have no blob rows.
 func (s *SQLiteStore) ListEntities(ctx context.Context) ([]string, error) {
 	rows, err := s.readDB.QueryContext(ctx,
-		"SELECT DISTINCT entity_type FROM entities WHERE tenant_id = ? ORDER BY entity_type",
-		int(s.config.TenantID))
+		"SELECT DISTINCT entity_type FROM entities WHERE "+s.tenantWhere()+"1=1 ORDER BY entity_type",
+		s.tenantArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("query entity types: %w", err)
 	}

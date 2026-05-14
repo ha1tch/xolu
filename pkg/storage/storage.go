@@ -46,6 +46,18 @@ type StoreConfig struct {
 	SQLiteMaxIdleConns        int // Max idle database connections
 	SQLiteReadPoolSize        int // Max open read connections (0 = auto)
 	SQLiteContentionThreshold int // Adaptive lock threshold 0-100
+
+	// SQLitePerFileTenants mirrors config.Config.SQLitePerFileTenants.
+	// When true, each tenant gets its own SQLite database file and the
+	// tenant_id column is absent from the schema.
+	SQLitePerFileTenants bool
+}
+
+// TenantModeProvider is implemented by storage backends that support
+// per-file tenant isolation. The OQL layer uses this to decide whether
+// to inject tenant_id scoping into pushed-down SQL queries.
+type TenantModeProvider interface {
+	IsPerFileTenant() bool
 }
 
 // Store defines the core interface for entity storage backends

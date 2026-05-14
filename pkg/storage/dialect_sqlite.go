@@ -34,7 +34,11 @@ var pow10 = [19]int64{
 }
 
 // SQLiteStorageDialect implements StorageDialect for SQLite.
-type SQLiteStorageDialect struct{}
+// When PerFileTenants is true, tenant_id column and WHERE clauses are omitted
+// from adapted table DDL and queries — the database file itself is the isolation boundary.
+type SQLiteStorageDialect struct {
+	PerFileTenants bool
+}
 
 func (d *SQLiteStorageDialect) Name() string { return "sqlite" }
 
@@ -65,7 +69,9 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 
 	b.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", spec.TableName()))
 	b.WriteString("    id INTEGER NOT NULL,\n")
-	b.WriteString("    tenant_id INTEGER NOT NULL DEFAULT 0,\n")
+	if !d.PerFileTenants {
+		b.WriteString("    tenant_id INTEGER NOT NULL DEFAULT 0,\n")
+	}
 
 	for _, col := range spec.Columns {
 		nullable := "NOT NULL"
@@ -86,7 +92,11 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 	b.WriteString("    _version INTEGER NOT NULL DEFAULT 1,\n")
 	b.WriteString("    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n")
 	b.WriteString("    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n")
-	b.WriteString("    PRIMARY KEY (tenant_id, id)\n")
+	if d.PerFileTenants {
+		b.WriteString("    PRIMARY KEY (id)\n")
+	} else {
+		b.WriteString("    PRIMARY KEY (tenant_id, id)\n")
+	}
 	b.WriteString(");\n")
 
 	return b.String()
@@ -95,9 +105,11 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 func (d *SQLiteStorageDialect) CreateIndexSQL(spec *AdaptedTableSpec) []string {
 	var stmts []string
 
-	stmts = append(stmts, fmt.Sprintf(
-		"CREATE INDEX IF NOT EXISTS idx_%s_tenant ON %s(tenant_id);",
-		spec.TableName(), spec.TableName()))
+	if !d.PerFileTenants {
+		stmts = append(stmts, fmt.Sprintf(
+			"CREATE INDEX IF NOT EXISTS idx_%s_tenant ON %s(tenant_id);",
+			spec.TableName(), spec.TableName()))
+	}
 
 	for _, idx := range spec.Indexes {
 		cols := strings.Join(idx.Columns, ", ")
@@ -114,8 +126,15 @@ func (d *SQLiteStorageDialect) CreateIndexSQL(spec *AdaptedTableSpec) []string {
 }
 
 func (d *SQLiteStorageDialect) InsertSQL(spec *AdaptedTableSpec, hasExtra bool) (string, []string) {
-	cols := []string{"id", "tenant_id"}
-	placeholders := []string{"?", "?"}
+	var cols []string
+	var placeholders []string
+	if d.PerFileTenants {
+		cols = []string{"id"}
+		placeholders = []string{"?"}
+	} else {
+		cols = []string{"id", "tenant_id"}
+		placeholders = []string{"?", "?"}
+	}
 
 	for _, col := range spec.Columns {
 		cols = append(cols, col.Name)
@@ -145,6 +164,10 @@ func (d *SQLiteStorageDialect) SelectSQL(spec *AdaptedTableSpec) string {
 	}
 	cols = append(cols, "_version")
 
+	if d.PerFileTenants {
+		return fmt.Sprintf("SELECT %s FROM %s WHERE id = ?",
+			strings.Join(cols, ", "), spec.TableName())
+	}
 	return fmt.Sprintf("SELECT %s FROM %s WHERE tenant_id = ? AND id = ?",
 		strings.Join(cols, ", "), spec.TableName())
 }
@@ -159,6 +182,10 @@ func (d *SQLiteStorageDialect) SelectAllSQL(spec *AdaptedTableSpec) string {
 	}
 	cols = append(cols, "_version")
 
+	if d.PerFileTenants {
+		return fmt.Sprintf("SELECT %s FROM %s ORDER BY id",
+			strings.Join(cols, ", "), spec.TableName())
+	}
 	return fmt.Sprintf("SELECT %s FROM %s WHERE tenant_id = ? ORDER BY id",
 		strings.Join(cols, ", "), spec.TableName())
 }
@@ -177,7 +204,12 @@ func (d *SQLiteStorageDialect) UpdateSQL(spec *AdaptedTableSpec, versionCheck bo
 	setClauses = append(setClauses, "_version = _version + 1")
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 
-	where := "WHERE tenant_id = ? AND id = ?"
+	var where string
+	if d.PerFileTenants {
+		where = "WHERE id = ?"
+	} else {
+		where = "WHERE tenant_id = ? AND id = ?"
+	}
 	if versionCheck {
 		where += " AND _version = ?"
 	}
@@ -189,10 +221,18 @@ func (d *SQLiteStorageDialect) UpdateSQL(spec *AdaptedTableSpec, versionCheck bo
 }
 
 func (d *SQLiteStorageDialect) DeleteSQL(spec *AdaptedTableSpec) string {
+	if d.PerFileTenants {
+		return fmt.Sprintf("DELETE FROM %s WHERE id = ?", spec.TableName())
+	}
 	return fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND id = ?", spec.TableName())
 }
 
 func (d *SQLiteStorageDialect) ExistsSQL(spec *AdaptedTableSpec) string {
+	if d.PerFileTenants {
+		return fmt.Sprintf(
+			"SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)",
+			spec.TableName())
+	}
 	return fmt.Sprintf(
 		"SELECT EXISTS(SELECT 1 FROM %s WHERE tenant_id = ? AND id = ?)",
 		spec.TableName())

@@ -98,9 +98,13 @@ func (e *Executor) Execute(ctx context.Context, stmt ast.Statement) (*Result, er
 // the store's List/Search methods already return only that tenant's data.
 func (e *Executor) ExecuteWithStore(ctx context.Context, stmt ast.Statement, store storage.Store) (*Result, error) {
 	// Extract tenant ID for SQL generation (push-down path only).
+	// In per-file mode the store file is the isolation boundary; no tenant_id
+	// column exists, so the SQL generators must not inject it.
 	sqlTenantID := ""
 	if cfg := store.Config(); cfg.TenantID != 0 {
-		sqlTenantID = fmt.Sprintf("%d", cfg.TenantID)
+		if tp, ok := store.(storage.TenantModeProvider); !ok || !tp.IsPerFileTenant() {
+			sqlTenantID = fmt.Sprintf("%d", cfg.TenantID)
+		}
 	}
 	// Create a temporary executor with the overridden store.
 	tmp := &Executor{
@@ -408,9 +412,15 @@ func (e *Executor) executeInsert(ctx context.Context, s *ast.InsertStatement, te
 			}
 		}
 
-		// Inject tenant_id if scoped
+		// Inject tenant_id if scoped — but not in per-file mode (no column exists).
 		if tenantID != "" {
-			record["tenant_id"] = tenantID
+			perFile := false
+			if tp, ok := e.store.(storage.TenantModeProvider); ok {
+				perFile = tp.IsPerFileTenant()
+			}
+			if !perFile {
+				record["tenant_id"] = tenantID
+			}
 		}
 
 		// Validate against schema if validator is configured

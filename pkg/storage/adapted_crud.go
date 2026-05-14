@@ -213,6 +213,15 @@ func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, err
 // ---------------------------------------------------------------------------
 
 // adaptedCreate inserts an entity into its adapted table.
+// dialectIsPerFile returns true when the dialect is operating in per-file
+// tenant mode (i.e. tenant_id column absent from adapted tables).
+func dialectIsPerFile(dialect StorageDialect) bool {
+	if d, ok := dialect.(*SQLiteStorageDialect); ok {
+		return d.PerFileTenants
+	}
+	return false
+}
+
 func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int, data map[string]interface{}) error {
 	colVals, extra := PartitionData(spec, data)
 
@@ -221,8 +230,14 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 		return err
 	}
 
-	// Build argument list matching the dialect's InsertSQL column order
-	args := []interface{}{id, tenantID}
+	// Build argument list matching the dialect's InsertSQL column order.
+	// Per-file mode: InsertSQL omits tenant_id column, so don't pass tenantID.
+	var args []interface{}
+	if dialectIsPerFile(dialect) {
+		args = []interface{}{id}
+	} else {
+		args = []interface{}{id, tenantID}
+	}
 	args = append(args, colVals...)
 
 	hasExtraArg := spec.HasExtra
@@ -248,7 +263,12 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 // adaptedGet retrieves an entity from its adapted table.
 func adaptedGet(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) (map[string]interface{}, error) {
 	query := dialect.SelectSQL(spec)
-	row := db.QueryRowContext(ctx, query, tenantID, id)
+	var row *sql.Row
+	if dialectIsPerFile(dialect) {
+		row = db.QueryRowContext(ctx, query, id)
+	} else {
+		row = db.QueryRowContext(ctx, query, tenantID, id)
+	}
 
 	// Prepare scan targets: columns + optional _extra + _version
 	scanCount := len(spec.Columns) + 1 // +1 for _version
@@ -350,7 +370,11 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 	}
 
 	// WHERE args
-	args = append(args, tenantID, id)
+	if dialectIsPerFile(dialect) {
+		args = append(args, id)
+	} else {
+		args = append(args, tenantID, id)
+	}
 	if hasVersion {
 		args = append(args, expectVersion)
 	}
@@ -379,7 +403,13 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 func adaptedDelete(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) error {
 	query := dialect.DeleteSQL(spec)
 
-	result, err := tx.ExecContext(ctx, query, tenantID, id)
+	var result sql.Result
+	var err error
+	if dialectIsPerFile(dialect) {
+		result, err = tx.ExecContext(ctx, query, id)
+	} else {
+		result, err = tx.ExecContext(ctx, query, tenantID, id)
+	}
 	if err != nil {
 		return fmt.Errorf("adapted delete from %s failed: %w", spec.TableName(), err)
 	}
@@ -398,7 +428,13 @@ func adaptedDelete(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 func adaptedList(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int) ([]map[string]interface{}, error) {
 	query := dialect.SelectAllSQL(spec)
 
-	rows, err := db.QueryContext(ctx, query, tenantID)
+	var rows *sql.Rows
+	var err error
+	if dialectIsPerFile(dialect) {
+		rows, err = db.QueryContext(ctx, query)
+	} else {
+		rows, err = db.QueryContext(ctx, query, tenantID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("adapted list from %s failed: %w", spec.TableName(), err)
 	}
@@ -484,7 +520,12 @@ func adaptedExists(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dial
 	query := dialect.ExistsSQL(spec)
 
 	var exists bool
-	err := db.QueryRowContext(ctx, query, tenantID, id).Scan(&exists)
+	var err error
+	if dialectIsPerFile(dialect) {
+		err = db.QueryRowContext(ctx, query, id).Scan(&exists)
+	} else {
+		err = db.QueryRowContext(ctx, query, tenantID, id).Scan(&exists)
+	}
 	return err == nil && exists
 }
 
@@ -492,7 +533,12 @@ func adaptedExists(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dial
 func adaptedGetInTx(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) (map[string]interface{}, int, error) {
 	// Reuse the dialect's SelectSQL but execute against tx instead of db
 	query := dialect.SelectSQL(spec)
-	row := tx.QueryRowContext(ctx, query, tenantID, id)
+	var row *sql.Row
+	if dialectIsPerFile(dialect) {
+		row = tx.QueryRowContext(ctx, query, id)
+	} else {
+		row = tx.QueryRowContext(ctx, query, tenantID, id)
+	}
 
 	// Prepare scan targets: columns + optional _extra + _version
 	scanCount := len(spec.Columns) + 1 // +1 for _version

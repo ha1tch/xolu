@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -140,6 +141,17 @@ func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 	return actual.(*sulpher.JobManager)
 }
 
+// tenantDBPath derives the per-file SQLite database path for a given tenant.
+// Mirrors the timeseries layout:
+//
+//	tenant 0 (base store): basePath  (e.g. data/olu.db)
+//	tenant N:              <dir>/sql/<seg>/<base>  (e.g. data/sql/t0001/olu.db)
+func tenantDBPath(basePath string, tenantID uint16) string {
+	dir := filepath.Dir(basePath)
+	base := filepath.Base(basePath)
+	return filepath.Join(dir, "sql", tenant.StorageDirSegment(tenantID), base)
+}
+
 func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 	if tenantID == 0 {
 		return s.storage, nil
@@ -152,9 +164,18 @@ func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 
 	// Slow path: create and cache
 	baseCfg := s.storage.Config()
+
+	dbPath := baseCfg.DBPath
+	if baseCfg.SQLitePerFileTenants {
+		dbPath = tenantDBPath(baseCfg.DBPath, tenantID)
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+			return nil, fmt.Errorf("storeForTenant mkdir: %w", err)
+		}
+	}
+
 	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:                      baseCfg.Type,
-		DBPath:                    baseCfg.DBPath,
+		DBPath:                    dbPath,
 		BaseDir:                   baseCfg.BaseDir,
 		Schema:                    baseCfg.Schema,
 		FullTextEnabled:           baseCfg.FullTextEnabled,
@@ -166,6 +187,7 @@ func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 		SQLiteMaxIdleConns:        baseCfg.SQLiteMaxIdleConns,
 		SQLiteReadPoolSize:        baseCfg.SQLiteReadPoolSize,
 		SQLiteContentionThreshold: baseCfg.SQLiteContentionThreshold,
+		SQLitePerFileTenants:      baseCfg.SQLitePerFileTenants,
 	})
 	if err != nil {
 		return nil, err

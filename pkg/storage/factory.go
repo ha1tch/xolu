@@ -67,6 +67,7 @@ func NewStoreFromConfig(cfg StoreConfig) (Store, error) {
 			MaxIdleConns:        cfg.SQLiteMaxIdleConns,
 			ReadPoolSize:        cfg.SQLiteReadPoolSize,
 			ContentionThreshold: cfg.SQLiteContentionThreshold,
+			PerFileTenants:      cfg.SQLitePerFileTenants,
 		})
 	case "jsonfile":
 		store, err := NewJSONFileStore(cfg.BaseDir, cfg.Schema)
@@ -130,6 +131,9 @@ func init() {
 		}
 		if fts, ok := config["full_text_enabled"].(bool); ok {
 			sqliteConfig.FullTextEnabled = fts
+		}
+		if pft, ok := config["per_file_tenants"].(bool); ok {
+			sqliteConfig.PerFileTenants = pft
 		}
 		
 		return NewSQLiteStore(dbPath, sqliteConfig)

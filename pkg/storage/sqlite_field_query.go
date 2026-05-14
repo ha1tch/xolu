@@ -36,17 +36,13 @@ func (s *SQLiteStore) ListWithFieldsAndFilter(ctx context.Context, entity string
 	// No field restriction with predicates: extract all fields but still filter.
 	// This path handles SELECT * with WHERE on blob entities.
 
-	const listSQL = `
-		SELECT data, _version FROM entities
-		WHERE tenant_id = ? AND entity_type = ?
-		ORDER BY id
-	`
+	listSQL := `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? ORDER BY id`
 	stmt, err := s.stmtCache.Get(listSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare list: %w", err)
 	}
 
-	rows, err := stmt.QueryContext(ctx, int(s.config.TenantID), entity)
+	rows, err := stmt.QueryContext(ctx, s.tenantArgs(entity)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list entities: %w", err)
 	}
@@ -99,17 +95,13 @@ func (s *SQLiteStore) ListWithFields(ctx context.Context, entity string, fields 
 		return s.List(ctx, entity)
 	}
 
-	const listSQL = `
-		SELECT data, _version FROM entities
-		WHERE tenant_id = ? AND entity_type = ?
-		ORDER BY id
-	`
+	listSQL := `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? ORDER BY id`
 	stmt, err := s.stmtCache.Get(listSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare list: %w", err)
 	}
 
-	rows, err := stmt.QueryContext(ctx, int(s.config.TenantID), entity)
+	rows, err := stmt.QueryContext(ctx, s.tenantArgs(entity)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list entities: %w", err)
 	}
