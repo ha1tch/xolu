@@ -4,7 +4,51 @@ All notable changes to olu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.7-patched99] - 2026-05-14
+## [0.9.7-patched100] - 2026-05-14
+
+### Restore — iolu commands lost between patched73 and patched99
+
+Four command groups were present in the vendored xolu at patched73 but
+absent from the current iolu. All are restored and forward-ported to
+patched99's codebase. One case-sensitivity bug is fixed in the process.
+
+**Restored commands:**
+
+`iolu db init --db <path> [--tenant name[:id]] [--graph] [--ts-dir <path>]`
+Creates a new olu SQLite database with the full shared-mode schema, optional
+graph edge tables, and optional timeseries directory provisioning. Accepts
+repeatable `--tenant` flags to pre-register tenants in one step (required
+for strict-mode deployments).
+
+`iolu db status --db <path> [--base-dir <path>]`
+Reports database file size, schema versions, per-table row counts, graph
+edge table listing, tenant registry, and timeseries directory status.
+
+`iolu db upgrade --db <path>`
+Applies pending schema migrations idempotently. Currently handles v2
+(schema_version seeding) and v3 (_version column). Safe to run against
+a patched99 database — both migrations report "already applied".
+
+`iolu tenant provision-ts --db <path> --name <name> --ts-dir <path>`
+Creates the per-tenant timeseries directory for a named tenant.
+
+**Bug fix — timeseries directory case:**
+
+The vendored iolu used lowercase `t%04x` for timeseries directory names
+(`t000a`, `t00ff`). `tenant.StorageDirSegment` uses uppercase `t%04X`
+(`t000A`, `t00FF`). The mismatch only affects tenants with IDs ≥ 10
+(where hex letters appear). All three affected call sites are corrected:
+`provisionTSDir`, `cmdTenantInfo`, and the `db init` `--ts-dir` path.
+The `db status` timeseries check was not affected (it scans the directory
+rather than constructing a path).
+
+**Also restored:** `tenantFlags` repeatable flag type, `registerTenant`,
+`createGraphTable`, `initSchema`, `ensureCoreTables`, `applyMigration`,
+`createDB`, `tableCount`, `tenantEntityCount` helper functions.
+
+All 2484 tests pass. iolu binary smoke-tested against a live SQLite database.
+
+
 
 ### Change — iolu included in standard Docker image
 
