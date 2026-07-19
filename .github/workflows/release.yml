@@ -1,0 +1,126 @@
+# On a version tag, build xolu, iolu, and xotogen for every supported target
+# (cgo disabled), package each target as one archive (.tar.gz for Unix-like,
+# .zip for Windows) with LICENSE and README, and attach the archives plus
+# SHA256SUMS to the GitHub release. The target matrix mirrors cross-build.yml
+# (see its header for the modernc.org/libc constraint). Binaries self-report
+# their version via pkg/version; the tag is used only for naming.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v0.16.2)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: '386' }
+          - { goos: linux,   goarch: arm, goarm: '6' }
+          - { goos: linux,   goarch: arm, goarm: '7' }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: '386' }
+          - { goos: windows, goarch: arm64 }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: freebsd, goarch: arm64 }
+          - { goos: freebsd, goarch: '386' }
+          - { goos: openbsd, goarch: amd64 }
+          - { goos: openbsd, goarch: arm64 }
+          - { goos: netbsd,  goarch: amd64 }
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Descriptive platform suffix, including the ARM version where set.
+          suffix="${GOOS}-${GOARCH}"
+          if [ -n "${GOARM}" ]; then suffix="${suffix}v${GOARM}"; fi
+
+          stage="xolu-${VERSION}-${suffix}"
+          mkdir -p "dist/${stage}"
+
+          ext=""
+          if [ "${GOOS}" = "windows" ]; then ext=".exe"; fi
+
+          # All three shipped binaries into one staging directory.
+          go build -trimpath -o "dist/${stage}/xolu${ext}"   ./cmd/xolu
+          go build -trimpath -o "dist/${stage}/iolu${ext}"   ./cmd/iolu
+          go build -trimpath -o "dist/${stage}/xotogen${ext}" ./cmd/xotogen
+
+          # Licence and readme alongside the binaries.
+          cp LICENSE README.md "dist/${stage}/" 2>/dev/null || true
+
+          # Package: zip for Windows, tar.gz for everything else.
+          cd dist
+          if [ "${GOOS}" = "windows" ]; then
+            archive="${stage}.zip"
+            zip -r -q "${archive}" "${stage}"
+          else
+            archive="${stage}.tar.gz"
+            tar czf "${archive}" "${stage}"
+          fi
+          echo "archive=dist/${archive}" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: xolu-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+          path: ${{ env.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

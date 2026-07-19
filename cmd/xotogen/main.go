@@ -2,14 +2,14 @@
 // Licensed under the Apache License, Version 2.0
 // https://www.apache.org/licenses/LICENSE-2.0
 
-// Command otogen generates credentials for an xolu server configured for tenant
+// Command xotogen generates credentials for an xolu server configured for tenant
 // access control. It implements the minting procedures described in
 // docs/proposals/tenant-access-control-operations.md:
 //
-//	otogen jwt     — mint an HS256 JWT with tenant grants (scoped mode)
-//	otogen apikey  — generate an API key and its APIKeyGrants config block
-//	otogen bearer  — generate an InternalToken (bearer / trusted-gateway)
-//	otogen s3key   — generate an S3 access-key/secret pair and its S3KeyGrants block
+//	xotogen jwt     — mint an HS256 JWT with tenant grants (scoped mode)
+//	xotogen apikey  — generate an API key and its APIKeyGrants config block
+//	xotogen bearer  — generate an InternalToken (bearer / trusted-gateway)
+//	xotogen s3key   — generate an S3 access-key/secret pair and its S3KeyGrants block
 //
 // The JWT signing secret is never accepted on the command line (it would leak
 // into shell history and process listings). It is read from the XOLU_JWT_SECRET
@@ -33,10 +33,10 @@ import (
 	"github.com/ha1tch/xolu/pkg/s3sig"
 )
 
-const usage = `otogen — credential generator for xolu tenant access control
+const usage = `xotogen — credential generator for xolu tenant access control
 
 Usage:
-  otogen <command> [flags]
+  xotogen <command> [flags]
 
 Commands:
   jwt        Mint an HS256 JWT with tenant grants (scoped mode)
@@ -46,7 +46,7 @@ Commands:
   s3sign     Produce a signed S3 request to verify an S3KeyGrant end-to-end
   help       Show this help
 
-Run "otogen <command> -h" for command-specific flags.
+Run "xotogen <command> -h" for command-specific flags.
 
 All commands accept --format text|yaml|json|csv (default text). For jwt, text
 emits the bare token (suitable for piping); other formats wrap it with its grant.
@@ -75,7 +75,7 @@ func main() {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
-		fmt.Fprintf(os.Stderr, "otogen: unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "xotogen: unknown command %q\n\n", os.Args[1])
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -98,10 +98,10 @@ func cmdJWT(args []string) {
 		format     = fs.String("format", "text", "output format: text (bare token), yaml, json, csv")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "otogen jwt — mint an HS256 JWT with tenant grants\n\n")
+		fmt.Fprintf(os.Stderr, "xotogen jwt — mint an HS256 JWT with tenant grants\n\n")
 		fmt.Fprintln(os.Stderr, "Examples:")
-		fmt.Fprintln(os.Stderr, "  XOLU_JWT_SECRET=... otogen jwt --tenants acme --sub user-1 --iss oldbytes --ttl 1h")
-		fmt.Fprintln(os.Stderr, "  XOLU_JWT_SECRET=... otogen jwt --admin --sub ops-jane --ttl 15m")
+		fmt.Fprintln(os.Stderr, "  XOLU_JWT_SECRET=... xotogen jwt --tenants acme --sub user-1 --iss oldbytes --ttl 1h")
+		fmt.Fprintln(os.Stderr, "  XOLU_JWT_SECRET=... xotogen jwt --admin --sub ops-jane --ttl 15m")
 		fmt.Fprintln(os.Stderr, "\nFlags:")
 		fs.PrintDefaults()
 	}
@@ -167,11 +167,11 @@ func cmdAPIKey(args []string) {
 		format  = fs.String("format", "text", "output format: text, yaml, json, csv")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "otogen apikey — generate an API key and its APIKeyGrants block\n\n")
+		fmt.Fprintf(os.Stderr, "xotogen apikey — generate an API key and its APIKeyGrants block\n\n")
 		fmt.Fprintln(os.Stderr, "Examples:")
-		fmt.Fprintln(os.Stderr, "  otogen apikey --tenants acme")
-		fmt.Fprintln(os.Stderr, "  otogen apikey --admin --format json")
-		fmt.Fprintln(os.Stderr, "  otogen apikey --tenants acme --raw")
+		fmt.Fprintln(os.Stderr, "  xotogen apikey --tenants acme")
+		fmt.Fprintln(os.Stderr, "  xotogen apikey --admin --format json")
+		fmt.Fprintln(os.Stderr, "  xotogen apikey --tenants acme --raw")
 		fmt.Fprintln(os.Stderr, "\nFlags:")
 		fs.PrintDefaults()
 	}
@@ -212,7 +212,7 @@ func cmdBearer(args []string) {
 	raw := fs.Bool("raw", false, "print only the token, without any config hint")
 	format := fs.String("format", "text", "output format: text, yaml, json, csv")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "otogen bearer — generate an InternalToken (bearer / trusted-gateway)\n\n")
+		fmt.Fprintf(os.Stderr, "xotogen bearer — generate an InternalToken (bearer / trusted-gateway)\n\n")
 		fmt.Fprintln(os.Stderr, "The bearer token is a single shared secret for the whole server. Under scoped")
 		fmt.Fprintln(os.Stderr, "mode it is treated as full (admin) authority; it isolates nothing. Use it only")
 		fmt.Fprintln(os.Stderr, "for a trusted gateway that does its own per-user authorization.")
@@ -245,14 +245,14 @@ func cmdS3Key(args []string) {
 		format  = fs.String("format", "text", "output format: text, yaml, json, csv")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "otogen s3key — generate an S3 access-key/secret pair and its S3KeyGrants block\n\n")
+		fmt.Fprintf(os.Stderr, "xotogen s3key — generate an S3 access-key/secret pair and its S3KeyGrants block\n\n")
 		fmt.Fprintln(os.Stderr, "Under TenantAuthMode: scoped, the access key must have a matching S3KeyGrant")
 		fmt.Fprintln(os.Stderr, "that authorises the requested bucket. The access-key string is no longer")
 		fmt.Fprintln(os.Stderr, "trusted as the tenant name, and scoped mode forces S3 authentication.")
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintln(os.Stderr, "  otogen s3key --tenants acme")
-		fmt.Fprintln(os.Stderr, "  otogen s3key --tenants acme,globex --format yaml")
-		fmt.Fprintln(os.Stderr, "  otogen s3key --admin --format json")
+		fmt.Fprintln(os.Stderr, "  xotogen s3key --tenants acme")
+		fmt.Fprintln(os.Stderr, "  xotogen s3key --tenants acme,globex --format yaml")
+		fmt.Fprintln(os.Stderr, "  xotogen s3key --admin --format json")
 		fmt.Fprintln(os.Stderr, "\nFlags:")
 		fs.PrintDefaults()
 	}
@@ -304,11 +304,11 @@ func cmdS3Sign(args []string) {
 		curl       = fs.Bool("curl", false, "emit a ready-to-run curl command instead of just the header")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "otogen s3sign — produce a signed S3 request to verify an S3KeyGrant\n\n")
+		fmt.Fprintf(os.Stderr, "xotogen s3sign — produce a signed S3 request to verify an S3KeyGrant\n\n")
 		fmt.Fprintln(os.Stderr, "The secret is read from --secret-file or XOLU_S3_SECRET, never from a flag.")
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintln(os.Stderr, "  XOLU_S3_SECRET=... otogen s3sign --access-key AKIA... --bucket acme --curl")
-		fmt.Fprintln(os.Stderr, "  XOLU_S3_SECRET=... otogen s3sign --access-key AKIA... --bucket acme --object f.txt")
+		fmt.Fprintln(os.Stderr, "  XOLU_S3_SECRET=... xotogen s3sign --access-key AKIA... --bucket acme --curl")
+		fmt.Fprintln(os.Stderr, "  XOLU_S3_SECRET=... xotogen s3sign --access-key AKIA... --bucket acme --object f.txt")
 		fmt.Fprintln(os.Stderr, "\nFlags:")
 		fs.PrintDefaults()
 	}
@@ -697,6 +697,6 @@ func quoteList(items []string) string {
 }
 
 func fatal(msg string) {
-	fmt.Fprintln(os.Stderr, "otogen: "+msg)
+	fmt.Fprintln(os.Stderr, "xotogen: "+msg)
 	os.Exit(1)
 }

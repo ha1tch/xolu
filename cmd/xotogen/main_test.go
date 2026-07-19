@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0
 // https://www.apache.org/licenses/LICENSE-2.0
 
-// Regression tests binding otogen's output to the server's auth infrastructure.
-// The central guarantee: a JWT minted by otogen is accepted by the same
-// middleware validator the server uses, with the tenant grant otogen intended.
+// Regression tests binding xotogen's output to the server's auth infrastructure.
+// The central guarantee: a JWT minted by xotogen is accepted by the same
+// middleware validator the server uses, with the tenant grant xotogen intended.
 // This catches drift between the credential generator and the validator.
 
 package main
@@ -19,7 +19,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/s3sig"
 )
 
-const testSecret = "otogen-regression-secret-00000000"
+const testSecret = "xotogen-regression-secret-00000000"
 
 // runThroughAuth pushes a bearer token through the real AuthMiddleware in JWT
 // mode and returns the status plus the resolved tenant grant (if any).
@@ -42,7 +42,7 @@ func runThroughAuth(t *testing.T, token string) (int, middleware.TenantGrant, bo
 	return rec.Code, gotGrant, gotOK
 }
 
-// A scoped (tenants) token minted by otogen is accepted and carries the grant.
+// A scoped (tenants) token minted by xotogen is accepted and carries the grant.
 func TestOtogenJWT_ScopedTokenAccepted(t *testing.T) {
 	claims := map[string]interface{}{
 		"sub":     "user-1",
@@ -55,7 +55,7 @@ func TestOtogenJWT_ScopedTokenAccepted(t *testing.T) {
 	}
 	code, grant, ok := runThroughAuth(t, token)
 	if code != http.StatusOK {
-		t.Fatalf("otogen token rejected: %d", code)
+		t.Fatalf("xotogen token rejected: %d", code)
 	}
 	if !ok {
 		t.Fatal("no tenant grant in context")
@@ -71,7 +71,7 @@ func TestOtogenJWT_ScopedTokenAccepted(t *testing.T) {
 	}
 }
 
-// An admin token minted by otogen is accepted and carries an admin grant.
+// An admin token minted by xotogen is accepted and carries an admin grant.
 func TestOtogenJWT_AdminTokenAccepted(t *testing.T) {
 	claims := map[string]interface{}{
 		"sub":          "ops",
@@ -84,7 +84,7 @@ func TestOtogenJWT_AdminTokenAccepted(t *testing.T) {
 	}
 	code, grant, ok := runThroughAuth(t, token)
 	if code != http.StatusOK {
-		t.Fatalf("otogen admin token rejected: %d", code)
+		t.Fatalf("xotogen admin token rejected: %d", code)
 	}
 	if !ok || !grant.Admin {
 		t.Errorf("expected admin grant, got %+v (ok=%v)", grant, ok)

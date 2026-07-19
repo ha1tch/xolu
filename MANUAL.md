@@ -21,7 +21,7 @@ Complete reference documentation for xolu v0.10.1.
 14. [Dynamic Configuration](docs/DYNCONFIG.md)
 15. [Async Queries](docs/ASYNC_QUERIES.md)
 16. [JSON Schema & Adapted Tables](docs/JSON_SCHEMA.md)
-17. [iolu Admin CLI](docs/IOLU.md)
+17. [iolu — interactive xolu](docs/IOLU.md)
 18. [Error Code Reference](docs/ERROR_CODES.md)
 19. [Upgrade Guide](docs/UPGRADE.md)
 
@@ -1887,7 +1887,7 @@ curl http://localhost:8080/api/v1/users
 
 xolu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.16.1`.
+or API. The current version is `0.16.2`.
 
 ### Database Format Stability
 

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 // https://www.apache.org/licenses/LICENSE-2.0
 
-// iolu is the administrative CLI for xolu. It manages the tenant registry
+// iolu — interactive xolu — is the administrative CLI. It manages the tenant registry
 // and provides operational commands that are deliberately separated from
 // the main xolu binary's runtime responsibilities.
 //
@@ -943,7 +943,7 @@ func fatal(format string, args ...any) {
 
 func printUsage() {
 	w := os.Stderr
-	_, _ = fmt.Fprintf(w, "iolu %s — xolu administrative CLI\n\n", version.Version)
+	_, _ = fmt.Fprintf(w, "iolu %s — interactive xolu\n\n", version.Version)
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  iolu db     <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu tenant <command> [flags]")

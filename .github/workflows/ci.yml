@@ -1,12 +1,7 @@
-# xolu CI — quick tier only (build, vet, unit tests, lint).
-# Stress/integration tiers are dormant guards run per Part 3 §8 of the
-# working practices; wiring them into CI is a recorded, undecided option
-# (see docs/TRACKING.md T-37 note).
-#
-# Versions are pinned exactly. "latest" is how the previous pipeline
-# broke: golangci-lint-action@v4 resolved "latest" to v1.64.8 (the final
-# v1, built with Go 1.24), which cannot load v2 configs or analyse
-# Go ≥ 1.25 targets. Bump the pins deliberately, together.
+# Quick tier: build, vet, unit tests, lint. Versions are pinned deliberately:
+# golangci-lint must be built with a Go toolchain >= the go.mod target, so
+# bump the go directive, the linter pin below, and the Dockerfile base image
+# together.
 
 name: ci
 

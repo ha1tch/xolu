@@ -4,6 +4,24 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **`otogen` renamed `xotogen`.** The name stood for "olu's token
+  generator" and predates the olu→xolu rename; the binary, `cmd/`
+  directory, Makefile targets, and release archives now use `xotogen`.
+  Anyone scripting the old binary name must update.
+
+### Added — CI
+
+- Binary release pipeline: `release.yml` builds `xolu`, `iolu`, and
+  `xotogen` for 16 targets on version tags (cgo disabled), packages each
+  target as one archive with LICENSE/README, and attaches the archives
+  plus SHA256SUMS to the GitHub release. `cross-build.yml` verifies the
+  same matrix on every push. The matrix is bounded by modernc.org/libc
+  platform support (notably: no netbsd/arm64, no dragonfly).
+
 ## [0.16.2] - 2026-07-19 (multi-core fixes: T-39, T-40)
 
 The GitHub CI runner — the first habitual multi-core executor of the full

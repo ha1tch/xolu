@@ -87,7 +87,7 @@ ok "VERSION and version.go = $VERSION"
 
 # 4. Build
 step "Building"
-make build-xolu build-iolu build-otogen 2>&1 | tail -3
+make build-xolu build-iolu build-xotogen 2>&1 | tail -3
 ok "Build clean"
 
 # 5. Single test pass
@@ -100,7 +100,7 @@ COVER_SUMMARY="cover-summary.txt"
 # Binaries in scope for this report. A full release builds all three, so all
 # three partial totals are shown plus the general total. A caller building a
 # single binary can set RELEASE_BINARIES (e.g. "xolu") for one set of stats.
-RELEASE_BINARIES="${RELEASE_BINARIES:-xolu iolu otogen}"
+RELEASE_BINARIES="${RELEASE_BINARIES:-xolu iolu xotogen}"
 
 set +e
 # Scope: ./... so the cmd/ binaries' own tests are part of the gate and the

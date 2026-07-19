@@ -1,14 +1,14 @@
-.PHONY: build build-xolu build-iolu build-otogen run clean test install deps fmt lint benchmark test-race test-unit test-integration
+.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration
 
 # Binary name
 BINARY_NAME=xolu
 ADMIN_BINARY=iolu
-OTOGEN_BINARY=otogen
+XOTOGEN_BINARY=xotogen
 MAIN_PATH=./cmd/xolu
 ADMIN_PATH=./cmd/iolu
-OTOGEN_PATH=./cmd/otogen
+XOTOGEN_PATH=./cmd/xotogen
 
-# Build all binaries (xolu, iolu, otogen)
+# Build all binaries (xolu, iolu, xotogen)
 build: deps
 	@echo "Building ${BINARY_NAME}..."
 	@go build -o ${BINARY_NAME} ${MAIN_PATH}
@@ -16,9 +16,9 @@ build: deps
 	@echo "Building ${ADMIN_BINARY}..."
 	@go build -o ${ADMIN_BINARY} ${ADMIN_PATH}
 	@echo "Build complete: ${ADMIN_BINARY}"
-	@echo "Building ${OTOGEN_BINARY}..."
-	@go build -o ${OTOGEN_BINARY} ${OTOGEN_PATH}
-	@echo "Build complete: ${OTOGEN_BINARY}"
+	@echo "Building ${XOTOGEN_BINARY}..."
+	@go build -o ${XOTOGEN_BINARY} ${XOTOGEN_PATH}
+	@echo "Build complete: ${XOTOGEN_BINARY}"
 
 # Build xolu only
 build-xolu: deps
@@ -27,10 +27,10 @@ build-xolu: deps
 	@echo "Build complete: ${BINARY_NAME}"
 
 # Build token generator
-build-otogen:
-	@echo "Building ${OTOGEN_BINARY}..."
-	@go build -o ${OTOGEN_BINARY} ${OTOGEN_PATH}
-	@echo "Build complete: ${OTOGEN_BINARY}"
+build-xotogen:
+	@echo "Building ${XOTOGEN_BINARY}..."
+	@go build -o ${XOTOGEN_BINARY} ${XOTOGEN_PATH}
+	@echo "Build complete: ${XOTOGEN_BINARY}"
 
 # Build admin CLI
 build-iolu:
@@ -70,7 +70,7 @@ clean:
 	@go clean -testcache
 	@rm -f ${BINARY_NAME}
 	@rm -f ${ADMIN_BINARY}
-	@rm -f ${OTOGEN_BINARY}
+	@rm -f ${XOTOGEN_BINARY}
 	@rm -rf data/*
 	@rm -f *.db
 	@rm -f coverage.out coverage.html test-report.json
@@ -371,10 +371,10 @@ help:
 	@echo "Available targets:"
 	@echo ""
 	@echo "Build & Run:"
-	@echo "  build           - Build xolu, iolu, and otogen"
+	@echo "  build           - Build xolu, iolu, and xotogen"
 	@echo "  build-xolu       - Build xolu only"
 	@echo "  build-iolu      - Build admin CLI (iolu)"
-	@echo "  build-otogen    - Build token generator (otogen)"
+	@echo "  build-xotogen    - Build token generator (xotogen)"
 	@echo "  build-all-tools - Build all binaries"
 	@echo "  build-all       - Build for multiple platforms"
 	@echo "  run             - Build and run the application"
