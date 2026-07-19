@@ -52,6 +52,7 @@ item's Trigger line.
 | T-35 | Investigate: Move's conflict-check → setSpan window (suspected T-34-class race) | cal | P2 | ☐ | Investigation; not proven. After T-34 verification. |
 | T-36 | Create the dormant-guards table (Part 3 §8 compliance) | tooling | P2 | ☐ | Gates the §6 release-gate check; pairs with T-22. |
 | T-37 | Adopt git history inside the checkpoint (retrofit v0.15.1–v0.16.1 boundaries) | tooling | P3 | ☐ | Decided in principle 2026-07-18; execute at next session start. |
+| T-38 | Trusted-proxy-aware client-IP extraction (RealIP replacement) | server | P3 | ☐ | Until then: client identity = TCP peer; behind a proxy, rate limits are per-proxy. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 
 ---
@@ -358,6 +359,21 @@ Blocks/after: No timeline committed; design in `SCHEMA_MODES_DESIGN.md`.
 - No timeline committed.
 
 ---
+
+### T-38. Trusted-proxy-aware client-IP extraction
+
+Theme: server · Priority: P3 · Status: ☐
+Blocks/after: Nothing; deployment-quality item. Born from the 0.16.1 re-cut's removal of `chi/middleware.RealIP` (deprecated upstream citing GHSA-3fxj-6jh8-hvhx: it trusts X-Forwarded-For/X-Real-IP unconditionally, letting any client spoof its identity to the rate limiter and logs).
+
+- **Current behaviour (safe default):** client identity is the TCP peer
+  (`r.RemoteAddr` untouched). Deployed behind a reverse proxy, per-client
+  rate limits coarsen to per-proxy and logs show the proxy address.
+- **Work required:** a small middleware taking a configured trusted-proxy
+  CIDR list (e.g. `XOLU_TRUSTED_PROXIES`); only when the direct peer is
+  in the list, honour the rightmost non-trusted X-Forwarded-For hop.
+  Config plumbing through pkg/authconfig is NOT needed — this is
+  transport identity, not auth; it belongs beside the rate limiter.
+- **Estimate:** half a day including tests for the spoofing cases.
 
 ### T-36. Create the dormant-guards table
 

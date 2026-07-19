@@ -738,7 +738,13 @@ func New(
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.RealIP)
+	// middleware.RealIP deliberately NOT used: it rewrites r.RemoteAddr from
+	// X-Forwarded-For / X-Real-IP without any notion of trusted proxies,
+	// letting any client spoof its identity to the rate limiter and logs
+	// (chi deprecated it citing GHSA-3fxj-6jh8-hvhx and friends). Client
+	// identity is the TCP peer; behind a reverse proxy, per-client rate
+	// limits coarsen to per-proxy until configurable trusted-proxy
+	// extraction ships (see docs/TRACKING.md T-38).
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	reqTimeout := 60

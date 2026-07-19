@@ -17,7 +17,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > casings, 2 dead symbols removed: `quantumOfDay`, `discardLogger`);
 > and the test-only stress-harness env knobs renamed
 > `XOLU_SEAL_STRESS_*` → `XOLU_TEST_SEAL_STRESS_*` (previously listed
-> as Unreleased, folded into this re-cut).
+> as Unreleased, folded into this re-cut). Second amendment, same date:
+> chi bumped v5.0.11 → v5.3.1 (adopting the remote lineage's forward
+> move); `chi/middleware.RealIP` removed from the middleware stack — it
+> rewrites RemoteAddr from spoofable forwarding headers with no trusted-
+> proxy notion (deprecated upstream, GHSA-3fxj-6jh8-hvhx) — with a
+> rationale comment at the site and T-38 filed for a trusted-proxy-aware
+> replacement. Client identity is now the TCP peer.
 
 ### Fixed — cal exactly-once terminal transitions (T-34)
 
