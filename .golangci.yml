@@ -1,11 +1,40 @@
-issues:
-  exclude-rules:
-    # errcheck in tests generates excessive noise for setup/teardown calls
-    # where ignoring errors is intentional (e.g. seeding test data).
-    - path: _test\.go
-      linters:
-        - errcheck
-    # gosimple nil+len checks in tests are harmless defensive assertions.
-    - path: _test\.go
-      linters:
-        - gosimple
+# golangci-lint configuration for xolu (schema v2).
+#
+# Policy:
+#   - The substantive correctness/hygiene linters run everywhere: staticcheck,
+#     govet, ineffassign, unused, errcheck.
+#   - errcheck is relaxed only for test files, where an unchecked error in setup
+#     or assertion helpers surfaces as a test failure anyway. Production
+#     unchecked-error findings (resource Close, rows.Scan, etc.) are real and are
+#     fixed in code, not suppressed.
+#
+# The intent is that `golangci-lint run` reports only findings worth acting on,
+# so the release pipeline's lint gate is meaningful rather than noisy.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  exclusions:
+    rules:
+      # Test files: unchecked errors in setup/assert helpers are acceptable
+      # (a failing setup surfaces as a test failure anyway).
+      - path: _test\.go
+        linters:
+          - errcheck
+
+      # QF1001 (apply De Morgan's law) is a stylistic quickfix. The flagged sites
+      # are character-class allowlist checks of the form `!(in valid range)`,
+      # which read more clearly as "not a valid character" than the negated
+      # De Morgan form. These are security-relevant identifier validators kept
+      # deliberately explicit; the suggestion is declined.
+      - linters:
+          - staticcheck
+        text: "QF1001"
