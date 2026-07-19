@@ -53,6 +53,8 @@ item's Trigger line.
 | T-36 | Create the dormant-guards table (Part 3 §8 compliance) | tooling | P2 | ☐ | Gates the §6 release-gate check; pairs with T-22. |
 | T-37 | Adopt git history inside the checkpoint (retrofit v0.15.1–v0.16.1 boundaries) | tooling | P3 | ☐ | Decided in principle 2026-07-18; execute at next session start. |
 | T-38 | Trusted-proxy-aware client-IP extraction (RealIP replacement) | server | P3 | ☐ | Until then: client identity = TCP peer; behind a proxy, rate limits are per-proxy. |
+| T-39 | Racy test: blob GlobalUsage multi-tenant asserts a transient unsampled state | server | P1 | ◐ | Fix shipped (deterministic injection); closure on multi-core confirmation. |
+| T-40 | Data race in pkg/server shared state (detector-confirmed, unlocated) | server | P1 | ☐ | Trips every parallel graph e2e test under -race on multi-core. Stacks pending. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 
 ---
@@ -359,6 +361,57 @@ Blocks/after: No timeline committed; design in `SCHEMA_MODES_DESIGN.md`.
 - No timeline committed.
 
 ---
+
+### T-39. `TestBlobManager_GlobalUsage_MultiTenant` races the sampler's initial sample
+
+Theme: server · Priority: P1 · Status: ◐
+Blocks/after: Blocks CI green (the sole plain-run failure on multi-core; passes single-core). Fix shape pending design confirmation from Horacio.
+
+- **Trigger:** first multi-core executions of the full suite (GitHub runner,
+  then reproduced on M1: `TenantCount = 3, want 2`).
+- **Mechanism (diagnosed):** `pkg/blob` `UsageSampler.run()` takes an
+  immediate `u.sample()` on goroutine start (sampler.go:100). The test
+  opens tenant 3 via `StoreFor(3)` and asserts its `SampledAt` is still
+  zero — a state the implementation makes deliberately transient. On
+  multi-core the sampler's first sample completes before `GlobalUsage()`;
+  single-core scheduling always let the assertion win, masking it since
+  the test shipped.
+- **Reading:** `GlobalUsage`'s skip-unsampled contract exists to cover the
+  startup window, implying the immediate initial sample is intended and
+  the TEST is the defect (asserting transient state timing-dependently).
+- **Fix shape (pending confirmation):** prove the skip-unsampled contract
+  deterministically — construct a sampler with zero `SampledAt` directly
+  at unit level, or gate tenant 3's sampler start — rather than racing
+  `StoreFor`.
+- **Estimate:** an hour once the design ruling lands.
+- **Fix shipped (2026-07-19):** the test now injects tenant 3 as an open
+  store with a constructed-but-never-Started sampler — zero SampledAt by
+  construction, no timing anywhere. Passes ×3 in-sandbox; **closure on a
+  multi-core run confirming** (single-core cannot arbitrate this class).
+
+### T-40. Data race in pkg/server process-shared state (unlocated)
+
+Theme: server · Priority: P1 · Status: ☐
+Blocks/after: Blocks trusting any multi-core -race run of pkg/server; every parallel graph e2e test fails with "race detected during execution of test" on M1 (count=5) while single-core runs are silent. Post-0.9.9 regression window (older versions ran -race clean per Horacio).
+
+- **Evidence:** detector-confirmed on M1; even near-no-op tests
+  (`TestGraphPath_MissingParams`) trip it, and each test boots its own
+  server — so the racing state is process-global, not per-server or
+  per-test.
+- **Suspects eliminated by inspection (2026-07-19):** oql profile
+  presets (Calibrate/DefaultProfile return fresh values; ProfileByName
+  pointees never mutated); oql Executor.SetProfile (instance-scoped
+  planner swap); pkg/tenant registry (instance state under RWMutex);
+  zerolog package-global logger (never assigned anywhere; only atomic
+  SetGlobalLevel in oql tests). The concurrent-calibration garbage
+  thresholds (82–90k ns/row vs normal 3–8k under load) remain a
+  separate robustness observation, not the race.
+- **Next step (required, cannot be generated in-sandbox):** the race
+  detector's WARNING: DATA RACE report — two stack traces naming the
+  writing and reading file:line — from a multi-core run of any single
+  test in graph_path_e2e_test.go.
+- **Estimate:** unknown until located; the fix is usually an hour once
+  the stacks land.
 
 ### T-38. Trusted-proxy-aware client-IP extraction
 

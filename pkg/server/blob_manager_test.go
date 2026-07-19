@@ -59,11 +59,22 @@ func TestBlobManager_GlobalUsage_MultiTenant(t *testing.T) {
 			t.Fatalf("Put: %v", err)
 		}
 	}
-	// Tenant 3 is opened but never written, and we deliberately do NOT sample
-	// it — its SampledAt stays zero and it must be skipped by GlobalUsage.
-	if _, err := m.StoreFor(3); err != nil {
-		t.Fatalf("StoreFor(3): %v", err)
+	// Tenant 3 must be present with a sampler that has never completed a
+	// walk (SampledAt zero), to exercise GlobalUsage's skip-unsampled
+	// contract. StoreFor cannot provide that state deterministically: it
+	// Start()s the sampler, whose first act is an immediate sample
+	// (sampler.go run()), so on multi-core hardware the walk completes
+	// before GlobalUsage reads — the T-39 race that turned CI red. Inject
+	// the open store with a constructed-but-never-Started sampler instead:
+	// zero SampledAt forever, no timing involved.
+	st3, err := blob.NewStore(sl.TenantBlobDir(m.baseDir, 3), 1<<20)
+	if err != nil {
+		t.Fatalf("NewStore(3): %v", err)
 	}
+	m.entries.Store(uint16(3), &blobTenant{
+		store:   st3,
+		sampler: blob.NewUsageSampler(st3, time.Hour), // never Start()ed
+	})
 
 	// Force a sample on tenants 1 and 2 only.
 	for _, id := range []uint16{1, 2} {
