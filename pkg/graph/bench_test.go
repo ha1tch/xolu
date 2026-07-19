@@ -24,7 +24,7 @@ import (
 func buildFlatGraph(nodes, edgesPerNode int) *FlatGraph {
 	g := NewFlatGraph()
 	types := []string{"device", "gateway", "concentrator", "location", "zone"}
-	rels  := []string{"REPORTS_TO", "LOCATED_IN", "MEMBER_OF", "MONITORS"}
+	rels := []string{"REPORTS_TO", "LOCATED_IN", "MEMBER_OF", "MONITORS"}
 	ng := nodes/50 + 1
 	for i := 0; i < nodes; i++ {
 		typ := types[i%len(types)]
@@ -55,7 +55,7 @@ func BenchmarkAddEdge(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		from := fmt.Sprintf("device:%d", i%1000)
-		to   := fmt.Sprintf("device:%d", (i+1)%1000)
+		to := fmt.Sprintf("device:%d", (i+1)%1000)
 		_ = g.AddEdge(from, to, "LINK")
 	}
 }

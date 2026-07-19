@@ -24,8 +24,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/rs/zerolog"
 )
 
@@ -56,35 +56,35 @@ var complexityQueries = []struct {
 	label string
 	oql   string
 	// Structural complexity markers for heuristic development:
-	nWhere   int  // number of WHERE predicates
-	nGroupBy int  // number of GROUP BY keys
+	nWhere    int // number of WHERE predicates
+	nGroupBy  int // number of GROUP BY keys
 	hasHaving bool
-	hasOrder bool
-	hasLimit bool
+	hasOrder  bool
+	hasLimit  bool
 }{
 	{
-		label: "WhereEq",
-		oql:   "SELECT region, product, amount FROM items WHERE category = 'electronics'",
+		label:  "WhereEq",
+		oql:    "SELECT region, product, amount FROM items WHERE category = 'electronics'",
 		nWhere: 1,
 	},
 	{
-		label: "WhereOrderLimit",
-		oql:   "SELECT TOP 10 region, product, amount FROM items WHERE category = 'electronics' ORDER BY amount DESC",
+		label:  "WhereOrderLimit",
+		oql:    "SELECT TOP 10 region, product, amount FROM items WHERE category = 'electronics' ORDER BY amount DESC",
 		nWhere: 1, hasOrder: true, hasLimit: true,
 	},
 	{
-		label: "GroupBy1",
-		oql:   "SELECT region, COUNT(*) FROM items GROUP BY region",
+		label:    "GroupBy1",
+		oql:      "SELECT region, COUNT(*) FROM items GROUP BY region",
 		nGroupBy: 1,
 	},
 	{
-		label: "GroupBy1_Having",
-		oql:   "SELECT region, COUNT(*) FROM items GROUP BY region HAVING COUNT(*) > 50",
+		label:    "GroupBy1_Having",
+		oql:      "SELECT region, COUNT(*) FROM items GROUP BY region HAVING COUNT(*) > 50",
 		nGroupBy: 1, hasHaving: true,
 	},
 	{
-		label: "GroupBy1_MultiAgg",
-		oql:   "SELECT category, COUNT(*), SUM(quantity), AVG(quantity) FROM items GROUP BY category",
+		label:    "GroupBy1_MultiAgg",
+		oql:      "SELECT category, COUNT(*), SUM(quantity), AVG(quantity) FROM items GROUP BY category",
 		nGroupBy: 1,
 	},
 	{

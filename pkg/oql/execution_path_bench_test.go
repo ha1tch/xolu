@@ -33,9 +33,9 @@ import (
 	"math"
 	"testing"
 
+	"github.com/ha1tch/tsqlparser/ast"
 	"github.com/ha1tch/xolu/pkg/jsonic"
 	"github.com/ha1tch/xolu/pkg/storage"
-	"github.com/ha1tch/tsqlparser/ast"
 	"github.com/rs/zerolog"
 )
 

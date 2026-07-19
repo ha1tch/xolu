@@ -489,7 +489,7 @@ will be comparable in size to the implementation.
 - Three-table joins — `extractJoinSpec` returns nil for any FROM clause with
   more than one join level.
 - Subquery tables — validator rejects.
-- JOIN in UPDATE or DELETE — not meaningful for olu's mutation model.
+- JOIN in UPDATE or DELETE — not meaningful for xolu's mutation model.
 - Result flattening or schema inference — result rows are flat maps of alias →
   value; the caller unpacks.
 

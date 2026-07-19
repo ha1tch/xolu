@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -268,9 +269,13 @@ func TestSQLiteTenantIsolation_ConcurrentWrites(t *testing.T) {
 		}
 	}
 
-	// Verify total in raw DB
+	// Verify total across all tenant tables (each tenant has its own t<X>_nodes table).
 	var total int
-	stores[0].db.QueryRow("SELECT COUNT(*) FROM entities WHERE entity_type = 'events'").Scan(&total)
+	for i := 0; i < numTenants; i++ {
+		var n int
+		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(uint16(i+1)) + " WHERE entity_type = 'events'").Scan(&n)
+		total += n
+	}
 	if total != numTenants*writesPerTenant {
 		t.Errorf("total records = %d, want %d", total, numTenants*writesPerTenant)
 	}
@@ -450,11 +455,14 @@ func TestSQLiteTenantIsolation_ZeroAndNonZeroCoexist(t *testing.T) {
 		t.Errorf("tenant 2 count after tenant 1 deletes = %d, want 7", count2After)
 	}
 
-	// Total in raw DB
-	var total int
-	store0.db.QueryRow("SELECT COUNT(*) FROM entities WHERE entity_type = 'widgets'").Scan(&total)
+	// Total across all tenant tables: each tenant now has its own table.
+	var total0, total1, total2 int
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(0) + " WHERE entity_type = 'widgets'").Scan(&total0)
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(1) + " WHERE entity_type = 'widgets'").Scan(&total1)
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(2) + " WHERE entity_type = 'widgets'").Scan(&total2)
+	total := total0 + total1 + total2
 	if total != 13 { // 3 + 3 + 7
-		t.Errorf("raw DB total = %d, want 13", total)
+		t.Errorf("raw DB total = %d, want 13 (t0=%d t1=%d t2=%d)", total, total0, total1, total2)
 	}
 }
 
@@ -467,7 +475,7 @@ func TestSQLiteTenantIsolation_ZeroAndNonZeroGraphs(t *testing.T) {
 	defer store0.Close()
 	defer store1.Close()
 
-	// Tenant 0 uses graph_t0000 table
+	// Tenant 0 uses t0000_graph table
 	store0.Create(ctx, "nodes", map[string]interface{}{"label": "root-0"})
 	store0.Create(ctx, "edges_data", map[string]interface{}{
 		"label": "link-0",
@@ -476,7 +484,7 @@ func TestSQLiteTenantIsolation_ZeroAndNonZeroGraphs(t *testing.T) {
 		},
 	})
 
-	// Tenant 1 uses graph_t0001 table
+	// Tenant 1 uses t0001_graph table
 	store1.Create(ctx, "nodes", map[string]interface{}{"label": "root-1"})
 	store1.Create(ctx, "edges_data", map[string]interface{}{
 		"label": "link-1",
@@ -487,14 +495,14 @@ func TestSQLiteTenantIsolation_ZeroAndNonZeroGraphs(t *testing.T) {
 
 	// Verify separate tables
 	var defaultCount, tenantCount int
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0000").Scan(&defaultCount)
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&tenantCount)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0000_graph").Scan(&defaultCount)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&tenantCount)
 
 	if defaultCount == 0 {
-		t.Error("graph_t0000 should have edges from tenant 0")
+		t.Error("t0000_graph should have edges from tenant 0")
 	}
 	if tenantCount == 0 {
-		t.Error("graph_t0001 should have edges from tenant 1")
+		t.Error("t0001_graph should have edges from tenant 1")
 	}
 
 	// Neighbors are scoped per tenant — verify via edge table scan and entity Get.
@@ -570,26 +578,6 @@ func TestNewStoreFromConfig_SQLite(t *testing.T) {
 	}
 	if id != 1 {
 		t.Errorf("first ID = %d, want 1", id)
-	}
-}
-
-func TestNewStoreFromConfig_JSONFile(t *testing.T) {
-	baseDir := t.TempDir()
-
-	store, err := NewStoreFromConfig(StoreConfig{
-		Type:     "jsonfile",
-		BaseDir:  baseDir,
-		Schema:   "test_schema",
-		TenantID: 0x0042,
-	})
-	if err != nil {
-		t.Fatalf("NewStoreFromConfig: %v", err)
-	}
-	defer store.Close()
-
-	cfg := store.Config()
-	if cfg.TenantID != 0x0042 {
-		t.Errorf("TenantID = %d, want %d", cfg.TenantID, 0x0042)
 	}
 }
 

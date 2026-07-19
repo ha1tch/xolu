@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"testing"
 
+	sulpherast "github.com/ha1tch/sulpher/ast"
+
 	"github.com/ha1tch/xolu/pkg/graph"
 )
 
@@ -44,17 +46,31 @@ func setupTestGraph() graph.Graph {
 	return g
 }
 
+// testReturnClause extracts the ReturnClause from a query for test assertions.
+func testReturnClause(t *testing.T, q *sulpherast.Query) *sulpherast.ReturnClause {
+	t.Helper()
+	if len(q.Parts) == 0 {
+		return nil
+	}
+	for _, c := range q.Parts[0].Clauses {
+		if rc, ok := c.(*sulpherast.ReturnClause); ok {
+			return rc
+		}
+	}
+	return nil
+}
+
 func TestExecuteSimpleMatch(t *testing.T) {
 	g := setupTestGraph()
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -69,12 +85,12 @@ func TestExecuteWithRelationship(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -92,12 +108,12 @@ func TestExecuteWithInlineProperty(t *testing.T) {
 	parser := NewParser()
 
 	// Match specific user by inline property (id matching)
-	query, err := parser.Parse("MATCH (u:users {id: 1}) RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users {id: 1}) RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -113,12 +129,12 @@ func TestExecuteVariableLengthPath(t *testing.T) {
 	parser := NewParser()
 
 	// Find users reachable via 1-3 FOLLOWS hops from user 1
-	query, err := parser.Parse("MATCH (u:users {id: 1})-[:FOLLOWS*1..3]->(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users {id: 1})-[:FOLLOWS*1..3]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -136,16 +152,16 @@ func TestExecuteBFS(t *testing.T) {
 	parser := NewParser()
 
 	// BFS is the default algorithm
-	query, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if query.Algorithm != BFS {
+	if hint.Algorithm != BFS {
 		t.Errorf("Expected BFS algorithm (default)")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -160,17 +176,17 @@ func TestExecuteDFS(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	// DFS is specified before MATCH
-	query, err := parser.Parse("DFS MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
+	// DFS via the preferred comment hint form.
+	query, hint, err := parser.Parse("// sulpher.algorithm: dfs\nMATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if query.Algorithm != DFS {
+	if hint.Algorithm != DFS {
 		t.Errorf("Expected DFS algorithm")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -182,16 +198,19 @@ func TestExecuteDFS(t *testing.T) {
 
 func TestExecuteWithWhereCondition(t *testing.T) {
 	g := setupTestGraph()
-	executor := NewExecutor(g, 10)
+	store := newMockStore()
+	for i := 1; i <= 5; i++ {
+		store.set("users", i, map[string]interface{}{"id": i})
+	}
+	executor := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	// This tests WHERE with a condition - depends on node data having the field
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id > 2 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id > 2 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -207,12 +226,12 @@ func TestExecuteWithOrConditions(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id = 1 OR u.id = 5 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id = 1 OR u.id = 5 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -228,16 +247,16 @@ func TestExecuteDistinct(t *testing.T) {
 	parser := NewParser()
 
 	// Without DISTINCT, traversing from multiple start nodes may produce duplicates
-	query, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN DISTINCT f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN DISTINCT f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if !query.Distinct {
+	if rc := testReturnClause(t, query); rc == nil || !rc.Distinct {
 		t.Error("Expected Distinct=true")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -261,16 +280,16 @@ func TestExecuteLimit(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u LIMIT 2")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u LIMIT 2")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if query.Limit != 2 {
-		t.Errorf("Expected Limit=2, got %d", query.Limit)
+	if rc := testReturnClause(t, query); rc == nil || evalIntExpr(rc.Limit) != 2 {
+		t.Errorf("Expected Limit=2")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -285,19 +304,19 @@ func TestExecuteOrderBy(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u ORDER BY u.id DESC")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u ORDER BY u.id DESC")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if len(query.OrderBy) != 1 {
+	if func() bool { rc := testReturnClause(t, query); return rc == nil || len(rc.OrderBy) != 1 }() {
 		t.Fatalf("Expected 1 ORDER BY item")
 	}
-	if query.OrderBy[0].Direction != OrderDesc {
+	if func() bool { rc := testReturnClause(t, query); return rc == nil || !rc.OrderBy[0].Descending }() {
 		t.Error("Expected DESC order")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -315,22 +334,22 @@ func TestExecuteCombined(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) WHERE u.id = 1 RETURN DISTINCT f ORDER BY f.id LIMIT 2")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) WHERE u.id = 1 RETURN DISTINCT f ORDER BY f.id LIMIT 2")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if !query.Distinct {
+	if rc := testReturnClause(t, query); rc == nil || !rc.Distinct {
 		t.Error("Expected Distinct")
 	}
-	if query.Limit != 2 {
+	if rc := testReturnClause(t, query); rc == nil || evalIntExpr(rc.Limit) != 2 {
 		t.Error("Expected Limit=2")
 	}
-	if len(query.OrderBy) == 0 {
+	if func() bool { rc := testReturnClause(t, query); return rc == nil || len(rc.OrderBy) == 0 }() {
 		t.Error("Expected ORDER BY")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -346,12 +365,12 @@ func TestExecuteIncoming(t *testing.T) {
 	parser := NewParser()
 
 	// Find who follows user 3 (incoming edges)
-	query, err := parser.Parse("MATCH (u:users {id: 3})<-[:FOLLOWS]-(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users {id: 3})<-[:FOLLOWS]-(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -368,12 +387,12 @@ func TestExecuteBidirectional(t *testing.T) {
 	parser := NewParser()
 
 	// Bidirectional KNOWS relationship
-	query, err := parser.Parse("MATCH (u:users {id: 2})-[:KNOWS]-(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users {id: 2})-[:KNOWS]-(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -390,12 +409,12 @@ func TestExecuteMultiHop(t *testing.T) {
 	parser := NewParser()
 
 	// Two hops: u -> f -> g
-	query, err := parser.Parse("MATCH (u:users {id: 1})-[:FOLLOWS]->(f:users)-[:FOLLOWS]->(g:users) RETURN g")
+	query, hint, err := parser.Parse("MATCH (u:users {id: 1})-[:FOLLOWS]->(f:users)-[:FOLLOWS]->(g:users) RETURN g")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -412,12 +431,12 @@ func TestExecuteNoResults(t *testing.T) {
 	parser := NewParser()
 
 	// No LIKES relationships exist
-	query, err := parser.Parse("MATCH (u:users)-[:LIKES]->(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:LIKES]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -432,16 +451,16 @@ func TestExecuteReturnMultipleVariables(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users)-[r:FOLLOWS]->(f:users) RETURN u, f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[r:FOLLOWS]->(f:users) RETURN u, f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if len(query.ReturnItems) != 2 {
-		t.Errorf("Expected 2 return items, got %d", len(query.ReturnItems))
+	if rc := testReturnClause(t, query); rc == nil || len(rc.Items) != 2 {
+		t.Errorf("Expected 2 return items")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -462,16 +481,19 @@ func TestExecuteReturnProperty(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u.id")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u.id")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if len(query.ReturnItems) != 1 || query.ReturnItems[0].Property != "id" {
+	if rc := testReturnClause(t, query); rc == nil || len(rc.Items) != 1 || func() bool {
+		pa, ok := rc.Items[0].Expr.(*sulpherast.PropertyAccess)
+		return !ok || pa.Property.Value != "id"
+	}() {
 		t.Error("Expected return of u.id property")
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -487,12 +509,12 @@ func TestExecuteStats(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
+	query, hint, err := parser.Parse("MATCH (u:users)-[:FOLLOWS]->(f:users) RETURN f")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -510,12 +532,12 @@ func TestExecuteEmptyGraph(t *testing.T) {
 	executor := NewExecutor(g, 10)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -581,11 +603,11 @@ func TestPropertyHydration_WhereCondition(t *testing.T) {
 	exec := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" RETURN u`)
+	query, hint, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" RETURN u`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -611,11 +633,11 @@ func TestPropertyHydration_InlineProperty(t *testing.T) {
 	exec := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users {active: true}) RETURN u`)
+	query, hint, err := parser.Parse(`MATCH (u:users {active: true}) RETURN u`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -638,11 +660,11 @@ func TestPropertyHydration_NoStore(t *testing.T) {
 	exec := NewExecutor(g, 10) // no WithStore
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users)-[:FOLLOWS]->(v:users) RETURN u, v`)
+	query, hint, err := parser.Parse(`MATCH (u:users)-[:FOLLOWS]->(v:users) RETURN u, v`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -669,11 +691,11 @@ func TestPropertyHydration_MissingNodeInStore(t *testing.T) {
 	exec := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" RETURN u`)
+	query, hint, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" RETURN u`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -698,11 +720,11 @@ func TestPropertyHydration_ReturnProperty(t *testing.T) {
 	exec := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users) RETURN u.name`)
+	query, hint, err := parser.Parse(`MATCH (u:users) RETURN u.name`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -734,11 +756,11 @@ func TestPropertyHydration_ReturnWholeNode(t *testing.T) {
 	exec := NewExecutor(g, 10).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse(`MATCH (u:users) RETURN u`)
+	query, hint, err := parser.Parse(`MATCH (u:users) RETURN u`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	result, err := exec.Execute(context.Background(), query)
+	result, err := exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -777,11 +799,11 @@ func TestPropertyHydration_HydratedOnce(t *testing.T) {
 	parser := NewParser()
 
 	// Two conditions on the same node — should trigger exactly one store.Get.
-	query, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" AND u.active = true RETURN u`)
+	query, hint, err := parser.Parse(`MATCH (u:users) WHERE u.name = "Alice" AND u.active = true RETURN u`)
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	_, err = exec.Execute(context.Background(), query)
+	_, err = exec.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}

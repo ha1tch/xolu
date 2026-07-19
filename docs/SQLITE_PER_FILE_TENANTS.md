@@ -1,11 +1,25 @@
 # SQLite Per-File Tenant Isolation — Implementation Plan
 
-**Status:** Design  
+**Status:** Implemented (`XOLU_SQLITE_PER_FILE_TENANTS=true`)  
 **Author:** Nadine Ostrovski  
 **Date:** 2026-05-13  
 **Scope:** `pkg/storage`, `pkg/oql`, `pkg/config`, `pkg/server`
 
+> **Note (2026-06-19, v0.10.1):** the *filesystem layout* described in this
+> historical plan (e.g. `data/xolu.db`, `data/sql/tXXXX/`, `data/ts/tXXXX/`) has
+> been superseded by the storage-layout normalization. The current layout is
+> tenant-first and derived by invariant from `--base-dir` via `pkg/storelayout`:
+> per-file tenant stores live at `<BaseDir>/tXXXX/store/xolu.db` (tenant 0 at
+> `t0000/store/`), timeseries at `<BaseDir>/tXXXX/ts/`, and shared mode under
+> `<BaseDir>/shared/`. There is no separate `--db`/`XOLU_DB_PATH` setting. See the
+> 0.10.1 CHANGELOG entry and `pkg/storelayout`. The *tenant-isolation semantics*
+> documented below remain accurate; only the paths changed.
+
 ---
+
+> **Naming note:** Table naming now follows the per-tenant `t<XXXX>_*` convention
+> established in v0.9.9-rc11–rc14 rather than the `entities` + `tenant_id` column
+> approach described in the background below.
 
 ## Background
 
@@ -56,9 +70,9 @@ Add the field to `Config`:
 // are isolated by the tenant_id column. When true, each tenant's data
 // lives in a separate file derived from the base DBPath:
 //
-//   tenant 0 (unscoped): <DBPath>                   (e.g. data/olu.db)
-//   tenant 1:            <DBDir>/sql/t0001/<base>   (e.g. data/sql/t0001/olu.db)
-//   tenant 2:            <DBDir>/sql/t0002/<base>   (e.g. data/sql/t0002/olu.db)
+//   tenant 0 (unscoped): <DBPath>                   (e.g. data/xolu.db)
+//   tenant 1:            <DBDir>/sql/t0001/<base>   (e.g. data/sql/t0001/xolu.db)
+//   tenant 2:            <DBDir>/sql/t0002/<base>   (e.g. data/sql/t0002/xolu.db)
 //
 // The two modes use different schemas. Choose at deployment time and do
 // not change while data exists — migration requires an explicit export/import.
@@ -235,8 +249,8 @@ In per-file mode, derive the per-tenant file path from the base `DBPath`:
 
 ```go
 func tenantDBPath(basePath string, tenantID uint16) string {
-    // tenant 0 (unscoped): basePath unchanged (e.g. data/olu.db)
-    // tenant N: <dir>/sql/tXXXX/<base>  (e.g. data/sql/t0001/olu.db)
+    // tenant 0 (unscoped): basePath unchanged (e.g. data/xolu.db)
+    // tenant N: <dir>/sql/tXXXX/<base>  (e.g. data/sql/t0001/xolu.db)
     // Mirrors the timeseries layout: data/ts/tXXXX/
     dir := filepath.Dir(basePath)
     base := filepath.Base(basePath)
@@ -273,11 +287,11 @@ The `tenants` table (registry persistence) lives in the base store file
 (tenant 0). Per-tenant files do not have or need a `tenants` table. The
 `TenantPersister` already operates against the base store; no change needed.
 
-**Agreed filesystem layout** (with `data/` as `BaseDir`, `data/olu.db` as `DBPath`):
+**Agreed filesystem layout** (with `data/` as `BaseDir`, `data/xolu.db` as `DBPath`):
 
 ```
 data/
-  olu.db              ← tenant 0: entities, tenant registry, schema_version
+  xolu.db              ← tenant 0: entities, tenant registry, schema_version
   ts/
     t0001/            ← tenant 1 timeseries
       db/             ← Pebble LSM (all timelines as key ranges; not per-timeline)
@@ -289,9 +303,9 @@ data/
       meta.json
   sql/                ← only present when SQLitePerFileTenants = true
     t0001/
-      olu.db          ← tenant 1: entities, graph_t0001 edge table
+      xolu.db          ← tenant 1: entities, graph_t0001 edge table
     t0002/
-      olu.db
+      xolu.db
 ```
 
 Note: timelines are key-prefix ranges inside a single `db/` instance per
@@ -396,7 +410,7 @@ Migrating an existing shared-schema deployment to per-file mode requires:
 4. Repeat for adapted tables if any exist.
 
 This is a data migration, not a schema migration. A dedicated
-`olu-migrate` subcommand is the appropriate delivery vehicle. That work
+A migration command is the appropriate delivery vehicle. That work
 is out of scope for this implementation; the migration path should be
 documented before the feature is enabled in any deployment with existing
 data.

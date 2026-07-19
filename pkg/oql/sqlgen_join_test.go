@@ -43,8 +43,8 @@ func TestGenerateJoinSQL(t *testing.T) {
 			t.Fatalf("GenerateJoinSQL: %v", err)
 		}
 
-		assertContains(t, result.SQL, "olu_post")
-		assertContains(t, result.SQL, "olu_author")
+		assertContains(t, result.SQL, "t0000_ndata_post")
+		assertContains(t, result.SQL, "t0000_ndata_author")
 		assertContains(t, result.SQL, "INNER JOIN")
 		// No json_extract for fully adapted
 		assertNotContains(t, result.SQL, "json_extract")
@@ -57,7 +57,7 @@ func TestGenerateJoinSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("both blob: json_extract throughout, entities table aliased twice", func(t *testing.T) {
+	t.Run("both blob: json_extract throughout, t0000_nodes table aliased twice", func(t *testing.T) {
 		store := newMockJoinStore("post", false, "author", false)
 		oqlStr := `SELECT a.title, b.name FROM post AS a INNER JOIN author AS b ON a.author_id = b.id`
 		s := parseSQLGen(t, oqlStr)
@@ -69,7 +69,7 @@ func TestGenerateJoinSQL(t *testing.T) {
 			t.Fatalf("GenerateJoinSQL: %v", err)
 		}
 
-		assertContains(t, result.SQL, "entities")
+		assertContains(t, result.SQL, "t0000_nodes")
 		assertContains(t, result.SQL, "json_extract")
 		// entity_type filter for both sides
 		assertContains(t, result.SQL, "entity_type")
@@ -77,8 +77,8 @@ func TestGenerateJoinSQL(t *testing.T) {
 		assertArgContains(t, result.Args, "post")
 		assertArgContains(t, result.Args, "author")
 		// No adapted table names
-		assertNotContains(t, result.SQL, "olu_post")
-		assertNotContains(t, result.SQL, "olu_author")
+		assertNotContains(t, result.SQL, "t0000_ndata_post")
+		assertNotContains(t, result.SQL, "t0000_ndata_author")
 	})
 
 	t.Run("left adapted right blob: mixed extraction", func(t *testing.T) {
@@ -94,9 +94,9 @@ func TestGenerateJoinSQL(t *testing.T) {
 		}
 
 		// Left side uses adapted table, no json_extract for left fields
-		assertContains(t, result.SQL, "olu_post")
-		// Right side uses entities table + json_extract
-		assertContains(t, result.SQL, "entities")
+		assertContains(t, result.SQL, "t0000_ndata_post")
+		// Right side uses t0000_nodes table + json_extract
+		assertContains(t, result.SQL, "t0000_nodes")
 		assertContains(t, result.SQL, "json_extract")
 		// entity_type arg for right side only
 		assertArgContains(t, result.Args, "author")
@@ -115,8 +115,8 @@ func TestGenerateJoinSQL(t *testing.T) {
 			t.Fatalf("GenerateJoinSQL: %v", err)
 		}
 
-		assertContains(t, result.SQL, "olu_author")
-		assertContains(t, result.SQL, "entities")
+		assertContains(t, result.SQL, "t0000_ndata_author")
+		assertContains(t, result.SQL, "t0000_nodes")
 		assertContains(t, result.SQL, "json_extract")
 		assertArgContains(t, result.Args, "post")
 	})

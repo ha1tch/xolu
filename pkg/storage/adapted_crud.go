@@ -79,30 +79,32 @@ func (r *AdaptedRegistry) Entities() []string {
 
 // RegisterAdaptedTable derives a table spec from a JSON Schema, creates
 // the table and indexes in the database, and records the spec in the
-// adapted_table_schemas metadata table.
+// per-tenant t<X>_n_sch metadata table.
 //
 // If the table already exists with the same schema hash, this is a no-op.
 // If the schema has changed, the caller must handle migration separately
 // (Phase 4 of the design).
-func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegistry, entity string, schema map[string]interface{}, dialect StorageDialect) error {
-	spec, err := DeriveAdaptedTableSpec(entity, schema, dialect)
+func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegistry, entity string, schema map[string]interface{}, dialect StorageDialect, tenantID uint16) error {
+	spec, err := DeriveAdaptedTableSpec(entity, schema, dialect, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to derive adapted table spec for %q: %w", entity, err)
 	}
 
-	// Check if metadata table exists (create if not)
-	if _, err := db.ExecContext(ctx, GenerateAdaptedSchemasTableSQL(dialect)); err != nil {
-		return fmt.Errorf("failed to ensure adapted_table_schemas table: %w", err)
+	nsch := fmt.Sprintf("t%04X_n_sch", tenantID)
+
+	// Ensure the per-tenant schema registry table exists (lazy creation).
+	if _, err := db.ExecContext(ctx, dialect.NodeSchemaTableSQL(tenantID)); err != nil {
+		return fmt.Errorf("failed to ensure %s table: %w", nsch, err)
 	}
 
-	// Check for existing registration
+	// Check for existing registration in this tenant's schema table.
 	var existingHash string
 	err = db.QueryRowContext(ctx,
-		"SELECT schema_hash FROM adapted_table_schemas WHERE entity_type = ?",
+		"SELECT schema_hash FROM "+nsch+" WHERE entity_type = ?",
 		entity).Scan(&existingHash)
 
 	if err == nil && existingHash == spec.SchemaHash {
-		// Same schema, just ensure registry is populated
+		// Same schema, just ensure registry is populated.
 		registry.Set(entity, spec)
 		return nil
 	}
@@ -116,25 +118,25 @@ func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegi
 		return nil
 	}
 
-	// err is sql.ErrNoRows — new entity, create everything
+	// err is sql.ErrNoRows — new entity for this tenant, create everything.
 	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check adapted_table_schemas: %w", err)
+		return fmt.Errorf("failed to check %s: %w", nsch, err)
 	}
 
-	// Create the adapted table
+	// Create the adapted table.
 	ddl := GenerateCreateTableSQL(spec, dialect)
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create adapted table %s: %w", spec.TableName(), err)
 	}
 
-	// Create indexes
+	// Create indexes.
 	for _, stmt := range GenerateIndexSQL(spec, dialect) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
 
-	// Persist metadata
+	// Persist metadata into the per-tenant schema registry.
 	columnSpecJSON, err := json.Marshal(spec.Columns)
 	if err != nil {
 		return fmt.Errorf("failed to marshal column spec: %w", err)
@@ -145,38 +147,40 @@ func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegi
 		hasExtraInt = 1
 	}
 
-	_, err = db.ExecContext(ctx, `
-		INSERT INTO adapted_table_schemas (entity_type, schema_hash, column_spec, has_extra)
-		VALUES (?, ?, ?, ?)
-	`, entity, spec.SchemaHash, string(columnSpecJSON), hasExtraInt)
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO "+nsch+" (entity_type, schema_hash, column_spec, has_extra) VALUES (?, ?, ?, ?)",
+		entity, spec.SchemaHash, string(columnSpecJSON), hasExtraInt)
 	if err != nil {
-		return fmt.Errorf("failed to record adapted table metadata: %w", err)
+		return fmt.Errorf("failed to record adapted table metadata in %s: %w", nsch, err)
 	}
 
 	registry.Set(entity, spec)
 	return nil
 }
 
-// LoadAdaptedRegistry reads the adapted_table_schemas metadata table and
+// LoadAdaptedRegistry reads the per-tenant t<X>_n_sch metadata table and
 // populates the registry. Called at store startup.
-func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, error) {
+func LoadAdaptedRegistry(ctx context.Context, db *sql.DB, tenantID uint16) (*AdaptedRegistry, error) {
 	registry := NewAdaptedRegistry()
 
-	// Check if the metadata table exists
+	nsch := fmt.Sprintf("t%04X_n_sch", tenantID)
+
+	// Check if the per-tenant schema registry table exists.
 	var tableExists int
 	err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='adapted_table_schemas'",
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+		nsch,
 	).Scan(&tableExists)
 	if err != nil || tableExists == 0 {
-		return registry, nil // No adapted tables yet
+		return registry, nil // No adapted tables yet for this tenant.
 	}
 
 	rows, err := db.QueryContext(ctx,
-		"SELECT entity_type, schema_hash, column_spec, has_extra FROM adapted_table_schemas")
+		"SELECT entity_type, schema_hash, column_spec, has_extra FROM "+nsch)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load adapted table schemas: %w", err)
+		return nil, fmt.Errorf("failed to load adapted table schemas from %s: %w", nsch, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var entity, schemaHash, columnSpecJSON string
@@ -192,9 +196,21 @@ func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, err
 
 		spec := &AdaptedTableSpec{
 			Entity:     entity,
+			TenantID:   tenantID,
 			Columns:    columns,
 			SchemaHash: schemaHash,
 			HasExtra:   hasExtraInt == 1,
+		}
+
+		// D-009 residual: persisted column/index identifiers never passed back
+		// through DeriveAdaptedTableSpec's allowlist. Re-validate at the trust
+		// boundary so a poisoned column_spec (pre-fix DB, restored backup, or any
+		// non-derivation writer) cannot reach DDL construction. A poisoned entity
+		// is quarantined (never registered) and startup fails loudly.
+		if err := validatePersistedSpec(spec); err != nil {
+			return nil, fmt.Errorf("refusing to load adapted table %q from %s: "+
+				"persisted schema contains an invalid SQL identifier (possible DDL-injection "+
+				"payload in column_spec); entity quarantined: %w", entity, nsch, err)
 		}
 
 		registry.Set(entity, spec)
@@ -202,7 +218,6 @@ func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, err
 
 	return registry, rows.Err()
 }
-
 
 // ---------------------------------------------------------------------------
 // Adapted CRUD operations
@@ -213,16 +228,8 @@ func LoadAdaptedRegistry(ctx context.Context, db *sql.DB) (*AdaptedRegistry, err
 // ---------------------------------------------------------------------------
 
 // adaptedCreate inserts an entity into its adapted table.
-// dialectIsPerFile returns true when the dialect is operating in per-file
-// tenant mode (i.e. tenant_id column absent from adapted tables).
-func dialectIsPerFile(dialect StorageDialect) bool {
-	if d, ok := dialect.(*SQLiteStorageDialect); ok {
-		return d.PerFileTenants
-	}
-	return false
-}
-
-func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int, data map[string]interface{}) error {
+// Table name encodes the tenant (t<XXXX>_ndata_<entity>) — no tenant_id argument needed.
+func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, id int, data map[string]interface{}) error {
 	colVals, extra := PartitionData(spec, data)
 
 	// Normalise decimal columns for storage
@@ -230,14 +237,8 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 		return err
 	}
 
-	// Build argument list matching the dialect's InsertSQL column order.
-	// Per-file mode: InsertSQL omits tenant_id column, so don't pass tenantID.
-	var args []interface{}
-	if dialectIsPerFile(dialect) {
-		args = []interface{}{id}
-	} else {
-		args = []interface{}{id, tenantID}
-	}
+	// Table name encodes the tenant — no tenant_id argument.
+	args := []interface{}{id}
 	args = append(args, colVals...)
 
 	hasExtraArg := spec.HasExtra
@@ -261,14 +262,9 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 }
 
 // adaptedGet retrieves an entity from its adapted table.
-func adaptedGet(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) (map[string]interface{}, error) {
+func adaptedGet(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, id int) (map[string]interface{}, error) {
 	query := dialect.SelectSQL(spec)
-	var row *sql.Row
-	if dialectIsPerFile(dialect) {
-		row = db.QueryRowContext(ctx, query, id)
-	} else {
-		row = db.QueryRowContext(ctx, query, tenantID, id)
-	}
+	row := db.QueryRowContext(ctx, query, id)
 
 	// Prepare scan targets: columns + optional _extra + _version
 	scanCount := len(spec.Columns) + 1 // +1 for _version
@@ -345,7 +341,7 @@ func adaptedGet(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect
 }
 
 // adaptedUpdate replaces all schema fields in an adapted table row.
-func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int, data map[string]interface{}, expectVersion int, hasVersion bool) error {
+func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, id int, data map[string]interface{}, expectVersion int, hasVersion bool) error {
 	colVals, extra := PartitionData(spec, data)
 
 	// Normalise decimal columns for storage
@@ -369,12 +365,8 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 		}
 	}
 
-	// WHERE args
-	if dialectIsPerFile(dialect) {
-		args = append(args, id)
-	} else {
-		args = append(args, tenantID, id)
-	}
+	// WHERE args — table name encodes the tenant, just use id
+	args = append(args, id)
 	if hasVersion {
 		args = append(args, expectVersion)
 	}
@@ -400,16 +392,10 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 }
 
 // adaptedDelete removes an entity from its adapted table.
-func adaptedDelete(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) error {
+func adaptedDelete(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, id int) error {
 	query := dialect.DeleteSQL(spec)
 
-	var result sql.Result
-	var err error
-	if dialectIsPerFile(dialect) {
-		result, err = tx.ExecContext(ctx, query, id)
-	} else {
-		result, err = tx.ExecContext(ctx, query, tenantID, id)
-	}
+	result, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("adapted delete from %s failed: %w", spec.TableName(), err)
 	}
@@ -425,20 +411,13 @@ func adaptedDelete(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 }
 
 // adaptedList retrieves all entities from an adapted table.
-func adaptedList(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int) ([]map[string]interface{}, error) {
+func adaptedList(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect) ([]map[string]interface{}, error) {
 	query := dialect.SelectAllSQL(spec)
-
-	var rows *sql.Rows
-	var err error
-	if dialectIsPerFile(dialect) {
-		rows, err = db.QueryContext(ctx, query)
-	} else {
-		rows, err = db.QueryContext(ctx, query, tenantID)
-	}
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("adapted list from %s failed: %w", spec.TableName(), err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []map[string]interface{}
 	for rows.Next() {
@@ -516,29 +495,18 @@ func adaptedList(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialec
 }
 
 // adaptedExists checks if an entity exists in its adapted table.
-func adaptedExists(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) bool {
+func adaptedExists(ctx context.Context, db *sql.DB, spec *AdaptedTableSpec, dialect StorageDialect, id int) bool {
 	query := dialect.ExistsSQL(spec)
-
 	var exists bool
-	var err error
-	if dialectIsPerFile(dialect) {
-		err = db.QueryRowContext(ctx, query, id).Scan(&exists)
-	} else {
-		err = db.QueryRowContext(ctx, query, tenantID, id).Scan(&exists)
-	}
+	err := db.QueryRowContext(ctx, query, id).Scan(&exists)
 	return err == nil && exists
 }
 
 // adaptedGetInTx retrieves an entity within a transaction (for patch/update).
-func adaptedGetInTx(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, tenantID int, id int) (map[string]interface{}, int, error) {
+func adaptedGetInTx(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dialect StorageDialect, id int) (map[string]interface{}, int, error) {
 	// Reuse the dialect's SelectSQL but execute against tx instead of db
 	query := dialect.SelectSQL(spec)
-	var row *sql.Row
-	if dialectIsPerFile(dialect) {
-		row = tx.QueryRowContext(ctx, query, id)
-	} else {
-		row = tx.QueryRowContext(ctx, query, tenantID, id)
-	}
+	row := tx.QueryRowContext(ctx, query, id)
 
 	// Prepare scan targets: columns + optional _extra + _version
 	scanCount := len(spec.Columns) + 1 // +1 for _version

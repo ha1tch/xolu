@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,14 +23,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/ha1tch/xolu/pkg/blob"
 	"github.com/ha1tch/xolu/pkg/cache"
+	"github.com/ha1tch/xolu/pkg/cal"
 	"github.com/ha1tch/xolu/pkg/config"
-	oluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/dynconfig"
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 	"github.com/ha1tch/xolu/pkg/graph"
-	oluMiddleware "github.com/ha1tch/xolu/pkg/middleware"
+	xoluMiddleware "github.com/ha1tch/xolu/pkg/middleware"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/oql"
 	"github.com/ha1tch/xolu/pkg/storage"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/sulpher"
 	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/timeseries"
@@ -48,26 +54,32 @@ const (
 
 // Server represents the HTTP server
 type Server struct {
-	config         *config.Config
-	storage        storage.Store
-	cache          cache.Cache
-	graph          graph.Graph
-	persister      *graph.AdaptivePersister
-	validator      validation.Validator
+	config            *config.Config
+	storage           storage.Store
+	cache             cache.Cache
+	graph             graph.Graph
+	validator         validation.Validator
 	sulpherJobs       *sulpher.JobManager
 	tenantSulpherJobs sync.Map // uint16 -> *sulpher.JobManager; lazily initialised
-	oqlJobs        *oql.JobManager
-	rateLimiter    *oluMiddleware.RateLimiter
-	metrics        *oluMiddleware.Metrics
-	logger         zerolog.Logger
-	router         *chi.Mux
-	tenantRegistry *tenant.Registry
-	tsManager      timeseries.Manager // nil when timeseries disabled; production value is *DefaultManager
-	tsRetention    *timeseries.RetentionWorker          // nil when retention disabled
-	httpServer     *http.Server
-	metricsServer  *http.Server // non-nil only when config.MetricsPort > 0
-	tenantStores   sync.Map // tenantID (uint16) -> storage.Store; avoids per-request sql.Open
-	ready          int32    // atomic: 0 = not ready, 1 = ready; set when Start() is called
+	oqlJobs           *oql.JobManager
+	rateLimiter       *xoluMiddleware.RateLimiter
+	metrics           *xoluMiddleware.Metrics
+	logger            zerolog.Logger
+	router            *chi.Mux
+	tenantRegistry    *tenant.Registry
+	tsManager         timeseries.Manager // nil when timeseries disabled; production value is *DefaultManager
+	tsRetention       *gcpkg.Worker      // nil when retention disabled
+	httpServer        *http.Server
+	metricsServer     *http.Server         // non-nil only when config.MetricsPort > 0
+	s3Server          *http.Server         // non-nil only when config.S3Enabled && config.S3Port > 0
+	blobMgr           *blobManager         // nil when BlobEnabled is false
+	calMgr            *cal.Manager         // nil when CalEnabled is false (T-18)
+	dynConfig         *dynconfig.DynConfig // nil when DynConfigEnabled is false
+	dynWatcher        *dynconfig.Watcher   // nil when DynConfigEnabled is false
+	gcWorkers         []*gcpkg.Worker      // all registered GC workers; used by admin endpoint
+	tenantStores      sync.Map             // tenantID (uint16) -> storage.Store; avoids per-request sql.Open
+	pickCursors       sync.Map             // "tenant:name" -> *int64; in-memory round-robin cursor (S10; persisted in S21)
+	ready             int32                // atomic: 0 = not ready, 1 = ready; set when Start() is called
 }
 
 // storeForTenant returns a Store scoped to the given tenant ID.
@@ -82,13 +94,22 @@ type Server struct {
 // Stores are created lazily on first access and cached in a sync.Map.
 // The LoadOrStore pattern handles concurrent creation races safely.
 // For tenant 0, returns the default unscoped store.
-// For non-zero tenants, returns a cached store instance that shares
+// For non-zero tenants, returns a cached Store instance that shares the
+// underlying database file with all other tenant stores but scopes every
+// query to the tenant's own table prefix (t<XXXX>_*).
 
 // TenantRegistry returns the server's tenant registry. This is primarily
 // useful for pre-registering tenants in strict mode before starting the
 // server.
 func (s *Server) TenantRegistry() *tenant.Registry {
 	return s.tenantRegistry
+}
+
+// v2Enabled reports whether the API v2 surface is active. When false, all
+// /api/v2 routes are not registered and v2 fields in v1 requests (such as
+// CommitRequest.FsmWalk) are rejected rather than silently ignored.
+func (s *Server) v2Enabled() bool {
+	return s.config.APIV2Enabled
 }
 
 // TSManager returns the server's timeseries Manager. Returns nil when
@@ -100,17 +121,27 @@ func (s *Server) TSManager() timeseries.Manager {
 
 // SetTSManager replaces the server's timeseries Manager. Intended for testing
 // only: it allows injecting a fake or failing manager after construction so
-// that failure paths (e.g. OLU-CM016) can be exercised deterministically.
+// that failure paths (e.g. XOLU-CM016) can be exercised deterministically.
 // Must not be called concurrently with request handling.
 func (s *Server) SetTSManager(m timeseries.Manager) {
 	s.tsManager = m
 }
+
 // the same underlying database but scopes all queries. Stores are
 // created once per tenant and reused across requests, avoiding the
 // overhead of sql.Open on every request.
 // sulpherJobsForTenant returns a Sulpher JobManager scoped to a specific tenant.
 // Managers are lazily created and reused across requests for the same tenant.
 // Returns nil if graph or Sulpher is not enabled.
+// graphQueryableAdapter wraps a storage.AggregateQueryable to satisfy
+// sulpher.GraphQueryable by adding the tenant-scoped edge table name.
+type graphQueryableAdapter struct {
+	storage.AggregateQueryable
+	edgeTable string
+}
+
+func (a *graphQueryableAdapter) GraphEdgesTable() string { return a.edgeTable }
+
 func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 	if s.sulpherJobs == nil {
 		return nil
@@ -127,9 +158,17 @@ func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 	executor := sulpher.NewExecutorForTenant(s.graph, s.config.MaxQueryDepth, prefix).WithLogger(s.logger)
 	if tenantStore != nil {
 		executor = executor.WithStore(tenantStore)
+		// Also wire graph push-down if the store supports aggregate queries.
+		if aq, ok := tenantStore.(storage.AggregateQueryable); ok {
+			edgeTable := tenant.GraphEdgesTableName(tenantID)
+			executor = executor.WithGraphStore(&graphQueryableAdapter{
+				AggregateQueryable: aq,
+				edgeTable:          edgeTable,
+			})
+		}
 	}
 	cfg := s.config
-	jm := sulpher.NewJobManager(executor, time.Duration(cfg.GraphQueryTTL)*time.Second)
+	jm := sulpher.NewJobManager(executor, time.Duration(cfg.AsyncJobRetentionTTL)*time.Second)
 	jm.SetLimits(sulpher.GraphLimits{
 		MaxVisitedNodes: cfg.GraphMaxVisitedNodes,
 		MaxResults:      cfg.GraphMaxResults,
@@ -143,13 +182,10 @@ func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 
 // tenantDBPath derives the per-file SQLite database path for a given tenant.
 // Mirrors the timeseries layout:
-//
-//	tenant 0 (base store): basePath  (e.g. data/olu.db)
-//	tenant N:              <dir>/sql/<seg>/<base>  (e.g. data/sql/t0001/olu.db)
-func tenantDBPath(basePath string, tenantID uint16) string {
-	dir := filepath.Dir(basePath)
-	base := filepath.Base(basePath)
-	return filepath.Join(dir, "sql", tenant.StorageDirSegment(tenantID), base)
+// tenantDBPath returns the SQLite file for a tenant under the invariant layout:
+// <BaseDir>/tXXXX/store/xolu.db. The directory is created by the caller.
+func tenantDBPath(baseDir string, tenantID uint16) string {
+	return sl.TenantStorePath(baseDir, tenantID)
 }
 
 func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
@@ -165,19 +201,30 @@ func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 	// Slow path: create and cache
 	baseCfg := s.storage.Config()
 
-	dbPath := baseCfg.DBPath
-	if baseCfg.SQLitePerFileTenants {
-		dbPath = tenantDBPath(baseCfg.DBPath, tenantID)
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-			return nil, fmt.Errorf("storeForTenant mkdir: %w", err)
-		}
+	// Layout is owned by the server configuration, not the base store's config:
+	// the data root and the per-file/shared decision determine where this
+	// tenant's store lives. Storage tuning parameters (cache size, timeouts)
+	// continue to come from the existing base store's config.
+	baseDir := s.config.BaseDir
+	perFile := s.config.SQLitePerFileTenants
+
+	// Resolve this tenant's store path from the data root by invariant.
+	// Per-file mode: each tenant gets <BaseDir>/tXXXX/store/xolu.db.
+	// Shared mode: all tenants share <BaseDir>/shared/store/xolu.db.
+	var dbPath string
+	if perFile {
+		dbPath = tenantDBPath(baseDir, tenantID)
+	} else {
+		dbPath = sl.SharedStorePath(baseDir)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("storeForTenant mkdir: %w", err)
 	}
 
 	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:                      baseCfg.Type,
+		BaseDir:                   baseDir,
 		DBPath:                    dbPath,
-		BaseDir:                   baseCfg.BaseDir,
-		Schema:                    baseCfg.Schema,
 		FullTextEnabled:           baseCfg.FullTextEnabled,
 		GraphEnabled:              baseCfg.GraphEnabled,
 		TenantID:                  tenantID,
@@ -187,7 +234,7 @@ func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 		SQLiteMaxIdleConns:        baseCfg.SQLiteMaxIdleConns,
 		SQLiteReadPoolSize:        baseCfg.SQLiteReadPoolSize,
 		SQLiteContentionThreshold: baseCfg.SQLiteContentionThreshold,
-		SQLitePerFileTenants:      baseCfg.SQLitePerFileTenants,
+		SQLitePerFileTenants:      perFile,
 	})
 	if err != nil {
 		return nil, err
@@ -201,7 +248,7 @@ func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
 	actual, loaded := s.tenantStores.LoadOrStore(tenantID, store)
 	if loaded {
 		// Another goroutine won the race — close our duplicate and use theirs.
-		store.Close()
+		_ = store.Close()
 		return actual.(storage.Store), nil
 	}
 	return store, nil
@@ -235,24 +282,55 @@ func getTenantIDNumeric(ctx context.Context) uint16 {
 //     /tenant/1 as an alias for /tenant/acme when acme has ID 1.
 //  3. In path mode only, if neither lookup succeeds the name is
 //     auto-registered as a new tenant (existing behaviour).
+//
+// authoriseTenantGrant enforces the scoped-authorisation invariant for the
+// JSON v1 surface (tenant routes and the native blob plane): under
+// TenantEnforceGrant the caller's verified identity must authorise the named
+// tenant. Authentication is performed upstream by AuthMiddleware, which places
+// the TenantGrant in the request context; this performs only the authorisation
+// decision and is the single definition of that decision shared by every JSON
+// caller. The S3 plane is deliberately separate — it derives and verifies its
+// grant from the SigV4 signature rather than the context, a protocol-level
+// difference — but reaches the same grant.Allows decision underneath.
+//
+// On refusal it writes a 403 (XOLU-TN003) and returns false. Fail closed: under
+// TenantEnforceGrant a missing or empty grant authorises nothing. In open mode
+// no grant check applies and it returns true.
+func (s *Server) authoriseTenantGrant(w http.ResponseWriter, r *http.Request, tenantName string) bool {
+	if !s.config.Tenancy().Has(config.TenantEnforceGrant) {
+		return true
+	}
+	grant, ok := xoluMiddleware.TenantGrantFromContext(r.Context())
+	if !ok || !grant.Allows(tenantName) {
+		s.writeError(w, http.StatusForbidden, xoluerr.ErrTenantForbidden,
+			"credential not authorised for tenant")
+		return false
+	}
+	return true
+}
+
 func (s *Server) tenantMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tenantName := chi.URLParam(r, "tenant_id")
 		if tenantName == "" {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "tenant_id required")
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "tenant_id required")
 			return
 		}
 
 		var tid uint16
-		if s.config.TenantMode == "strict" {
-			// Strict mode: tenant must be pre-registered.
+		if s.config.Tenancy().Has(config.TenantRequireRoute) {
+			// Strict routing: tenant must be pre-registered. Set by TenantMode
+			// "strict" and, structurally, by "scoped" (which implies it). Because
+			// scoped always lands here, there is no auto-registration path under
+			// scoped — a non-admin caller cannot conjure a tenant it would then be
+			// "authorised" for (tenant-access-control.md §8.5 step 7).
 			var ok bool
 			tid, ok = s.tenantRegistry.Lookup(tenantName)
 			if !ok {
 				// Numeric fallback: try parsing as a tenant ID.
 				tid, tenantName, ok = s.resolveNumericTenant(tenantName)
 				if !ok {
-					s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound,
+					s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 						fmt.Sprintf("Unknown tenant: %s", chi.URLParam(r, "tenant_id")))
 					return
 				}
@@ -270,22 +348,30 @@ func (s *Server) tenantMiddleware(next http.Handler) http.Handler {
 					var err error
 					tid, err = s.tenantRegistry.GetOrRegister(r.Context(), tenantName)
 					if err != nil {
-						s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity,
+						s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity,
 							fmt.Sprintf("Invalid tenant: %s", tenantName))
 						return
 					}
 				} else {
-					s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound,
+					s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 						fmt.Sprintf("Unknown tenant: %s (auto-registration disabled)", tenantName))
 					return
 				}
 			}
 		}
 
+		// Scoped authorisation (TenantEnforceGrant): the caller's identity must
+		// authorise the resolved tenant. Checked here, after tenant resolution and
+		// before the store is created, so an unauthorised caller never reaches a
+		// tenant store. Shared with the native blob plane via authoriseTenantGrant.
+		if !s.authoriseTenantGrant(w, r, tenantName) {
+			return
+		}
+
 		store, err := s.storeForTenant(tid)
 		if err != nil {
 			s.logger.Error().Err(err).Str("tenant", tenantName).Msg("Failed to create tenant store")
-			s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, "Failed to initialise tenant context")
+			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to initialise tenant context")
 			return
 		}
 
@@ -319,15 +405,21 @@ func (s *Server) tenantStrictMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if this is an entity operation path (not system paths)
 		path := r.URL.Path
-		
+
 		// Allow system endpoints
 		if path == "/health" || path == "/ready" || path == "/version" || path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		
+
 		// Allow schema endpoints (tenant-independent)
 		if strings.HasPrefix(path, "/api/v1/schema/") || path == "/api/v1/schema" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Allow admin endpoints (GC, dynconfig) — tenant-independent
+		if strings.HasPrefix(path, "/api/v1/admin/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -337,22 +429,21 @@ func (s *Server) tenantStrictMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		
+
 		// Everything else under /api/v1/ requires tenant context in strict mode.
 		// Non-tenant OQL, search, export, and graph routes are not registered
 		// in strict mode (see setupRoutes), so they 404 naturally. But if
 		// an entity happens to be named "search" or "export", the wildcard
 		// /{entity} route would match — the middleware blocks it here.
 		if strings.HasPrefix(path, "/api/v1/") {
-			s.writeError(w, http.StatusForbidden, oluerr.ErrTenantRequired,
+			s.writeError(w, http.StatusForbidden, xoluerr.ErrTenantRequired,
 				"Tenant context required. Use /api/v1/tenant/{tenant_id}/... routes")
 			return
 		}
-		
+
 		next.ServeHTTP(w, r)
 	})
 }
-
 
 // corsMiddleware returns a handler that sets CORS headers for the given origins.
 // It handles preflight OPTIONS requests and adds appropriate headers to all responses.
@@ -408,7 +499,6 @@ func New(
 	store storage.Store,
 	cache cache.Cache,
 	g graph.Graph,
-	persister *graph.AdaptivePersister,
 	validator validation.Validator,
 	logger zerolog.Logger,
 ) *Server {
@@ -417,7 +507,6 @@ func New(
 		storage:        store,
 		cache:          cache,
 		graph:          g,
-		persister:      persister,
 		validator:      validator,
 		logger:         logger,
 		router:         chi.NewRouter(),
@@ -426,18 +515,25 @@ func New(
 
 	// Initialize rate limiter if enabled
 	if cfg.RateLimitEnabled {
-		s.rateLimiter = oluMiddleware.NewRateLimiter(cfg)
+		s.rateLimiter = xoluMiddleware.NewRateLimiter(cfg)
 	}
 
 	// Initialize metrics if enabled
 	if cfg.MetricsEnabled {
-		s.metrics = oluMiddleware.NewMetrics()
+		s.metrics = xoluMiddleware.NewMetrics()
 	}
 
 	// Initialize Sulpher query engine if graph is enabled
 	if cfg.GraphEnabled {
 		executor := sulpher.NewExecutor(g, cfg.MaxQueryDepth).WithStore(s.storage)
-		s.sulpherJobs = sulpher.NewJobManager(executor, time.Duration(cfg.GraphQueryTTL)*time.Second)
+		if aq, ok := s.storage.(storage.AggregateQueryable); ok {
+			edgeTable := tenant.GraphEdgesTableName(0)
+			executor = executor.WithGraphStore(&graphQueryableAdapter{
+				AggregateQueryable: aq,
+				edgeTable:          edgeTable,
+			})
+		}
+		s.sulpherJobs = sulpher.NewJobManager(executor, time.Duration(cfg.AsyncJobRetentionTTL)*time.Second)
 		s.sulpherJobs.SetLimits(sulpher.GraphLimits{
 			MaxVisitedNodes: cfg.GraphMaxVisitedNodes,
 			MaxResults:      cfg.GraphMaxResults,
@@ -479,7 +575,7 @@ func New(
 		logger.Warn().Str("profile", cfg.PerformanceProfile).Msg("Unknown performance profile, using VPS defaults")
 	}
 
-	s.oqlJobs = oql.NewJobManager(oqlEngine, time.Duration(cfg.GraphQueryTTL)*time.Second)
+	s.oqlJobs = oql.NewJobManager(oqlEngine, time.Duration(cfg.AsyncJobRetentionTTL)*time.Second)
 	if cfg.QueryTimeout > 0 {
 		s.oqlJobs.SetQueryTimeout(time.Duration(cfg.QueryTimeout) * time.Second)
 	}
@@ -496,11 +592,14 @@ func New(
 		}
 	}
 
-	// Initialize timeseries manager if enabled
+	// Initialize timeseries manager if enabled. The manager receives the data
+	// root and derives each tenant's timeseries directory by invariant
+	// (<BaseDir>/tXXXX/ts) via pkg/storelayout — tenant-first, consistent with
+	// the SQLite store layout.
 	if cfg.TimeseriesEnabled {
-		tsBaseDir := filepath.Join(cfg.BaseDir, "ts")
 		tsCfg := timeseries.StoreConfig{
 			DefaultRetentionDays: cfg.TSDefaultRetentionDays,
+			RollupCascadeDelete:  cfg.TSRollupCascadeDelete,
 		}
 		pebbleCfg := timeseries.PebbleConfig{
 			MemtableSize:          cfg.TSMemtableSize,
@@ -508,18 +607,126 @@ func New(
 			Compression:           cfg.TSCompression,
 			L0CompactionThreshold: cfg.TSL0CompactionThreshold,
 			MaxOpenFiles:          cfg.TSMaxOpenFiles,
+			CoalFlushIntervalMs:   cfg.TSCoalFlushIntervalMs,
+			CoalMaxEvents:         cfg.TSCoalMaxEvents,
 		}
-		tsm, err := timeseries.NewManager(tsBaseDir, timeseries.NewPebbleStoreFactory(pebbleCfg), tsCfg)
+		tsm, err := timeseries.NewManager(cfg.BaseDir, timeseries.NewPebbleStoreFactory(pebbleCfg, s.dynConfig), tsCfg)
 		if err != nil {
 			logger.Error().Err(err).Msg("Failed to initialise timeseries manager")
 		} else {
 			s.tsManager = tsm
 			if cfg.TSRetentionEnabled && cfg.TSCompactionIntervalSecs > 0 {
 				interval := time.Duration(cfg.TSCompactionIntervalSecs) * time.Second
-				w := timeseries.NewRetentionWorker(tsm, interval)
+				sweeper := timeseries.NewRetentionWorker(tsm, interval)
+				w := gcpkg.NewWorker("ts-retention", sweeper, interval, logger)
 				w.Start()
 				s.tsRetention = w
+				s.gcWorkers = append(s.gcWorkers, w)
 			}
+		}
+	}
+
+	// Initialise the per-tenant blob manager if enabled. Each tenant's blobs
+	// live at <BaseDir>/tXXXX/blobs (tenant-first, uniform with timeseries);
+	// the manager owns one store, GC worker, and usage sampler per tenant.
+	if cfg.BlobEnabled {
+		gcCfg := blob.GCConfig{
+			Interval:    time.Duration(cfg.BlobGCIntervalSecs) * time.Second,
+			GracePeriod: time.Duration(cfg.BlobGCGracePeriodSecs) * time.Second,
+		}
+		mgr, err := newBlobManager(
+			cfg.BaseDir,
+			int64(cfg.BlobMaxSize),
+			gcCfg,
+			time.Duration(cfg.BlobUsageSampleIntervalSecs)*time.Second,
+			logger,
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("Failed to initialise blob manager")
+		} else {
+			s.blobMgr = mgr
+			logger.Info().Str("base", cfg.BaseDir).Msg("Blob manager initialised (per-tenant)")
+
+			// A single server-level GC worker named "blob-gc" drives garbage
+			// collection across all tenants by ranging over the manager's open
+			// stores (mgr implements gcpkg.Sweeper). Each per-tenant store stays
+			// single-tenant; the manager aggregates.
+			if cfg.BlobGCEnabled && cfg.BlobGCIntervalSecs > 0 {
+				interval := time.Duration(cfg.BlobGCIntervalSecs) * time.Second
+				w := gcpkg.NewWorker("blob-gc", mgr, interval, logger)
+				w.Start()
+				s.gcWorkers = append(s.gcWorkers, w)
+				logger.Info().
+					Int("interval_secs", cfg.BlobGCIntervalSecs).
+					Int("grace_secs", cfg.BlobGCGracePeriodSecs).
+					Msg("Blob GC worker started")
+			}
+		}
+	}
+
+	// Initialise the cal manager if enabled. T-18 exposes cal via
+	// /api/v2/cal/*; the manager owns per-tenant Lifecycle wiring, backed
+	// by the shared writer DB.
+	if cfg.CalEnabled {
+		if wdp, ok := store.(storage.WriterDBProvider); ok {
+			s.calMgr = cal.NewManager(cfg.BaseDir, wdp.WriterDB())
+			logger.Info().Str("base", cfg.BaseDir).Msg("Cal manager initialised (per-tenant)")
+		} else {
+			logger.Warn().Msg("Cal manager not initialised: storage backend does not expose a writer DB")
+		}
+	}
+
+	// Initialise API v2 schema if enabled. The initialisation is idempotent;
+	// failure logs a warning and leaves v2 disabled for this run without
+	// preventing the server from starting.
+	if cfg.APIV2Enabled {
+		if v2i, ok := store.(storage.V2SchemaInitialiser); ok {
+			if err := v2i.InitV2Schema(context.Background()); err != nil {
+				logger.Warn().Err(err).Msg("API v2 schema initialisation failed — v2 disabled for this run")
+				s.config.APIV2Enabled = false
+			} else {
+				logger.Warn().Msg("API v2 is enabled (experimental). Routes and behaviour may change before xolu 2.0.")
+
+				// S3: register the metadata TTL sweeper.
+				if cfg.MetaGCEnabled && cfg.MetaGCIntervalSecs > 0 {
+					if wdp, ok := store.(storage.WriterDBProvider); ok {
+						interval := time.Duration(cfg.MetaGCIntervalSecs) * time.Second
+						sweeper := NewMetaSweeper(wdp.WriterDB())
+						w := gcpkg.NewWorker("meta-gc", sweeper, interval, logger)
+						w.Start()
+						s.gcWorkers = append(s.gcWorkers, w)
+						logger.Info().Int("interval_secs", cfg.MetaGCIntervalSecs).
+							Msg("Metadata GC worker started")
+					}
+				}
+
+				// S5: wire sequence incrementor into the OQL engine.
+				if s.oqlJobs != nil {
+					s.oqlJobs.SetSeqIncrementor(s.serverSeqIncrementor())
+					s.oqlJobs.SetGenDispatcher(s.serverGenDispatcher())
+				}
+			}
+		} else {
+			logger.Warn().Msg("API v2 requested but storage backend does not support v2 schema — v2 disabled")
+			s.config.APIV2Enabled = false
+		}
+	}
+
+	// Initialise dynamic configuration if enabled.
+	if cfg.DynConfigEnabled {
+		dcFile := sl.DynConfigPath(cfg.BaseDir)
+		dc, err := dynconfig.New(dcFile)
+		if err != nil {
+			logger.Error().Err(err).Str("file", dcFile).Msg("Failed to load dynamic config — dynconfig disabled")
+		} else {
+			s.dynConfig = dc
+			w := dynconfig.NewWatcher(dc, time.Duration(cfg.DynConfigReloadSecs)*time.Second)
+			w.Start()
+			s.dynWatcher = w
+			logger.Info().
+				Str("file", dcFile).
+				Int("reload_secs", cfg.DynConfigReloadSecs).
+				Msg("Dynamic config loaded")
 		}
 	}
 
@@ -559,19 +766,21 @@ func (s *Server) setupRoutes() {
 
 	// Metrics middleware (before auth so we capture all requests)
 	if s.metrics != nil {
-		s.router.Use(oluMiddleware.MetricsMiddleware(s.metrics))
+		s.router.Use(xoluMiddleware.MetricsMiddleware(s.metrics))
 	}
 
 	// Authentication middleware (applied to all routes, checks exclusions internally)
-	s.router.Use(oluMiddleware.AuthMiddleware(s.config))
+	s.router.Use(xoluMiddleware.AuthMiddleware(s.config.AuthConfig()))
 
 	// Rate limiting middleware
 	if s.rateLimiter != nil {
-		s.router.Use(oluMiddleware.RateLimitMiddleware(s.config, s.rateLimiter))
+		s.router.Use(xoluMiddleware.RateLimitMiddleware(s.config, s.rateLimiter))
 	}
 
-	// Tenant strict mode middleware
-	if s.config.TenantMode == "strict" {
+	// Tenant strict-routing middleware: disables the unprefixed default-tenant
+	// routes. Enabled when TenantRequireRoute is set — by TenantMode "strict" or,
+	// structurally, by TenantAuthMode "scoped" (which implies it).
+	if s.config.Tenancy().Has(config.TenantRequireRoute) {
 		s.router.Use(s.tenantStrictMiddleware)
 	}
 
@@ -620,10 +829,24 @@ func (s *Server) setupRoutes() {
 				tr.Route("/ts", func(tsr chi.Router) {
 					tsr.Post("/provision", s.HandleTSProvision)
 					// Timeline management
-					tsr.Post("/timelines", s.HandleTSDefineTimeline)
-					tsr.Get("/timelines", s.HandleTSListTimelines)
-					tsr.Get("/timelines/{timeline_id}", s.HandleTSGetTimeline)
-					tsr.Patch("/timelines/{timeline_id}", s.HandleTSUpdateTimeline)
+					// DEPRECATED plural "timelines" shape — commented out in
+					// favour of the "tl/def" / "tl/list" / "tl/{id}" form below.
+					// Restore from the v0.13.1 baseline if these must come back.
+					// tsr.Post("/timelines", s.HandleTSDefineTimeline)
+					// tsr.Get("/timelines", s.HandleTSListTimelines)
+					// tsr.Get("/timelines/{timeline_id}", s.HandleTSGetTimeline)
+					// tsr.Patch("/timelines/{timeline_id}", s.HandleTSUpdateTimeline)
+					// tsr.Get("/timelines/{timeline_id}/sync", s.HandleTSSyncGet)
+					// tsr.Post("/timelines/{timeline_id}/sync/on", s.HandleTSSyncOn)
+					// tsr.Post("/timelines/{timeline_id}/sync/off", s.HandleTSSyncOff)
+					tsr.Post("/tl/def", s.HandleTSDefineTimeline)
+					tsr.Get("/tl/list", s.HandleTSListTimelines)
+					tsr.Get("/tl/{timeline_id}", s.HandleTSGetTimeline)
+					tsr.Patch("/tl/{timeline_id}", s.HandleTSUpdateTimeline)
+					tsr.Delete("/tl/{timeline_id}", s.HandleTSDeleteTimeline)
+					tsr.Get("/tl/{timeline_id}/sync", s.HandleTSSyncGet)
+					tsr.Post("/tl/{timeline_id}/sync/on", s.HandleTSSyncOn)
+					tsr.Post("/tl/{timeline_id}/sync/off", s.HandleTSSyncOff)
 					// Events
 					tsr.Post("/events", s.HandleTSAppend)
 					tsr.Post("/events/batch", s.HandleTSBatchAppend)
@@ -632,12 +855,46 @@ func (s *Server) setupRoutes() {
 					tsr.Get("/events/latest", s.HandleTSLatest)
 					// Aggregate
 					tsr.Post("/aggregate", s.HandleTSAggregate)
+					tsr.Post("/range_aggregate", s.HandleTSRangeAggregate)
+					tsr.Post("/full_aggregate", s.HandleTSFullAggregate)
+					// Rollup management
+					// DEPRECATED plural "timelines" shape — see note above.
+					// tsr.Post("/timelines/{timeline_id}/rollup/def", s.HandleTSDefineRollup)
+					// tsr.Get("/timelines/{timeline_id}/rollup/list", s.HandleTSListRollups)
+					// tsr.Get("/timelines/{timeline_id}/rollup/parent", s.HandleTSRollupParent)
+					// tsr.Get("/timelines/{timeline_id}/rollup/{rollup_id}", s.HandleTSGetRollup)
+					// tsr.Delete("/timelines/{timeline_id}/rollup/{rollup_id}", s.HandleTSDeleteRollup)
+					// tsr.Post("/timelines/{timeline_id}/rollup/{rollup_id}/run", s.HandleTSRunRollup)
+					// tsr.Get("/timelines/{timeline_id}/rollup/{rollup_id}/status", s.HandleTSRollupStatus)
+					tsr.Post("/tl/{timeline_id}/rollup/def", s.HandleTSDefineRollup)
+					tsr.Get("/tl/{timeline_id}/rollup/list", s.HandleTSListRollups)
+					tsr.Get("/tl/{timeline_id}/rollup/parent", s.HandleTSRollupParent)
+					tsr.Get("/tl/{timeline_id}/rollup/{rollup_id}", s.HandleTSGetRollup)
+					tsr.Delete("/tl/{timeline_id}/rollup/{rollup_id}", s.HandleTSDeleteRollup)
+					tsr.Post("/tl/{timeline_id}/rollup/{rollup_id}/run", s.HandleTSRunRollup)
+					tsr.Get("/tl/{timeline_id}/rollup/{rollup_id}/status", s.HandleTSRollupStatus)
+					tsr.Get("/rollup/tree", s.HandleTSRollupTree)
+					// Timeline data deletion
+					// DEPRECATED plural "timelines" shape — see note above.
+					// tsr.Delete("/timelines/{timeline_id}/data", s.HandleTSDeleteTimelineData)
+					// tsr.Post("/timelines/{timeline_id}/data/purge", s.HandleTSPurgeTimelineRange)
+					tsr.Delete("/tl/{timeline_id}/data", s.HandleTSDeleteTimelineData)
+					tsr.Post("/tl/{timeline_id}/data/purge", s.HandleTSPurgeTimelineRange)
 					// Retention + stats
 					tsr.Get("/retention", s.HandleTSGetRetention)
+					tsr.Patch("/retention", s.HandleTSPatchRetention)
 					tsr.Get("/stats", s.HandleTSStats)
 					tsr.Get("/stats/{timeline_id}", s.HandleTSTimelineStats)
 				})
 			}
+
+			// Tenant-scoped blob routes.
+			tr.Post("/blob", s.handleBlobPut)
+			tr.Get("/blob", s.handleBlobList)
+			tr.Get("/blob/usage", s.handleBlobUsage)
+			tr.Get("/blob/{key}", s.handleBlobGet)
+			tr.Head("/blob/{key}", s.handleBlobHead)
+			tr.Delete("/blob/{key}", s.handleBlobDelete)
 
 			// Tenant-scoped graph routes — available in both path and strict mode.
 			// Node IDs in requests/responses use the client-facing "entity:id"
@@ -655,17 +912,23 @@ func (s *Server) setupRoutes() {
 					gr.Post("/pathExists", s.handleTenantGraphPathExists)
 					gr.Post("/commonNeighbors", s.handleTenantGraphCommonNeighbors)
 					gr.Post("/nodes/search", s.handleTenantGraphNodeSearch)
+					gr.Post("/edges", s.handleTenantCreateEdge) // KL-2: write edge with properties (tenant-scoped)
 					gr.Post("/query", s.handleTenantSulpherQuery)
 					gr.Post("/query/async", s.handleTenantSulpherQueryAsync)
 					gr.Get("/query/{query_id}", s.handleTenantSulpherQueryStatus)
 					gr.Get("/query/{query_id}/result", s.handleTenantSulpherQueryResult)
+					// Admin / maintenance endpoints — tenant-scoped so they are
+					// available in strict mode. Both handlers use s.getStore(r.Context())
+					// which resolves the correct tenant store from request context.
+					gr.Get("/admin/verify", s.handleGraphVerify)
+					gr.Post("/admin/rebuild", s.handleGraphRebuild)
 				})
 			}
 		})
 
 		// Non-tenant routes: these operate against the default store (tenant 0).
 		// In strict mode they are disabled to prevent accidental unscoped queries.
-		if s.config.TenantMode != "strict" {
+		if !s.config.Tenancy().Has(config.TenantRequireRoute) {
 			// OQL (SQL) query language endpoints (default store)
 			r.Post("/oql/query", s.handleOQLQuery)
 			r.Post("/oql/query/async", s.handleOQLQueryAsync)
@@ -691,6 +954,7 @@ func (s *Server) setupRoutes() {
 				r.Post("/graph/pathExists", s.handleGraphPathExists)
 				r.Post("/graph/commonNeighbors", s.handleGraphCommonNeighbors)
 				r.Post("/graph/nodes/search", s.handleGraphNodeSearch)
+				r.Post("/graph/edges", s.handleCreateEdge) // KL-2: write edge with properties
 				r.Post("/graph/query", s.handleSulpherQuery)
 				r.Post("/graph/query/async", s.handleSulpherQueryAsync)
 				r.Get("/graph/query/{query_id}", s.handleSulpherQueryStatus)
@@ -701,23 +965,68 @@ func (s *Server) setupRoutes() {
 			}
 		}
 
+		// Dynamic configuration API — optional, gated on both
+		// DynConfigEnabled and DynConfigAPIEnabled.
+		if s.config.DynConfigEnabled && s.config.DynConfigAPIEnabled {
+			r.Get("/admin/config", s.handleDynConfigDump)
+			r.Get("/admin/config/{namespace}", s.handleDynConfigGetNamespace)
+			r.Get("/admin/config/{namespace}/{key}", s.handleDynConfigGet)
+			r.Put("/admin/config/{namespace}/{key}", s.handleDynConfigSet)
+			r.Delete("/admin/config/{namespace}/{key}", s.handleDynConfigDelete)
+		}
+
 		// Schema operations (tenant-independent, always available)
 		r.Post("/schema/{entity}", s.handleCreateSchema)
 		r.Get("/schema/{entity}", s.handleGetSchema)
+		r.Get("/schemas", s.handleListSchemas)
+
+		// GC admin endpoints (v1 — operational infrastructure, not versioned).
+		// Available regardless of XOLU_API_V2_ENABLED.
+		r.Get("/admin/gc", s.handleGCList)
+		r.Post("/admin/gc/{name}/run", s.handleGCRun)
+
+		// Blob API — available regardless of tenant mode.
+		// Routes are registered even when BlobEnabled=false; handlers return 501.
+		// Tenant-scoped blob routes live inside the tenant middleware block above.
+		if !s.config.Tenancy().Has(config.TenantRequireRoute) {
+			r.Post("/blob", s.handleBlobPut)
+			r.Get("/blob", s.handleBlobList)
+			r.Get("/blob/usage", s.handleBlobUsage)
+			r.Get("/blob/{key}", s.handleBlobGet)
+			r.Head("/blob/{key}", s.handleBlobHead)
+			r.Delete("/blob/{key}", s.handleBlobDelete)
+		}
 	})
+
+	// API v2 — registered only when XOLU_API_V2_ENABLED=true.
+	// The entire /api/v2 prefix is absent from the router when disabled.
+	s.setupV2Routes(s.router)
 }
 
 // metricsHost returns the bind address for the dedicated metrics listener.
 //
-// If the operator set OLU_METRICS_HOST explicitly, that value wins.
-// Otherwise: if OLU_HOST is a real interface address (not 0.0.0.0 or ::),
+// If the operator set XOLU_METRICS_HOST explicitly, that value wins.
+// Otherwise: if XOLU_HOST is a real interface address (not 0.0.0.0 or ::),
 // the metrics listener inherits it — keeping scrape traffic on the same
-// interface as the API without any extra config. If OLU_HOST is a wildcard,
+// interface as the API without any extra config. If XOLU_HOST is a wildcard,
 // there is no meaningful interface preference to propagate, so we fall back
 // to 0.0.0.0.
 func (s *Server) metricsHost() string {
 	if s.config.MetricsHost != "" {
 		return s.config.MetricsHost
+	}
+	h := s.config.Host
+	if h != "" && h != "0.0.0.0" && h != "::" {
+		return h
+	}
+	return "0.0.0.0"
+}
+
+// s3Host returns the bind address for the S3-compatible listener,
+// following the same inheritance logic as metricsHost.
+func (s *Server) s3Host() string {
+	if s.config.S3Host != "" {
+		return s.config.S3Host
 	}
 	h := s.config.Host
 	if h != "" && h != "0.0.0.0" && h != "::" {
@@ -763,13 +1072,36 @@ func (s *Server) Start() error {
 		}()
 	}
 
+	// S3-compatible blob listener on a dedicated port.
+	if s.config.S3Enabled && s.config.S3Port > 0 && s.blobMgr != nil {
+		s3Host := s.config.S3Host
+		if s3Host == "" {
+			s3Host = s.s3Host()
+		}
+		s3Addr := fmt.Sprintf("%s:%d", s3Host, s.config.S3Port)
+		s.logger.Info().Str("addr", s3Addr).Msg("Starting S3-compatible blob listener")
+		s3Mux := s.setupS3Routes()
+		s.s3Server = &http.Server{
+			Addr:    s3Addr,
+			Handler: s3Mux,
+		}
+		go func() {
+			if err := s.s3Server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				s.logger.Error().Err(err).Str("addr", s3Addr).Msg("S3 listener failed")
+			}
+		}()
+	}
+
 	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully shuts down the HTTP server, allowing in-flight
 // requests to complete within the given context deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Shut down the metrics listener first (best-effort; scrapes are idempotent).
+	// Shut down auxiliary listeners first (best-effort).
+	if s.s3Server != nil {
+		_ = s.s3Server.Shutdown(ctx)
+	}
 	if s.metricsServer != nil {
 		_ = s.metricsServer.Shutdown(ctx)
 	}
@@ -788,6 +1120,12 @@ func (s *Server) Stop() {
 	if s.tsRetention != nil {
 		s.tsRetention.Stop()
 	}
+	if s.blobMgr != nil {
+		_ = s.blobMgr.Close()
+	}
+	if s.dynWatcher != nil {
+		s.dynWatcher.Stop()
+	}
 	// Close timeseries stores before tenant stores.
 	if s.tsManager != nil {
 		if err := s.tsManager.Close(); err != nil {
@@ -797,7 +1135,7 @@ func (s *Server) Stop() {
 	// Close cached tenant stores
 	s.tenantStores.Range(func(key, value interface{}) bool {
 		if st, ok := value.(storage.Store); ok {
-			st.Close()
+			_ = st.Close()
 		}
 		s.tenantStores.Delete(key)
 		return true
@@ -807,6 +1145,48 @@ func (s *Server) Stop() {
 // Handler returns the HTTP handler (useful for testing)
 func (s *Server) Handler() http.Handler {
 	return s.router
+}
+
+// S3Handler returns an http.Handler for the S3-compatible API surface.
+// Used in tests to wire the S3 router to an httptest.Server without needing
+// a real TCP port. Returns nil when the blob store is not initialised.
+func (s *Server) S3Handler() http.Handler {
+	if s.blobMgr == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "blob store not enabled", http.StatusNotImplemented)
+		})
+	}
+	return s.setupS3Routes()
+}
+
+// BlobSamplerFor returns the UsageSampler for a tenant, or nil when blobs are
+// disabled, the tenant's store is not open, or the sampler interval is zero.
+// Exposed for tests that need to call ForceResample() deterministically.
+func (s *Server) BlobSamplerFor(tenantID uint16) *blob.UsageSampler {
+	if s.blobMgr == nil {
+		return nil
+	}
+	return s.blobMgr.SamplerFor(tenantID)
+}
+
+// BlobStoreForTest opens (if needed) and returns a tenant's blob store via the
+// manager. Exposed for tests that need to seed blobs through the same store
+// instance the server uses, so the per-tenant sampler is created and warm.
+func (s *Server) BlobStoreForTest(tenantID uint16) (*blob.Store, error) {
+	if s.blobMgr == nil {
+		return nil, fmt.Errorf("blob support not enabled")
+	}
+	return s.blobMgr.StoreFor(tenantID)
+}
+
+// CalManagerForTest exposes the calendar manager for HTTP-level tests that
+// need to seed calendars and bookings through the same manager the handlers
+// use. Returns nil when the cal subsystem is disabled.
+//
+// Introduced in v0.14.8 alongside the T-18 HTTP test suite. Not part of the
+// public API — the ForTest suffix marks it as a test-only accessor.
+func (s *Server) CalManagerForTest() *cal.Manager {
+	return s.calMgr
 }
 
 // handleHealth returns server health status with database connectivity check.
@@ -877,15 +1257,15 @@ func (s *Server) MarkReady() {
 // handleMetrics returns Prometheus-format metrics
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.metrics == nil {
-		s.writeError(w, http.StatusServiceUnavailable, oluerr.ErrSearchDisabled, "Metrics not enabled")
+		s.writeError(w, http.StatusServiceUnavailable, xoluerr.ErrSearchDisabled, "Metrics not enabled")
 		return
 	}
 
 	// Check Accept header for format preference
 	accept := r.Header.Get("Accept")
 	if accept == "application/json" {
-		// Return JSON format
 		snapshot := s.metrics.GetSnapshot()
+		s.injectBlobMetrics(&snapshot)
 		s.writeJSON(w, http.StatusOK, snapshot)
 		return
 	}
@@ -893,14 +1273,30 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Default to Prometheus format
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(s.metrics.PrometheusFormat()))
+	snapshot := s.metrics.GetSnapshot()
+	s.injectBlobMetrics(&snapshot)
+	_, _ = w.Write([]byte(s.metrics.PrometheusFormatSnapshot(snapshot)))
+}
+
+// injectBlobMetrics populates blob usage fields on a MetricsSnapshot from
+// the UsageSampler cache. Called at serve time; never touches the filesystem.
+func (s *Server) injectBlobMetrics(snap *xoluMiddleware.MetricsSnapshot) {
+	if s.blobMgr == nil {
+		return
+	}
+	snap.BlobEnabled = true
+	g := s.blobMgr.GlobalUsage()
+	snap.BlobBlobCount = g.TotalBlobCount
+	snap.BlobKeyCount = g.TotalKeyCount
+	snap.BlobBytes = g.TotalBytes
+	snap.BlobTenants = g.TenantCount
 }
 
 // handleCreate creates a new entity
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	entity := chi.URLParam(r, "entity")
 	if err := validateEntityName(entity); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
 
@@ -913,7 +1309,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if valid, errors := s.validator.Validate(entity, data); !valid {
 		s.writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error": map[string]interface{}{
-				"code":    string(oluerr.ErrValidationFailed),
+				"code":    string(xoluerr.ErrValidationFailed),
 				"message": "Validation failed",
 				"status":  http.StatusBadRequest,
 			},
@@ -925,7 +1321,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Check size limit
 	jsonData, _ := json.Marshal(data)
 	if len(jsonData) > s.config.MaxEntitySize {
-		s.writeError(w, http.StatusRequestEntityTooLarge, oluerr.ErrEntityTooLarge,
+		s.writeError(w, http.StatusRequestEntityTooLarge, xoluerr.ErrEntityTooLarge,
 			fmt.Sprintf("Entity too large: %d bytes (max: %d)",
 				len(jsonData), s.config.MaxEntitySize))
 		return
@@ -938,11 +1334,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// checks only examine existing graph topology, not the new node's ID.
 	if err := s.validateGraphEdges(r.Context(), entity, 0, data); err != nil {
 		if errors.Is(err, graph.ErrCycleDetected) {
-			s.writeError(w, http.StatusConflict, oluerr.ErrStorageFailed, err.Error())
+			s.writeError(w, http.StatusConflict, xoluerr.ErrStorageFailed, err.Error())
 			return
 		}
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrDuplicateEdgeRef, err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
 	}
@@ -952,11 +1348,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	id, err := store.Create(r.Context(), entity, data)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrDuplicateEdgeRef, err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
 		s.logger.Error().Err(err).Msg("Failed to create entity")
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, "Failed to create entity")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to create entity")
 		return
 	}
 
@@ -969,6 +1365,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info().Str("entity", entity).Int("id", id).Msg("Created entity")
 
+	s.fireEntityEvent(r, "entity.created", entity, id, data)
+
 	s.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"message": fmt.Sprintf("Resource of entity %s created successfully", entity),
 		"id":      id,
@@ -979,7 +1377,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	entity := chi.URLParam(r, "entity")
 	if err := validateEntityName(entity); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
 
@@ -1024,45 +1422,45 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	// Try push-down path: if the store supports Queryable, push WHERE + LIMIT
 	// to SQL rather than loading everything into Go memory.
 	if !isAdapted {
-	if qs, ok := store.(storage.Queryable); ok && qs.Capabilities().Where && qs.Capabilities().Limit {
-		result, totalItems, pushErr := s.listWithPushDown(r.Context(), qs, entity, page, perPage, filters)
-		if pushErr == nil {
-			totalPages := (totalItems + perPage - 1) / perPage
+		if qs, ok := store.(storage.Queryable); ok && qs.Capabilities().Where && qs.Capabilities().Limit {
+			result, totalItems, pushErr := s.listWithPushDown(r.Context(), qs, entity, page, perPage, filters)
+			if pushErr == nil {
+				totalPages := (totalItems + perPage - 1) / perPage
 
-			// Embed references if requested
-			embedParam := r.URL.Query().Get("embed")
-			if embedParam != "false" && embedParam != "0" {
-				embedDepth := 0
-				if depthParam := r.URL.Query().Get("embed_depth"); depthParam != "" {
-					if parsed, err := strconv.Atoi(depthParam); err == nil && parsed > 0 {
-						embedDepth = parsed
+				// Embed references if requested
+				embedParam := r.URL.Query().Get("embed")
+				if embedParam != "false" && embedParam != "0" {
+					embedDepth := 0
+					if depthParam := r.URL.Query().Get("embed_depth"); depthParam != "" {
+						if parsed, err := strconv.Atoi(depthParam); err == nil && parsed > 0 {
+							embedDepth = parsed
+						}
+					}
+					if embedDepth > s.config.MaxEmbedDepth {
+						embedDepth = s.config.MaxEmbedDepth
+					}
+					if embedDepth > 0 {
+						for i, item := range result {
+							result[i] = s.embedReferences(r.Context(), item, embedDepth)
+						}
 					}
 				}
-				if embedDepth > s.config.MaxEmbedDepth {
-					embedDepth = s.config.MaxEmbedDepth
-				}
-				if embedDepth > 0 {
-					for i, item := range result {
-						result[i] = s.embedReferences(r.Context(), item, embedDepth)
-					}
-				}
-			}
 
-			response := models.PagedResponse{
-				Data: result,
-			}
-			response.Pagination.Page = page
-			response.Pagination.PerPage = perPage
-			response.Pagination.TotalItems = totalItems
-			response.Pagination.TotalPages = totalPages
+				response := models.PagedResponse{
+					Data: result,
+				}
+				response.Pagination.Page = page
+				response.Pagination.PerPage = perPage
+				response.Pagination.TotalItems = totalItems
+				response.Pagination.TotalPages = totalPages
 
-			_ = s.cache.Set(r.Context(), cacheKey, response, time.Duration(s.config.CacheTTL)*time.Second)
-			s.writeJSON(w, http.StatusOK, response)
-			return
+				_ = s.cache.Set(r.Context(), cacheKey, response, time.Duration(s.config.CacheTTL)*time.Second)
+				s.writeJSON(w, http.StatusOK, response)
+				return
+			}
+			// Push-down failed — fall through
+			s.logger.Debug().Err(pushErr).Msg("List push-down failed, falling back")
 		}
-		// Push-down failed — fall through
-		s.logger.Debug().Err(pushErr).Msg("List push-down failed, falling back")
-	}
 	} // !isAdapted
 
 	// Try PagedLister path: storage-level LIMIT/OFFSET without filters.
@@ -1113,7 +1511,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	entities, err := store.List(r.Context(), entity)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to list entities")
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, "Failed to list entities")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to list entities")
 		return
 	}
 
@@ -1178,13 +1576,13 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 
 	if err := validateEntityName(entity); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
 
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id < 0 {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidID, "Invalid ID")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "Invalid ID")
 		return
 	}
 
@@ -1211,12 +1609,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		data, err = store.Get(r.Context(), entity, id)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound,
+				s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 					fmt.Sprintf("Resource of entity %s with id %d not found", entity, id))
 				return
 			}
 			s.logger.Error().Err(err).Msg("Failed to get entity")
-			s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, "Failed to get entity")
+			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to get entity")
 			return
 		}
 
@@ -1254,13 +1652,13 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 
 	if err := validateEntityName(entity); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
 
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id < 0 {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidID, "Invalid ID")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "Invalid ID")
 		return
 	}
 
@@ -1274,7 +1672,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if valid, errors := s.validator.Validate(entity, data); !valid {
 		s.writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error": map[string]interface{}{
-				"code":    string(oluerr.ErrValidationFailed),
+				"code":    string(xoluerr.ErrValidationFailed),
 				"message": "Validation failed",
 				"status":  http.StatusBadRequest,
 			},
@@ -1286,11 +1684,11 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Pre-validate graph edges before the store write (Bug 1 fix).
 	if err := s.validateGraphEdges(r.Context(), entity, id, data); err != nil {
 		if errors.Is(err, graph.ErrCycleDetected) {
-			s.writeError(w, http.StatusConflict, oluerr.ErrStorageFailed, err.Error())
+			s.writeError(w, http.StatusConflict, xoluerr.ErrStorageFailed, err.Error())
 			return
 		}
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrDuplicateEdgeRef, err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
 	}
@@ -1299,7 +1697,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	store := s.getStore(r.Context())
 	if err := store.Update(r.Context(), entity, id, data); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound,
+			s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 				fmt.Sprintf("Resource of entity %s with id %d not found", entity, id))
 			return
 		}
@@ -1307,7 +1705,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			currentVer := s.fetchCurrentVersion(r.Context(), entity, id)
 			s.writeJSON(w, http.StatusConflict, map[string]interface{}{
 				"error": map[string]interface{}{
-					"code":    string(oluerr.ErrVersionConflict),
+					"code":    string(xoluerr.ErrVersionConflict),
 					"message": fmt.Sprintf("Version conflict: %s with id %d has been modified by another request", entity, id),
 					"status":  http.StatusConflict,
 				},
@@ -1316,11 +1714,11 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrDuplicateEdgeRef, err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
 		s.logger.Error().Err(err).Msg("Failed to update entity")
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, "Failed to update entity")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to update entity")
 		return
 	}
 
@@ -1329,6 +1727,8 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	s.invalidateCache(r.Context(), entity)
 	s.logger.Info().Str("entity", entity).Int("id", id).Msg("Updated entity")
+
+	s.fireEntityEvent(r, "entity.updated", entity, id, data)
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": fmt.Sprintf("Resource of entity %s with id %d updated successfully", entity, id),
@@ -1353,17 +1753,40 @@ var reservedQueryParams = map[string]bool{
 func (s *Server) listWithPushDown(ctx context.Context, qs storage.Queryable, entity string, page, perPage int, filters map[string]string) ([]map[string]interface{}, int, error) {
 	tid := int(getTenantIDNumeric(ctx))
 
-	// Build filter WHERE clauses (sorted for deterministic queries)
-	var filterClauses []string
-	var filterArgs []interface{}
+	// Build filter WHERE clauses sorted by field name for deterministic queries.
+	// Clause and arg must be sorted together — sorting clauses independently
+	// after building args in map-iteration order misaligns them.
+	type filterPair struct {
+		clause string
+		arg    interface{}
+	}
+	var pairs []filterPair
 	for field, value := range filters {
 		if err := validateFieldName(field); err != nil {
 			return nil, 0, fmt.Errorf("invalid filter: %w", err)
 		}
-		filterClauses = append(filterClauses, fmt.Sprintf("json_extract(data, '$.%s') = ?", field))
-		filterArgs = append(filterArgs, value)
+		clause := fmt.Sprintf("json_extract(data, '$.%s') = ?", field)
+		// SQLite's json_extract returns typed values (integers, reals, text).
+		// A query-string value is always a string, so we try to cast to a
+		// number first so that `type_id=2` matches the integer 2 stored in JSON.
+		var arg interface{}
+		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
+			arg = i
+		} else if f, err := strconv.ParseFloat(value, 64); err == nil {
+			arg = f
+		} else {
+			arg = value
+		}
+		pairs = append(pairs, filterPair{clause, arg})
 	}
-	sort.Strings(filterClauses)
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].clause < pairs[j].clause })
+
+	var filterClauses []string
+	var filterArgs []interface{}
+	for _, p := range pairs {
+		filterClauses = append(filterClauses, p.clause)
+		filterArgs = append(filterArgs, p.arg)
+	}
 
 	filterSQL := ""
 	if len(filterClauses) > 0 {
@@ -1507,10 +1930,6 @@ func (s *Server) updateGraph(ctx context.Context, entityType string, id int, dat
 	if !s.config.GraphEnabled || s.graph == nil {
 		return
 	}
-	if s.persister != nil {
-		s.persister.WriterEnter()
-		defer s.persister.WriterExit()
-	}
 
 	tid := getTenantIDNumeric(ctx)
 	nodeID := tenant.NodeID(tid, entityType, id)
@@ -1553,9 +1972,7 @@ func (s *Server) updateGraph(ctx context.Context, entityType string, id int, dat
 		}
 	}
 
-	if s.persister != nil {
-		s.persister.MarkDirty()
-	}
+	s.invalidateGraphQueryCache(ctx)
 }
 
 // reloadGraphFromStore clears the in-memory graph and re-hydrates it from the
@@ -1569,70 +1986,63 @@ func (s *Server) reloadGraphFromStore(ctx context.Context, store storage.Store) 
 	if s.graph == nil {
 		return nil
 	}
+
+	// KL-3 fix: flush all WAL pages to the main database file before clearing
+	// the in-memory graph. Without this, the reader pool (query_only) may see a
+	// stale snapshot and re-scan into an empty graph after recent writes.
+	if sqlStore, ok := store.(*storage.SQLiteStore); ok {
+		if _, err := sqlStore.DB().ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)"); err != nil {
+			s.logger.Warn().Err(err).Msg("reloadGraphFromStore: WAL checkpoint failed; rebuild may be stale")
+		}
+	}
+
 	if err := s.graph.Clear(); err != nil {
 		return fmt.Errorf("reloadGraphFromStore: clear: %w", err)
 	}
 
 	scanner, ok := store.(storage.GraphEdgeScanner)
 	if !ok {
-		return nil // cleared but not re-hydrated; caller must note this
+		return nil // cleared but not re-hydrated; no scanner available
 	}
 
-	lister, hasLister := scanner.(storage.TenantIDLister)
-	if !hasLister {
-		// Hydrate the single tenant served by this store.
-		if sqlStore, ok := store.(*storage.SQLiteStore); ok {
-			tid := sqlStore.Config().TenantID
-			_, err := scanTenantEdgesServer(ctx, scanner, s.graph, tid, s.logger)
-			return err
+	// Determine which tenant IDs to hydrate.
+	var tenantIDs []uint16
+	if lister, hasLister := store.(storage.TenantIDLister); hasLister {
+		ids, err := lister.GraphTenantIDs(ctx)
+		if err != nil {
+			return fmt.Errorf("reloadGraphFromStore: list tenants: %w", err)
 		}
-		_, err := scanTenantEdgesServer(ctx, scanner, s.graph, 0, s.logger)
-		return err
+		tenantIDs = ids
+	} else if sqlStore, ok := store.(*storage.SQLiteStore); ok {
+		tenantIDs = []uint16{sqlStore.Config().TenantID}
+	} else {
+		tenantIDs = []uint16{0}
 	}
 
-	tenantIDs, err := lister.GraphTenantIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("reloadGraphFromStore: list tenants: %w", err)
-	}
+	// Scan each tenant's edge table and populate the in-memory graph.
 	for _, tid := range tenantIDs {
-		if _, err := scanTenantEdgesServer(ctx, scanner, s.graph, tid, s.logger); err != nil {
-			s.logger.Warn().Err(err).Uint16("tenant", tid).Msg("reloadGraphFromStore: tenant hydration failed")
+		err := scanner.ScanGraphEdges(ctx, tid, func(e storage.GraphEdge) error {
+			srcID := tenant.NodeID(tid, e.SourceEntity, e.SourceID)
+			dstID := tenant.NodeID(tid, e.TargetEntity, e.TargetID)
+			if addErr := s.graph.AddNode(srcID, e.SourceEntity); addErr != nil {
+				s.logger.Debug().Err(addErr).Str("node", srcID).Msg("reloadGraphFromStore: AddNode src")
+			}
+			if addErr := s.graph.AddNode(dstID, e.TargetEntity); addErr != nil {
+				s.logger.Debug().Err(addErr).Str("node", dstID).Msg("reloadGraphFromStore: AddNode dst")
+			}
+			if addErr := s.graph.AddEdgeWithID(srcID, dstID, e.Relationship, e.EdgeID); addErr != nil {
+				s.logger.Debug().Err(addErr).
+					Str("from", srcID).Str("to", dstID).
+					Msg("reloadGraphFromStore: AddEdgeWithID")
+			}
+			return nil
+		})
+		if err != nil {
+			s.logger.Warn().Err(err).Uint16("tenant", tid).Msg("reloadGraphFromStore: scan failed")
 		}
 	}
+	s.invalidateGraphQueryCache(ctx)
 	return nil
-}
-
-// scanTenantEdgesServer is the server-package equivalent of the main package's
-// scanTenantEdges. It streams edges for one tenant into the in-memory graph.
-func scanTenantEdgesServer(
-	ctx context.Context,
-	scanner storage.GraphEdgeScanner,
-	g graph.Graph,
-	tid uint16,
-	logger zerolog.Logger,
-) (int, error) {
-	count := 0
-	err := scanner.ScanGraphEdges(ctx, tid, func(e storage.GraphEdge) error {
-		if err := g.AddNode(tenant.NodeID(tid, e.SourceEntity, e.SourceID), e.SourceEntity); err != nil {
-			logger.Warn().Err(err).Str("source", e.SourceEntity).Int("id", e.SourceID).
-				Msg("scanTenantEdgesServer: AddNode source failed")
-		}
-		if err := g.AddNode(tenant.NodeID(tid, e.TargetEntity, e.TargetID), e.TargetEntity); err != nil {
-			logger.Warn().Err(err).Str("target", e.TargetEntity).Int("id", e.TargetID).
-				Msg("scanTenantEdgesServer: AddNode target failed")
-		}
-		if err := g.AddEdge(
-			tenant.NodeID(tid, e.SourceEntity, e.SourceID),
-			tenant.NodeID(tid, e.TargetEntity, e.TargetID),
-			e.Relationship,
-		); err != nil {
-			logger.Warn().Err(err).Str("rel", e.Relationship).
-				Msg("scanTenantEdgesServer: AddEdge failed")
-		}
-		count++
-		return nil
-	})
-	return count, err
 }
 
 // validateGraphEdges checks whether the edges implied by data would be
@@ -1672,20 +2082,64 @@ func (s *Server) validateGraphEdges(ctx context.Context, entityType string, id i
 	return nil
 }
 
+// ── Graph query result cache ──────────────────────────────────────────────────
+//
+// SetGraphQueryCacheTTL sets the whole-query result cache TTL at runtime.
+// Primarily used by tests that need a short TTL without rebuilding the server.
+// A value of 0 disables query result caching.
+func (s *Server) SetGraphQueryCacheTTL(seconds int) {
+	s.config.GraphQueryCacheTTL = seconds
+}
+
+// graphQueryCacheKey returns a cache key for a whole-query result.
+// The key is scoped to the tenant and encodes the query string and maxDepth,
+// so different queries or different depth limits produce distinct cache entries.
+//
+// Key format (tenant 0):    "graph:qresult:<fnv64hex(query+maxDepth)>"
+// Key format (tenant N):    "<XXXX>:graph:qresult:<fnv64hex(query+maxDepth)>"
+//
+// Using FNV-64a: non-cryptographic, collision probability negligible for the
+// cardinality of distinct Sulpher queries in a single deployment, and the
+// runtime cost is ~30ns vs ~300ns for SHA-256.
+func graphQueryCacheKey(tenantID uint16, query string, maxDepth int) string {
+	h := fnv.New64a()
+	h.Write([]byte(query))
+	h.Write([]byte{0}) // separator — prevents "ab"+"c" == "a"+"bc" collisions
+	_, _ = fmt.Fprintf(h, "%d", maxDepth)
+	digest := fmt.Sprintf("%016x", h.Sum64())
+	return tenant.ScopeKey(tenantID, "graph:qresult:"+digest)
+}
+
+// graphQueryCachePattern returns the DeletePattern argument that matches all
+// cached Sulpher query results for a given tenant.
+func graphQueryCachePattern(tenantID uint16) string {
+	return tenant.ScopeKey(tenantID, "graph:qresult:")
+}
+
+// invalidateGraphQueryCache drops all cached Sulpher query results for the
+// tenant derived from ctx. Called from every graph mutation site (updateGraph,
+// removeGraph, handleCreateEdge, handleTenantCreateEdge, reloadGraphFromStore)
+// so that writes are immediately reflected in subsequent queries.
+//
+// If GraphQueryCacheTTL is zero (caching disabled) this is a fast no-op.
+func (s *Server) invalidateGraphQueryCache(ctx context.Context) {
+	if s.config.GraphQueryCacheTTL <= 0 {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tid := getTenantIDNumeric(ctx)
+	_ = s.cache.DeletePattern(cacheCtx, graphQueryCachePattern(tid))
+}
+
 func (s *Server) removeGraph(ctx context.Context, entityType string, id int) {
 	if !s.config.GraphEnabled || s.graph == nil {
 		return
-	}
-	if s.persister != nil {
-		s.persister.WriterEnter()
-		defer s.persister.WriterExit()
 	}
 	tid := getTenantIDNumeric(ctx)
 	nodeID := tenant.NodeID(tid, entityType, id)
 	if err := s.graph.RemoveNode(nodeID); err != nil {
 		s.logger.Error().Err(err).Str("node", nodeID).Msg("Failed to remove graph node")
 	}
-	if s.persister != nil {
-		s.persister.MarkDirty()
-	}
+	s.invalidateGraphQueryCache(ctx)
 }

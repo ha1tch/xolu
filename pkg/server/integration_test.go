@@ -6,9 +6,9 @@ package server_test
 
 // integration_test.go
 //
-// Comprehensive integration tests targeting the olu API surface areas that
+// Comprehensive integration tests targeting the xolu API surface areas that
 // These tests exercise code paths most heavily. Written to exercise the exact code paths
-// with special focus on areas where olu had weak or no test
+// with special focus on areas where xolu had weak or no test
 // coverage prior to this file.
 //
 // Priority areas tested (in order of risk):
@@ -19,7 +19,7 @@ package server_test
 //   5. PATCH + graph edge consistency (truth layer insertion point)
 //   6. PUT replacing REFs + graph cleanup (data integrity)
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 // Repository: https://github.com/ha1tch/xolu/
 
 import (
@@ -38,6 +38,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/server"
 	"github.com/ha1tch/xolu/pkg/storage"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/validation"
 	"github.com/rs/zerolog"
 )
@@ -65,7 +66,7 @@ var integrationEntities = []string{
 func newIntegrationEnv(t *testing.T) *integrationEnv {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "olu-integration-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-integration-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	cfg := &config.Config{
 		Host:                "localhost",
 		Port:                0,
-		StorageType:        "jsonfile",
+		StorageType:         "sqlite",
 		BaseDir:             tmpDir,
 		Schema:              "test_schema",
 		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
@@ -95,18 +96,12 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,
 		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
 		MaxCascadeDeletions: 100,
 		TenantMode:          "path",
 		TenantAutoRegister:  true, // Tests rely on auto-registration
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": sl.TenantStorePath(cfg.BaseDir, 0)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +112,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &integrationEnv{ts: ts, tmpDir: tmpDir, t: t}

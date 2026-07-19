@@ -33,7 +33,7 @@ func TestConcurrent_ParallelAppends(t *testing.T) {
 	const eventsPerWorker = 50
 
 	var (
-		wg      sync.WaitGroup
+		wg       sync.WaitGroup
 		errCount atomic.Int64
 	)
 
@@ -91,7 +91,7 @@ func TestConcurrent_AppendAndQuery(t *testing.T) {
 	stop := make(chan struct{})
 
 	var (
-		wg         sync.WaitGroup
+		wg          sync.WaitGroup
 		writeErrors atomic.Int64
 		readErrors  atomic.Int64
 	)
@@ -201,7 +201,7 @@ func TestConcurrent_PurgeWithOngoingAppends(t *testing.T) {
 	cfg := testStoreConfig()
 	cfg.DefaultRetentionDays = 0
 
-	store, err := NewPebbleStore(t.TempDir(), cfg, testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), cfg, testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestConcurrent_PurgeWithOngoingAppends(t *testing.T) {
 
 	stop := make(chan struct{})
 	var (
-		wg          sync.WaitGroup
+		wg           sync.WaitGroup
 		appendErrors atomic.Int64
 	)
 

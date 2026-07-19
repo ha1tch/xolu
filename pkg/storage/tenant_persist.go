@@ -32,7 +32,7 @@ func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]uint16,
 	if err != nil {
 		return nil, fmt.Errorf("query tenants: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make(map[string]uint16)
 	for rows.Next() {

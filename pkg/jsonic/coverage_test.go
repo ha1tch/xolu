@@ -56,8 +56,8 @@ func TestTokeniser_AllScalarTypes(t *testing.T) {
 		}
 		if tokens[i].Type == TokString {
 			key := tok.TokenString(tokens[i])
-			i++                      // key
-			i++                      // colon
+			i++ // key
+			i++ // colon
 			if i < len(tokens) {
 				typeMap[key] = tokens[i].Type
 			}

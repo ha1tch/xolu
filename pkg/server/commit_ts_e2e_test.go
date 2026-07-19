@@ -12,12 +12,12 @@ package server_test
 // Coverage:
 //   - Happy path: TS events written + entity state advanced; ts_accepted in response
 //   - TS-only commit (append array empty, timeseries non-empty)
-//   - Both append and timeseries empty → 400 OLU-CM003
-//   - TS disabled (tsManager nil) → 400 OLU-CM010
-//   - Tenant not provisioned → 400 OLU-CM011
-//   - Unknown timeline → 400 OLU-CM012
-//   - Wrong dims → 400 OLU-CM013
-//   - Batch exceeds TSMaxBatchSize → 400 OLU-CM014
+//   - Both append and timeseries empty → 400 XOLU-CM003
+//   - TS disabled (tsManager nil) → 400 XOLU-CM010
+//   - Tenant not provisioned → 400 XOLU-CM011
+//   - Unknown timeline → 400 XOLU-CM012
+//   - Wrong dims → 400 XOLU-CM013
+//   - Batch exceeds TSMaxBatchSize → 400 XOLU-CM014
 //   - Zero time in TS event → 400
 //
 // Failure injection tests (Pebble fails / SQLite fails / rollback) live in
@@ -58,7 +58,7 @@ type commitTSEnv struct {
 
 func newCommitTSEnv(t *testing.T, overrides func(*config.Config)) *commitTSEnv {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "olu-commit-ts-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-commit-ts-e2e-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,6 @@ func newCommitTSEnv(t *testing.T, overrides func(*config.Config)) *commitTSEnv {
 		Host:                  "localhost",
 		Port:                  0,
 		StorageType:           "sqlite",
-		DBPath:                dbPath,
 		BaseDir:               tmpDir,
 		Schema:                "schema",
 		SchemaDir:             schemaDir,
@@ -88,9 +87,7 @@ func newCommitTSEnv(t *testing.T, overrides func(*config.Config)) *commitTSEnv {
 		QueryMaxRows:          10000,
 		QueryMaxScanRows:      100000,
 		QueryMaxResponseBytes: 10485760,
-		GraphDataFile:         filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:        filepath.Join(tmpDir, "graph.index"),
-		GraphQueryTTL:         86400,
+		AsyncJobRetentionTTL:  86400,
 		MaxQueryDepth:         10,
 		StrictCommit:          false, // keep strict=false so we don't need schemas
 
@@ -130,7 +127,7 @@ func newCommitTSEnv(t *testing.T, overrides func(*config.Config)) *commitTSEnv {
 	validator := validation.NewJSONSchemaValidator(schemaDir + "/_schemas")
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	env := &commitTSEnv{ts: ts, srv: srv, tmpDir: tmpDir, t: t}
@@ -163,7 +160,7 @@ func (e *commitTSEnv) provision(tenant string) {
 func (e *commitTSEnv) defineTimeline(tenant string, id, dims int, name string) {
 	e.t.Helper()
 	status, result := doJSONRequest(e.t, "POST",
-		fmt.Sprintf("%s/api/v1/tenant/%s/ts/timelines", e.ts.URL, tenant),
+		fmt.Sprintf("%s/api/v1/tenant/%s/ts/tl/def", e.ts.URL, tenant),
 		map[string]interface{}{"id": id, "dims": dims, "name": name})
 	if status != http.StatusCreated {
 		e.t.Fatalf("defineTimeline %d: got %d: %v", id, status, result)
@@ -193,21 +190,6 @@ func (e *commitTSEnv) setupTenant(name string) string {
 }
 
 // baseCommitBody returns a minimal valid CommitRequest body with no TS events.
-func baseCommitBody() map[string]interface{} {
-	return map[string]interface{}{
-		"update": map[string]interface{}{
-			"entity": "order",
-			"id":     1,
-			"data":   map[string]interface{}{"state": "pending"},
-		},
-		"append": []interface{}{
-			map[string]interface{}{
-				"entity": "event_log",
-				"data":   map[string]interface{}{"msg": "created"},
-			},
-		},
-	}
-}
 
 // ----------------------------------------------------------------------------
 // Happy path
@@ -342,7 +324,7 @@ func TestCommitTS_HappyPath_MultipleEvents(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestCommitTS_BothEmpty_Returns400(t *testing.T) {
-	// append=[] and timeseries absent → OLU-CM003.
+	// append=[] and timeseries absent → XOLU-CM003.
 	env := newCommitTSEnv(t, nil)
 	env.registerTenant("delta")
 
@@ -358,11 +340,11 @@ func TestCommitTS_BothEmpty_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM003")
+	assertErrorCode(t, result, "XOLU-CM003")
 }
 
 func TestCommitTS_TSDisabled_Returns400(t *testing.T) {
-	// Server started without timeseries enabled → OLU-CM010.
+	// Server started without timeseries enabled → XOLU-CM010.
 	env := newCommitTSEnv(t, func(cfg *config.Config) {
 		cfg.TimeseriesEnabled = false
 	})
@@ -388,11 +370,11 @@ func TestCommitTS_TSDisabled_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM010")
+	assertErrorCode(t, result, "XOLU-CM010")
 }
 
 func TestCommitTS_TenantNotProvisioned_Returns400(t *testing.T) {
-	// TS enabled but tenant not provisioned → OLU-CM011.
+	// TS enabled but tenant not provisioned → XOLU-CM011.
 	env := newCommitTSEnv(t, nil)
 	env.registerTenant("noprov")
 	// Deliberately skip env.provision("noprov").
@@ -417,11 +399,11 @@ func TestCommitTS_TenantNotProvisioned_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM011")
+	assertErrorCode(t, result, "XOLU-CM011")
 }
 
 func TestCommitTS_UnknownTimeline_Returns400(t *testing.T) {
-	// Timeline 99 is never defined → OLU-CM012.
+	// Timeline 99 is never defined → XOLU-CM012.
 	env := newCommitTSEnv(t, nil)
 	tenant := env.setupTenant("epsilon")
 
@@ -445,11 +427,11 @@ func TestCommitTS_UnknownTimeline_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM012")
+	assertErrorCode(t, result, "XOLU-CM012")
 }
 
 func TestCommitTS_WrongDims_Returns400(t *testing.T) {
-	// Timeline 1 has dims=1 but request sends 2 dims → OLU-CM013.
+	// Timeline 1 has dims=1 but request sends 2 dims → XOLU-CM013.
 	env := newCommitTSEnv(t, nil)
 	tenant := env.setupTenant("zeta")
 
@@ -473,11 +455,11 @@ func TestCommitTS_WrongDims_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM013")
+	assertErrorCode(t, result, "XOLU-CM013")
 }
 
 func TestCommitTS_BatchTooLarge_Returns400(t *testing.T) {
-	// TSMaxBatchSize=2; send 3 events → OLU-CM014.
+	// TSMaxBatchSize=2; send 3 events → XOLU-CM014.
 	env := newCommitTSEnv(t, func(cfg *config.Config) {
 		cfg.TSMaxBatchSize = 2
 	})
@@ -506,7 +488,7 @@ func TestCommitTS_BatchTooLarge_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM014")
+	assertErrorCode(t, result, "XOLU-CM014")
 }
 
 func TestCommitTS_ZeroTime_Returns400(t *testing.T) {
@@ -540,7 +522,7 @@ func TestCommitTS_ZeroTime_Returns400(t *testing.T) {
 }
 
 func TestCommitTS_ReservedTimelineZero_Returns400(t *testing.T) {
-	// Timeline 0x0000 is reserved → OLU-CM012.
+	// Timeline 0x0000 is reserved → XOLU-CM012.
 	env := newCommitTSEnv(t, nil)
 	tenant := env.setupTenant("iota")
 
@@ -564,7 +546,7 @@ func TestCommitTS_ReservedTimelineZero_Returns400(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM012")
+	assertErrorCode(t, result, "XOLU-CM012")
 }
 
 // ----------------------------------------------------------------------------

@@ -95,8 +95,8 @@ func DecodeTimestamp(key []byte, dims uint8) (time.Time, error) {
 // Flags byte: bits 0–6 indicate which num fields are present; bit 7 indicates payload.
 
 const (
-	maxNums        = 7
-	flagPayload    = uint8(1 << 7)
+	maxNums     = 7
+	flagPayload = uint8(1 << 7)
 )
 
 func numFlag(i int) uint8 { return uint8(1 << uint(i)) }
@@ -109,7 +109,7 @@ func EncodeValue(nums []float64, payload []byte) ([]byte, error) {
 	}
 	for i, v := range nums {
 		if math.IsNaN(v) {
-			return nil, fmt.Errorf("timeseries: EncodeValue: NaN in num%d (OLU-TS017)", i)
+			return nil, fmt.Errorf("timeseries: EncodeValue: NaN in num%d (XOLU-TS017)", i)
 		}
 	}
 	if len(payload) > 65535 {

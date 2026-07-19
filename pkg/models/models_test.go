@@ -436,12 +436,12 @@ func TestExtractEntityEdges_SkipsTSREF(t *testing.T) {
 }
 
 // TestExtractEntityEdges_ZeroIDAllowed verifies that entity ID 0 is accepted.
-// olu auto-increment starts at 1 by convention but nothing prevents explicit
+// xolu auto-increment starts at 1 by convention but nothing prevents explicit
 // use of ID 0 (the graph package pre-creates nodes with ID 0 in some tests).
 func TestExtractEntityEdges_ZeroIDAllowed(t *testing.T) {
 	t.Parallel()
 	data := map[string]interface{}{
-		"id": float64(1),
+		"id":    float64(1),
 		"owner": map[string]interface{}{"type": "REF", "entity": "users", "id": float64(0)},
 	}
 	edges, err := ExtractEntityEdges(data)
@@ -462,7 +462,7 @@ func TestExtractEntityEdges_ZeroIDAllowed(t *testing.T) {
 func TestExtractEntityEdges_SkipsEmptyEntity(t *testing.T) {
 	t.Parallel()
 	data := map[string]interface{}{
-		"id": float64(1),
+		"id":  float64(1),
 		"bad": map[string]interface{}{"type": "REF", "entity": "", "id": float64(5)},
 	}
 	edges, err := ExtractEntityEdges(data)
@@ -488,8 +488,8 @@ func TestExtractEntityEdges_EmptyData(t *testing.T) {
 func TestExtractEntityEdges_MultipleFields(t *testing.T) {
 	t.Parallel()
 	data := map[string]interface{}{
-		"id":   float64(1),
-		"name": "sensor-A",
+		"id":      float64(1),
+		"name":    "sensor-A",
 		"gateway": map[string]interface{}{"type": "REF", "entity": "gateways", "id": float64(3)},
 		"site":    map[string]interface{}{"type": "REF", "entity": "sites", "id": float64(9)},
 	}
@@ -532,7 +532,7 @@ func TestExtractEntityEdges_DuplicateSameField(t *testing.T) {
 
 // TestExtractEntityEdges_DuplicateTarget verifies that two fields referencing
 // the same (entity, id) pair are rejected with ErrDuplicateEdgeTarget.
-// In olu's graph model each ordered node pair carries at most one labelled edge.
+// In xolu's graph model each ordered node pair carries at most one labelled edge.
 func TestExtractEntityEdges_DuplicateTarget(t *testing.T) {
 	t.Parallel()
 	data := map[string]interface{}{
@@ -547,5 +547,13 @@ func TestExtractEntityEdges_DuplicateTarget(t *testing.T) {
 	}
 	if !errors.Is(err, ErrDuplicateEdgeTarget) {
 		t.Errorf("expected ErrDuplicateEdgeTarget, got %v", err)
+	}
+}
+
+func TestEntity_UnmarshalJSON_Malformed(t *testing.T) {
+	var e Entity
+	err := e.UnmarshalJSON([]byte(`not json`))
+	if err == nil {
+		t.Error("UnmarshalJSON(malformed) should return error")
 	}
 }

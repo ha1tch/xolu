@@ -1,14 +1,14 @@
-.PHONY: build build-olu build-iolu run clean test install deps fmt lint benchmark test-race test-unit test-integration
+.PHONY: build build-xolu build-iolu build-otogen run clean test install deps fmt lint benchmark test-race test-unit test-integration
 
 # Binary name
-BINARY_NAME=olu
+BINARY_NAME=xolu
 ADMIN_BINARY=iolu
-MIGRATE_BINARY=olu-migrate
-MAIN_PATH=./cmd/olu
+OTOGEN_BINARY=otogen
+MAIN_PATH=./cmd/xolu
 ADMIN_PATH=./cmd/iolu
-MIGRATE_PATH=./cmd/olu-migrate
+OTOGEN_PATH=./cmd/otogen
 
-# Build all binaries (olu, iolu, olu-migrate)
+# Build all binaries (xolu, iolu, otogen)
 build: deps
 	@echo "Building ${BINARY_NAME}..."
 	@go build -o ${BINARY_NAME} ${MAIN_PATH}
@@ -16,21 +16,21 @@ build: deps
 	@echo "Building ${ADMIN_BINARY}..."
 	@go build -o ${ADMIN_BINARY} ${ADMIN_PATH}
 	@echo "Build complete: ${ADMIN_BINARY}"
-	@echo "Building ${MIGRATE_BINARY}..."
-	@go build -o ${MIGRATE_BINARY} ${MIGRATE_PATH}
-	@echo "Build complete: ${MIGRATE_BINARY}"
+	@echo "Building ${OTOGEN_BINARY}..."
+	@go build -o ${OTOGEN_BINARY} ${OTOGEN_PATH}
+	@echo "Build complete: ${OTOGEN_BINARY}"
 
-# Build olu only
-build-olu: deps
+# Build xolu only
+build-xolu: deps
 	@echo "Building ${BINARY_NAME}..."
 	@go build -o ${BINARY_NAME} ${MAIN_PATH}
 	@echo "Build complete: ${BINARY_NAME}"
 
-# Build migration tool
-build-migrate:
-	@echo "Building ${MIGRATE_BINARY}..."
-	@go build -o ${MIGRATE_BINARY} ${MIGRATE_PATH}
-	@echo "Build complete: ${MIGRATE_BINARY}"
+# Build token generator
+build-otogen:
+	@echo "Building ${OTOGEN_BINARY}..."
+	@go build -o ${OTOGEN_BINARY} ${OTOGEN_PATH}
+	@echo "Build complete: ${OTOGEN_BINARY}"
 
 # Build admin CLI
 build-iolu:
@@ -39,7 +39,7 @@ build-iolu:
 	@echo "Build complete: ${ADMIN_BINARY}"
 
 # Build all binaries
-build-all-tools: build build-iolu build-migrate
+build-all-tools: build
 	@echo "All tools built successfully"
 
 # Run the application
@@ -70,7 +70,7 @@ clean:
 	@go clean -testcache
 	@rm -f ${BINARY_NAME}
 	@rm -f ${ADMIN_BINARY}
-	@rm -f ${MIGRATE_BINARY}
+	@rm -f ${OTOGEN_BINARY}
 	@rm -rf data/*
 	@rm -f *.db
 	@rm -f coverage.out coverage.html test-report.json
@@ -166,27 +166,27 @@ test-server:
 # Starts Redis container, runs tests, stops Redis
 test-redis:
 	@echo "Starting Redis container..."
-	@docker run -d --name olu-redis-test -p 6379:6379 redis:7-alpine > /dev/null 2>&1 || true
+	@docker run -d --name xolu-redis-test -p 6379:6379 redis:7-alpine > /dev/null 2>&1 || true
 	@sleep 1
 	@echo "Running Redis cache tests..."
 	@go test -v ./pkg/cache/... -run Redis; \
 	EXIT_CODE=$$?; \
 	echo "Stopping Redis container..."; \
-	docker stop olu-redis-test > /dev/null 2>&1 || true; \
-	docker rm olu-redis-test > /dev/null 2>&1 || true; \
+	docker stop xolu-redis-test > /dev/null 2>&1 || true; \
+	docker rm xolu-redis-test > /dev/null 2>&1 || true; \
 	exit $$EXIT_CODE
 
 # Run Redis stress tests (concurrent access, large payloads, pattern delete)
 test-redis-stress:
 	@echo "Starting Redis container..."
-	@docker run -d --name olu-redis-test -p 6379:6379 redis:7-alpine > /dev/null 2>&1 || true
+	@docker run -d --name xolu-redis-test -p 6379:6379 redis:7-alpine > /dev/null 2>&1 || true
 	@sleep 1
 	@echo "Running Redis stress tests..."
 	@go test -v ./pkg/cache/... -run RedisStress -timeout 120s; \
 	EXIT_CODE=$$?; \
 	echo "Stopping Redis container..."; \
-	docker stop olu-redis-test > /dev/null 2>&1 || true; \
-	docker rm olu-redis-test > /dev/null 2>&1 || true; \
+	docker stop xolu-redis-test > /dev/null 2>&1 || true; \
+	docker rm xolu-redis-test > /dev/null 2>&1 || true; \
 	exit $$EXIT_CODE
 
 # =============================================================================
@@ -325,26 +325,26 @@ dev:
 # Docker build
 docker-build:
 	@echo "Building Docker image..."
-	@docker build -t olu:latest .
+	@docker build -t xolu:latest .
 
 # Docker run
 docker-run:
 	@echo "Running Docker container..."
-	@docker run -p 9090:9090 -v $(PWD)/data:/app/data olu:latest
+	@docker run -p 9090:9090 -v $(PWD)/data:/app/data xolu:latest
 
 # Docker Compose - basic (memory cache, no auth)
 docker-up:
-	@echo "Starting Olu (basic)..."
-	@docker compose up -d olu
+	@echo "Starting Xolu (basic)..."
+	@docker compose up -d xolu
 
 # Docker Compose - with Redis cache
 docker-up-redis:
-	@echo "Starting Olu with Redis..."
+	@echo "Starting Xolu with Redis..."
 	@docker compose --profile redis up -d
 
 # Docker Compose - full features (Redis, SQLite+FTS, auth, rate limiting)
 docker-up-full:
-	@echo "Starting Olu with all features..."
+	@echo "Starting Xolu with all features..."
 	@docker compose --profile full up -d
 
 # Docker Compose - run integration tests
@@ -371,10 +371,10 @@ help:
 	@echo "Available targets:"
 	@echo ""
 	@echo "Build & Run:"
-	@echo "  build           - Build olu, iolu, and olu-migrate"
-	@echo "  build-olu       - Build olu only"
+	@echo "  build           - Build xolu, iolu, and otogen"
+	@echo "  build-xolu       - Build xolu only"
 	@echo "  build-iolu      - Build admin CLI (iolu)"
-	@echo "  build-migrate   - Build migration tool"
+	@echo "  build-otogen    - Build token generator (otogen)"
 	@echo "  build-all-tools - Build all binaries"
 	@echo "  build-all       - Build for multiple platforms"
 	@echo "  run             - Build and run the application"
@@ -433,9 +433,9 @@ help:
 	@echo "Docker:"
 	@echo "  docker-build    - Build Docker image"
 	@echo "  docker-run      - Run Docker container"
-	@echo "  docker-up       - Start basic Olu (memory cache, no auth)"
-	@echo "  docker-up-redis - Start Olu with Redis cache"
-	@echo "  docker-up-full  - Start Olu with all features"
+	@echo "  docker-up       - Start basic Xolu (memory cache, no auth)"
+	@echo "  docker-up-redis - Start Xolu with Redis cache"
+	@echo "  docker-up-full  - Start Xolu with all features"
 	@echo "  docker-test     - Run integration tests in Docker"
 	@echo "  docker-down     - Stop all containers"
 	@echo "  docker-clean    - Stop containers and remove volumes"

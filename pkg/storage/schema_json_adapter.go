@@ -117,7 +117,7 @@ func (f *jsonFieldAdapter) EnumValues() []string {
 
 func (f *jsonFieldAdapter) Meta(key string) (interface{}, bool) {
 	// JSON Schema custom extensions are top-level keys on the property.
-	// e.g., "decimalPrecision": 18, "x-olu-index": true
+	// e.g., "decimalPrecision": 18, "x-xolu-index": true
 	v, ok := f.propMap[key]
 	return v, ok
 }

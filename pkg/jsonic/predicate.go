@@ -15,14 +15,14 @@ import (
 type PredicateOp uint8
 
 const (
-	OpEq  PredicateOp = iota // =
-	OpNeq                    // !=
-	OpLt                     // <
-	OpLte                    // <=
-	OpGt                     // >
-	OpGte                    // >=
-	OpIn                     // IN (value list)
-	OpLike                   // LIKE (string pattern)
+	OpEq   PredicateOp = iota // =
+	OpNeq                     // !=
+	OpLt                      // <
+	OpLte                     // <=
+	OpGt                      // >
+	OpGte                     // >=
+	OpIn                      // IN (value list)
+	OpLike                    // LIKE (string pattern)
 )
 
 // String returns the operator symbol.

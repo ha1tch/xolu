@@ -68,13 +68,14 @@ func setupBenchServer(b *testing.B) *benchEnv {
 	// Wait for ports from previous benchmark to recover
 	waitForPortRecovery(b)
 
-	tmpDir, err := os.MkdirTemp("", "olu-bench-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-bench-*")
 	if err != nil {
 		b.Fatal(err)
 	}
 
+	dbPath := filepath.Join(tmpDir, "bench.db")
 	cfg := &config.Config{
-		StorageType:         "jsonfile",
+		StorageType:         "sqlite",
 		BaseDir:             tmpDir,
 		Schema:              "bench_schema",
 		CacheType:           "memory",
@@ -85,18 +86,11 @@ func setupBenchServer(b *testing.B) *benchEnv {
 		CascadingDelete:     false,
 		RefEmbedDepth:       3,
 		MaxEmbedDepth:       10,
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
 		MaxCascadeDeletions: 100,
 		MaxEntitySize:       1048576, // 1MB
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": dbPath})
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		b.Fatalf("Failed to create store: %v", err)
@@ -108,7 +102,7 @@ func setupBenchServer(b *testing.B) *benchEnv {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	// Use the test server's client

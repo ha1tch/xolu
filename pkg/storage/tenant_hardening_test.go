@@ -126,8 +126,8 @@ func TestSQLiteTenantIsolation_GraphEdgeCleanupOnDelete(t *testing.T) {
 
 	// Verify baseline edge counts
 	var countA, countB int
-	storeA.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&countA)
-	storeB.db.QueryRow("SELECT COUNT(*) FROM graph_t0002").Scan(&countB)
+	storeA.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&countA)
+	storeB.db.QueryRow("SELECT COUNT(*) FROM t0002_graph").Scan(&countB)
 	if countA != 2 {
 		t.Fatalf("baseline: tenant A graph edges = %d, want 2", countA)
 	}
@@ -139,13 +139,13 @@ func TestSQLiteTenantIsolation_GraphEdgeCleanupOnDelete(t *testing.T) {
 	storeA.Delete(ctx, "tasks", 1)
 
 	// Tenant A: 1 edge remaining (task 2 → project 1)
-	storeA.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&countA)
+	storeA.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&countA)
 	if countA != 1 {
 		t.Errorf("after delete: tenant A graph edges = %d, want 1", countA)
 	}
 
 	// Tenant B: still 1 edge (completely unaffected)
-	storeB.db.QueryRow("SELECT COUNT(*) FROM graph_t0002").Scan(&countB)
+	storeB.db.QueryRow("SELECT COUNT(*) FROM t0002_graph").Scan(&countB)
 	if countB != 1 {
 		t.Errorf("after A's delete: tenant B graph edges = %d, want 1", countB)
 	}
@@ -154,13 +154,13 @@ func TestSQLiteTenantIsolation_GraphEdgeCleanupOnDelete(t *testing.T) {
 	storeA.Delete(ctx, "projects", 1)
 
 	// Remaining edges in A that point TO projects:1 should be cleaned
-	storeA.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&countA)
+	storeA.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&countA)
 	if countA != 0 {
 		t.Errorf("after project delete: tenant A graph edges = %d, want 0", countA)
 	}
 
 	// Tenant B still intact
-	storeB.db.QueryRow("SELECT COUNT(*) FROM graph_t0002").Scan(&countB)
+	storeB.db.QueryRow("SELECT COUNT(*) FROM t0002_graph").Scan(&countB)
 	if countB != 1 {
 		t.Errorf("after A's project delete: tenant B graph edges = %d, want 1", countB)
 	}
@@ -169,7 +169,7 @@ func TestSQLiteTenantIsolation_GraphEdgeCleanupOnDelete(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Graph edge cleanup for tenant 0 vs non-zero
 //
-// Tenant 0 uses graph_t0000. Deleting in tenant 0 must not touch
+// Tenant 0 uses t0000_graph. Deleting in tenant 0 must not touch
 // other tenants' graph tables, and vice versa.
 // ---------------------------------------------------------------------------
 
@@ -201,28 +201,28 @@ func TestSQLiteTenantIsolation_GraphEdgeCleanupTenantZeroVsNonZero(t *testing.T)
 
 	// Check baseline
 	var count0, count1 int
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0000").Scan(&count0)
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&count1)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0000_graph").Scan(&count0)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&count1)
 	if count0 < 1 {
-		t.Fatalf("baseline: graph_t0000 = %d, want >= 1", count0)
+		t.Fatalf("baseline: t0000_graph = %d, want >= 1", count0)
 	}
 	if count1 < 1 {
-		t.Fatalf("baseline: graph_t0001 = %d, want >= 1", count1)
+		t.Fatalf("baseline: t0001_graph = %d, want >= 1", count1)
 	}
 
 	// Delete from tenant 0
 	store0.Delete(ctx, "children", 1)
 
-	// graph_t0000 should have fewer edges
+	// t0000_graph should have fewer edges
 	var count0After int
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0000 WHERE source_entity='children' AND source_id=1").Scan(&count0After)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0000_graph WHERE source_entity='children' AND source_id=1").Scan(&count0After)
 	if count0After != 0 {
-		t.Errorf("after delete: graph_t0000 still has children:1 edges = %d", count0After)
+		t.Errorf("after delete: t0000_graph still has children:1 edges = %d", count0After)
 	}
 
-	// graph_t0001 untouched
+	// t0001_graph untouched
 	var count1After int
-	store0.db.QueryRow("SELECT COUNT(*) FROM graph_t0001").Scan(&count1After)
+	store0.db.QueryRow("SELECT COUNT(*) FROM t0001_graph").Scan(&count1After)
 	if count1After != count1 {
 		t.Errorf("tenant 1 graph changed: %d → %d (should be unchanged)", count1, count1After)
 	}

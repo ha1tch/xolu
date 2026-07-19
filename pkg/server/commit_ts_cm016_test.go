@@ -6,7 +6,7 @@ package server_test
 
 // commit_ts_cm016_test.go
 //
-// Tests for the OLU-CM016 double-failure path: Pebble write succeeds, SQLite
+// Tests for the XOLU-CM016 double-failure path: Pebble write succeeds, SQLite
 // transaction fails, AND the subsequent DeleteKeys tombstone call also fails.
 //
 // This requires a timeseries.Manager whose StoreFor returns a Store that
@@ -63,8 +63,8 @@ type failingManager struct {
 	real timeseries.Manager
 }
 
-func (m *failingManager) Provision(ctx context.Context, tenantID uint16) error {
-	return m.real.Provision(ctx, tenantID)
+func (m *failingManager) Provision(ctx context.Context, tenantID uint16, tenantName string) error {
+	return m.real.Provision(ctx, tenantID, tenantName)
 }
 
 func (m *failingManager) IsProvisioned(tenantID uint16) bool {
@@ -92,7 +92,7 @@ func (m *failingManager) Close() error {
 // actually exist on disk), then wrapped.
 func newCM016Env(t *testing.T) *commitTSEnv {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "olu-cm016-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-cm016-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,6 @@ func newCM016Env(t *testing.T) *commitTSEnv {
 		Host:                  "localhost",
 		Port:                  0,
 		StorageType:           "sqlite",
-		DBPath:                dbPath,
 		BaseDir:               tmpDir,
 		Schema:                "schema",
 		SchemaDir:             schemaDir,
@@ -122,9 +121,7 @@ func newCM016Env(t *testing.T) *commitTSEnv {
 		QueryMaxRows:          10000,
 		QueryMaxScanRows:      100000,
 		QueryMaxResponseBytes: 10485760,
-		GraphDataFile:         filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:        filepath.Join(tmpDir, "graph.index"),
-		GraphQueryTTL:         86400,
+		AsyncJobRetentionTTL:  86400,
 		MaxQueryDepth:         10,
 		StrictCommit:          false,
 
@@ -160,7 +157,7 @@ func newCM016Env(t *testing.T) *commitTSEnv {
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
 	// Build the server normally — this wires the real tsManager.
-	srv := server.New(cfg, entityStore, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, entityStore, memCache, g, validator, logger)
 
 	// Wrap the real manager with our failing wrapper.
 	srv.SetTSManager(&failingManager{real: srv.TSManager()})
@@ -180,7 +177,7 @@ func newCM016Env(t *testing.T) *commitTSEnv {
 
 // TestCommitTS_CM016_DeleteKeysFails verifies that when the Pebble write
 // succeeds, the SQLite transaction fails (via stale CAS version), and
-// DeleteKeys also fails, the handler returns 500 OLU-CM016 rather than the
+// DeleteKeys also fails, the handler returns 500 XOLU-CM016 rather than the
 // normal conflict or rollback-success response.
 func TestCommitTS_CM016_DeleteKeysFails(t *testing.T) {
 	env := newCM016Env(t)
@@ -214,7 +211,7 @@ func TestCommitTS_CM016_DeleteKeysFails(t *testing.T) {
 	// AppendBatch → real Pebble (succeeds via delegating failingStore).
 	// SQLite commit → ErrConflict (stale version=0).
 	// DeleteKeys → errDeleteKeys (injected failure).
-	// Expected: 500 OLU-CM016.
+	// Expected: 500 XOLU-CM016.
 	ts0 := time.Now().UTC().Truncate(time.Second)
 	conflictBody := map[string]interface{}{
 		"update": map[string]interface{}{
@@ -236,7 +233,7 @@ func TestCommitTS_CM016_DeleteKeysFails(t *testing.T) {
 	if status != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %v", status, result)
 	}
-	assertErrorCode(t, result, "OLU-CM016")
+	assertErrorCode(t, result, "XOLU-CM016")
 
 	// Entity state must be unchanged — SQLite never committed.
 	getStatus, entity := doJSONRequest(t, "GET",

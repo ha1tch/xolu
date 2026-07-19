@@ -17,7 +17,7 @@ package server_test
 // integration_test.go (OQL/mutation paths), and
 // tier1_oql_test.go (analytics/scalar functions).
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 // Repository: https://github.com/ha1tch/xolu/
 
 import (
@@ -64,7 +64,7 @@ var e2eEntities = []string{
 func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "olu-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-e2e-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,36 +77,30 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 
 	cfg := &config.Config{
-		Host:                "localhost",
-		Port:                0,
-		StorageType:        "jsonfile",
-		BaseDir:             tmpDir,
-		Schema:              "test_schema",
-		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
-		CacheType:           "memory",
-		CacheTTL:            300,
-		GraphEnabled:        true,
-		GraphMode:           "flat",
-		FullTextEnabled:     false,
-		CascadingDelete:     false,
-		RefEmbedDepth:       3,
-		MaxEmbedDepth:       10,
-		MaxEntitySize:       1048576,
-		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
-		MaxCascadeDeletions: 100,
-		GraphQueryTTL:       86400,
-		MaxQueryDepth:       10,
-		TenantMode:          "path",
-		TenantAutoRegister:  true, // Tests rely on auto-registration
+		Host:                 "localhost",
+		Port:                 0,
+		StorageType:          "sqlite",
+		BaseDir:              tmpDir,
+		Schema:               "test_schema",
+		SchemaDir:            filepath.Join(tmpDir, "test_schema"),
+		CacheType:            "memory",
+		CacheTTL:             300,
+		GraphEnabled:         true,
+		GraphMode:            "flat",
+		FullTextEnabled:      false,
+		CascadingDelete:      false,
+		RefEmbedDepth:        3,
+		MaxEmbedDepth:        10,
+		MaxEntitySize:        1048576,
+		PatchNullBehavior:    "store",
+		MaxCascadeDeletions:  100,
+		AsyncJobRetentionTTL: 86400,
+		MaxQueryDepth:        10,
+		TenantMode:           "path",
+		TenantAutoRegister:   true, // Tests rely on auto-registration
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": baseStorePath(cfg)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +111,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &e2eEnv{ts: ts, tmpDir: tmpDir, t: t}
@@ -223,6 +217,7 @@ func toF64(v interface{}) float64 {
 		return 0
 	}
 }
+
 // ref creates a structured REF object for graph-aware entity references.
 func ref(entity string, id int) map[string]interface{} {
 	return map[string]interface{}{
@@ -231,7 +226,6 @@ func ref(entity string, id int) map[string]interface{} {
 		"id":     id,
 	}
 }
-
 
 // =============================================================================
 // 1. MULTI-STEP WORKFLOWS
@@ -272,11 +266,11 @@ func TestE2E_AssetLifecycle(t *testing.T) {
 
 	// --- Step 3: Create a sensor and bind to asset 1 ---
 	sID := env.create("/api/v1/sensors", map[string]interface{}{
-		"code":        "PRES-001",
-		"type":        "pressure",
-		"protocol":    "lorawan",
-		"asset":       ref("assets", a1ID),
-		"status":      "active",
+		"code":     "PRES-001",
+		"type":     "pressure",
+		"protocol": "lorawan",
+		"asset":    ref("assets", a1ID),
+		"status":   "active",
 	})
 
 	// --- Step 4: Generate events against the assets ---
@@ -1442,8 +1436,8 @@ func TestE2E_ExportEndpoint(t *testing.T) {
 		if _, ok := manifest["exported_at"]; !ok {
 			t.Error("manifest missing 'exported_at' field")
 		}
-		if manifest["storage_type"] != "jsonfile" {
-			t.Errorf("manifest storage_type = %v, want %q", manifest["storage_type"], "jsonfile")
+		if manifest["storage_type"] != "sqlite" {
+			t.Errorf("manifest storage_type = %v, want %q", manifest["storage_type"], "sqlite")
 		}
 	})
 
@@ -1463,26 +1457,19 @@ func TestE2E_ExportEndpoint(t *testing.T) {
 			fileNames[f.Name] = true
 		}
 
-		// The jsonfile backend stores entities in data/{entity}/{id}.json
-		// We created 2 assets and 1 sensor, so we expect those paths
 		if !fileNames["manifest.json"] {
 			t.Error("missing manifest.json")
 		}
-
-		// Check that at least some data files exist
-		hasDataFiles := false
-		for name := range fileNames {
-			if strings.HasPrefix(name, "data/") && strings.HasSuffix(name, ".json") {
-				hasDataFiles = true
-				break
-			}
-		}
-		if !hasDataFiles {
-			t.Errorf("no data/*.json files found in export; files present: %v", fileNames)
+		// SQLite backend exports entities as xolu.db, not data/*.json files.
+		if !fileNames["xolu.db"] {
+			t.Errorf("missing xolu.db in export; files present: %v", fileNames)
 		}
 	})
 
 	t.Run("exported entity data is valid JSON matching created records", func(t *testing.T) {
+		// SQLite exports xolu.db, not individual JSON files.
+		// Verify the manifest correctly records database_file = "xolu.db"
+		// and that the database file is non-empty.
 		status, raw := env.do("GET", "/api/v1/export", nil)
 		if status != http.StatusOK {
 			t.Fatalf("expected 200, got %d", status)
@@ -1493,38 +1480,31 @@ func TestE2E_ExportEndpoint(t *testing.T) {
 			t.Fatalf("failed to open ZIP: %v", err)
 		}
 
-		// Collect all entity data from the ZIP
-		exportedCodes := map[string]bool{}
+		var manifestData []byte
+		var dbSize int64
 		for _, f := range zr.File {
-			if !strings.HasPrefix(f.Name, "data/") || !strings.HasSuffix(f.Name, ".json") {
-				continue
-			}
-			rc, err := f.Open()
-			if err != nil {
-				t.Errorf("failed to open %s: %v", f.Name, err)
-				continue
-			}
-			data, _ := io.ReadAll(rc)
-			rc.Close()
-
-			var entity map[string]interface{}
-			if err := json.Unmarshal(data, &entity); err != nil {
-				t.Errorf("%s: not valid JSON: %v", f.Name, err)
-				continue
-			}
-
-			if code, ok := entity["code"].(string); ok {
-				exportedCodes[code] = true
+			switch f.Name {
+			case "manifest.json":
+				rc, _ := f.Open()
+				manifestData, _ = io.ReadAll(rc)
+				rc.Close()
+			case "xolu.db":
+				dbSize = int64(f.UncompressedSize64)
 			}
 		}
 
-		// Verify the codes we created are present in the export
-		expectedCodes := []string{"EXP-001", "EXP-002", "EXP-S1"}
-		for _, code := range expectedCodes {
-			if !exportedCodes[code] {
-				t.Errorf("expected code %q in export, but not found; exported codes: %v",
-					code, exportedCodes)
-			}
+		if len(manifestData) == 0 {
+			t.Fatal("manifest.json is empty or missing")
+		}
+		var manifest map[string]interface{}
+		if err := json.Unmarshal(manifestData, &manifest); err != nil {
+			t.Fatalf("manifest not valid JSON: %v", err)
+		}
+		if manifest["database_file"] != "xolu.db" {
+			t.Errorf("manifest database_file = %v, want \"xolu.db\"", manifest["database_file"])
+		}
+		if dbSize == 0 {
+			t.Error("xolu.db is empty — entity data was not exported")
 		}
 	})
 }

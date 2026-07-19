@@ -7,6 +7,7 @@ package oql
 import (
 	"context"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -23,13 +24,13 @@ var goldenPath string
 const goldenN = 500
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "olu-golden-*")
+	dir, err := os.MkdirTemp("", "xolu-golden-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create golden dir: %v\n", err)
 		os.Exit(1)
 	}
 
-	goldenPath = filepath.Join(dir, "olu.golden")
+	goldenPath = filepath.Join(dir, "xolu.golden")
 	if err := seedGolden(goldenPath); err != nil {
 		fmt.Fprintf(os.Stderr, "seed golden: %v\n", err)
 		os.RemoveAll(dir)
@@ -46,12 +47,12 @@ func TestMain(m *testing.M) {
 //
 // Entities seeded:
 //
-//   items  (adapted) — 500 rows, used by adapted_pushdown + adapted_full_pushdown
-//   sales  (adapted) — 500 rows, used by aggregate_pushdown
-//   sensors (blob)   — 500 rows, used by equivalence
-//   readings (blob)  — 500 rows, used by equivalence
-//   assets  (blob)   — 500 rows, used by equivalence
-//   events  (blob)   — 500 rows, used by equivalence
+//	items  (adapted) — 500 rows, used by adapted_pushdown + adapted_full_pushdown
+//	sales  (adapted) — 500 rows, used by aggregate_pushdown
+//	sensors (blob)   — 500 rows, used by equivalence
+//	readings (blob)  — 500 rows, used by equivalence
+//	assets  (blob)   — 500 rows, used by equivalence
+//	events  (blob)   — 500 rows, used by equivalence
 func seedGolden(dbPath string) error {
 	store, err := storage.NewSQLiteStore(dbPath, storage.SQLiteConfig{})
 	if err != nil {
@@ -127,7 +128,7 @@ func seedItems(ctx context.Context, store *storage.SQLiteStore) error {
 	defer tx.Rollback()
 
 	ins, err := tx.PrepareContext(ctx,
-		`INSERT INTO olu_items (id, tenant_id, active, amount, category, product, quantity, region, unit_price) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO t0000_ndata_items (id, active, amount, category, product, quantity, region, unit_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare: %w", err)
 	}
@@ -140,7 +141,7 @@ func seedItems(ctx context.Context, store *storage.SQLiteStore) error {
 
 	for i := 0; i < goldenN; i++ {
 		// Decimal normalisation: amount(10,2) → scale by 100, unit_price(8,4) → scale by 10000
-		amountRaw := rng.Intn(99900) + 100   // cents: 100..99999
+		amountRaw := rng.Intn(99900) + 100     // cents: 100..99999
 		unitPriceRaw := rng.Intn(500000) + 100 // ten-thousandths: 100..500099
 		active := 0
 		if rng.Intn(2) == 1 {
@@ -157,8 +158,8 @@ func seedItems(ctx context.Context, store *storage.SQLiteStore) error {
 
 	// Update entity sequence
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO entity_sequences (tenant_id, entity_type, next_id) VALUES (0, 'items', ?)
-		 ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
+		`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('items', ?)
+		 ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
 		return fmt.Errorf("sequence items: %w", err)
 	}
 
@@ -208,7 +209,7 @@ func seedSales(ctx context.Context, store *storage.SQLiteStore) error {
 	defer tx.Rollback()
 
 	ins, err := tx.PrepareContext(ctx,
-		`INSERT INTO olu_sales (id, tenant_id, active, amount, product, quantity, region, unit_price) VALUES (?, 0, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO t0000_ndata_sales (id, active, amount, product, quantity, region, unit_price) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare: %w", err)
 	}
@@ -234,8 +235,8 @@ func seedSales(ctx context.Context, store *storage.SQLiteStore) error {
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO entity_sequences (tenant_id, entity_type, next_id) VALUES (0, 'sales', ?)
-		 ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
+		`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('sales', ?)
+		 ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
 		return fmt.Errorf("sequence sales: %w", err)
 	}
 
@@ -254,7 +255,7 @@ func seedEquivalence(ctx context.Context, store *storage.SQLiteStore) error {
 	defer tx.Rollback()
 
 	insert, err := tx.PrepareContext(ctx,
-		`INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (0, ?, ?, ?)`)
+		`INSERT INTO `+tenant.NodesTableName(0)+` (entity_type, id, data) VALUES (?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare insert: %w", err)
 	}
@@ -320,8 +321,8 @@ func seedEquivalence(ctx context.Context, store *storage.SQLiteStore) error {
 	}
 
 	// Update entity_sequences for all four entity types
-	seqSQL := `INSERT INTO entity_sequences (tenant_id, entity_type, next_id) VALUES (0, ?, ?)
-		ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = ?`
+	seqSQL := `INSERT INTO ` + tenant.NodeSeqTableName(0) + ` (entity_type, next_id) VALUES (?, ?)
+		ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`
 	for _, etype := range []string{"sensors", "readings", "assets", "events"} {
 		if _, err := tx.ExecContext(ctx, seqSQL, etype, goldenN, goldenN); err != nil {
 			return fmt.Errorf("sequence %s: %w", etype, err)

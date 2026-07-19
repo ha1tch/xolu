@@ -63,7 +63,7 @@ func newThreeTenantServer(t *testing.T) *Server {
 
 	cfg := config.Default()
 	cfg.StorageType = "sqlite"
-	cfg.DBPath = dbPath
+	cfg.BaseDir = filepath.Dir(dbPath)
 	cfg.GraphEnabled = true
 	cfg.TenantMode = "strict"
 	cfg.TenantAutoRegister = false
@@ -73,13 +73,13 @@ func newThreeTenantServer(t *testing.T) *Server {
 	cfg.MaxEmbedDepth = 0
 	cfg.RefEmbedDepth = 0
 	cfg.MaxQueryDepth = 10
-	cfg.GraphQueryTTL = 30
+	cfg.AsyncJobRetentionTTL = 30
 	cfg.GraphMaxVisitedNodes = 10000
 	cfg.QueryTimeout = 30
 
 	logger := zerolog.Nop()
 	g := graph.NewFlatGraph()
-	s := New(cfg, baseStore, &noopCache{}, g, nil, &noopValidator{}, logger)
+	s := New(cfg, baseStore, &noopCache{}, g, &noopValidator{}, logger)
 
 	ctx := context.Background()
 	for _, reg := range []struct {
@@ -102,7 +102,9 @@ func newThreeTenantServer(t *testing.T) *Server {
 // newSingleTenantServer creates a server in "path" mode (not strict),
 // allowing access to the default tenant-0 graph routes.
 // In single-tenant deployments the graph routes are at
-//   GET /api/v1/graph/stats  (not /tenant/…)
+//
+//	GET /api/v1/graph/stats  (not /tenant/…)
+//
 // rather than the tenant-scoped ones.  This test exercises what happens
 // when a zero-ID tenant is used via the registry (which can happen when
 // TenantMode is not strict and tenant ID 0 is the implicit default).
@@ -166,6 +168,7 @@ func TestEmptyPrefix_GraphMethodsRejectCrossTenant(t *testing.T) {
 		}
 	})
 }
+
 // ---------------------------------------------------------------------------
 // 2. Three-tenant isolation at the HTTP layer
 // ---------------------------------------------------------------------------

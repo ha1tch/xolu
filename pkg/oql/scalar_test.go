@@ -5,6 +5,7 @@
 package oql
 
 import (
+	"github.com/ha1tch/xolu/pkg/qs"
 	"strings"
 	"testing"
 	"time"
@@ -483,17 +484,17 @@ func TestParseTime(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		_, ok := parseTime(tt.input)
+		_, ok := qs.ParseTime(tt.input)
 		if ok != tt.ok {
-			t.Errorf("parseTime(%v) ok=%v, want %v", tt.input, ok, tt.ok)
+			t.Errorf("qs.ParseTime(%v) ok=%v, want %v", tt.input, ok, tt.ok)
 		}
 	}
 
 	// time.Time input
 	now := time.Now()
-	parsed, ok := parseTime(now)
+	parsed, ok := qs.ParseTime(now)
 	if !ok || !parsed.Equal(now) {
-		t.Error("parseTime(time.Time) should pass through")
+		t.Error("qs.ParseTime(time.Time) should pass through")
 	}
 }
 

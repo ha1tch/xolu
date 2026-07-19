@@ -7,7 +7,7 @@ package storage_test
 // commit_test.go
 //
 // Storage-layer contract tests for the Commit operation. Runs against both
-// the SQLite and jsonfile backends via the shared storeFactory type defined
+// the SQLite backend via the shared storeFactory type defined
 // in contract_test.go.
 
 import (
@@ -296,33 +296,4 @@ func versionOf(t *testing.T, data map[string]interface{}) int {
 	}
 	t.Fatalf("_version has unexpected type %T", v)
 	return 0
-}
-
-// TestCommit_JSONFileReturnsErrNotSupported verifies that the jsonfile backend
-// returns ErrNotSupported from Commit, which is what the HTTP handler maps to
-// 501 Not Implemented (OLU-CM009). This is the canonical contract test for
-// the stub: the method must exist (interface compliance) and must return the
-// correct sentinel.
-func TestCommit_JSONFileReturnsErrNotSupported(t *testing.T) {
-	store, cleanup := jsonfileFactory(t)
-	defer cleanup()
-
-	req := storage.CommitRequest{
-		Update: storage.CommitUpdate{
-			Entity: "asset",
-			ID:     1,
-			Data:   map[string]interface{}{"state": "x"},
-		},
-		Append: []storage.CommitAppend{
-			{Entity: "log", Data: map[string]interface{}{"ev": "test"}},
-		},
-	}
-
-	_, err := store.Commit(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected ErrNotSupported, got nil")
-	}
-	if err != storage.ErrNotSupported {
-		t.Errorf("expected ErrNotSupported, got %v", err)
-	}
 }

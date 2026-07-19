@@ -505,7 +505,7 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 	// Pre-warm both tenant stores with a single synchronous write each.
 	// storeForTenant opens the SQLite connection on first access; if many
 	// goroutines race to initialise the same cold tenant simultaneously
-	// (especially under -race timing) some opens fail with OLU-ST006.
+	// (especially under -race timing) some opens fail with XOLU-ST006.
 	// One synchronous write per tenant guarantees the store is cached before
 	// the concurrent goroutines start.
 	seedGraphEntity(t, s, "alpha", "anode", 0, map[string]interface{}{})
@@ -616,4 +616,3 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 		t.Errorf("graph-layer beta edge count: want 0, got %d", graphBetaE)
 	}
 }
-

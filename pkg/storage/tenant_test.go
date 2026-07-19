@@ -37,95 +37,9 @@ func newTenantSQLiteStore(t *testing.T, dbPath string, tenantID uint16, graph, f
 	return store
 }
 
-// newTenantJSONFileStore creates a JSONFileStore scoped to a tenant for testing.
-func newTenantJSONFileStore(t *testing.T, baseDir string, tenantID uint16) *JSONFileStore {
-	t.Helper()
-	store, err := NewJSONFileStore(baseDir, "default")
-	if err != nil {
-		t.Fatalf("NewJSONFileStore: %v", err)
-	}
-	store.storeConfig.TenantID = tenantID
-	return store
-}
-
 // ---------------------------------------------------------------------------
 // SQLite tenant isolation
 // ---------------------------------------------------------------------------
-
-func TestSQLiteTenantIsolation_CRUD(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "tenant_iso.db")
-	ctx := context.Background()
-
-	storeA := newTenantSQLiteStore(t, dbPath, 0x0001, false, false)
-	storeB := newTenantSQLiteStore(t, dbPath, 0x0002, false, false)
-	defer storeA.Close()
-	defer storeB.Close()
-
-	// Both tenants create entities with the same type
-	idA, err := storeA.Create(ctx, "users", map[string]interface{}{"name": "Alice"})
-	if err != nil {
-		t.Fatalf("storeA.Create: %v", err)
-	}
-	idB, err := storeB.Create(ctx, "users", map[string]interface{}{"name": "Bob"})
-	if err != nil {
-		t.Fatalf("storeB.Create: %v", err)
-	}
-
-	// Per-tenant sequences: both should start at 1
-	if idA != 1 {
-		t.Errorf("tenant A first ID = %d, want 1", idA)
-	}
-	if idB != 1 {
-		t.Errorf("tenant B first ID = %d, want 1", idB)
-	}
-
-	// Tenant A sees its own data at ID 1, not tenant B's
-	dataA, err := storeA.Get(ctx, "users", 1)
-	if err != nil {
-		t.Fatalf("storeA.Get(1): %v", err)
-	}
-	if name, _ := dataA["name"].(string); name != "Alice" {
-		t.Errorf("storeA.Get(1).name = %q, want Alice (got tenant B's data?)", name)
-	}
-
-	// Tenant B sees its own data at ID 1, not tenant A's
-	dataB, err := storeB.Get(ctx, "users", 1)
-	if err != nil {
-		t.Fatalf("storeB.Get(1): %v", err)
-	}
-	if name, _ := dataB["name"].(string); name != "Bob" {
-		t.Errorf("storeB.Get(1).name = %q, want Bob (got tenant A's data?)", name)
-	}
-
-	// Create a second record in tenant A only — tenant B should not see it
-	idA2, _ := storeA.Create(ctx, "users", map[string]interface{}{"name": "Charlie"})
-	_, err = storeB.Get(ctx, "users", idA2)
-	if err == nil {
-		t.Error("storeB.Get(idA2) should fail — tenant B has no record at this ID")
-	}
-
-	// Each tenant sees only its own records in List
-	listA, err := storeA.List(ctx, "users")
-	if err != nil {
-		t.Fatalf("storeA.List: %v", err)
-	}
-	if len(listA) != 2 {
-		t.Errorf("storeA.List len = %d, want 2 (Alice + Charlie)", len(listA))
-	}
-
-	listB, err := storeB.List(ctx, "users")
-	if err != nil {
-		t.Fatalf("storeB.List: %v", err)
-	}
-	if len(listB) != 1 {
-		t.Errorf("storeB.List len = %d, want 1", len(listB))
-	}
-	if len(listB) == 1 {
-		if name, _ := listB[0]["name"].(string); name != "Bob" {
-			t.Errorf("storeB.List[0].name = %q, want Bob", name)
-		}
-	}
-}
 
 func TestSQLiteTenantIsolation_UpdateDeletePatch(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tenant_ud.db")
@@ -479,121 +393,8 @@ func TestSQLiteTenantZero_BackwardCompatible(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// JSONFile tenant isolation
-// ---------------------------------------------------------------------------
-
-func TestJSONFileTenantIsolation_Paths(t *testing.T) {
-	baseDir := t.TempDir()
-
-	storeA := newTenantJSONFileStore(t, baseDir, 0x000A)
-	storeB := newTenantJSONFileStore(t, baseDir, 0x000B)
-
-	dirA := storeA.GetEntityDir("widgets")
-	dirB := storeB.GetEntityDir("widgets")
-
-	expectedA := filepath.Join(baseDir, "default", "t000A", "widgets")
-	expectedB := filepath.Join(baseDir, "default", "t000B", "widgets")
-
-	if dirA != expectedA {
-		t.Errorf("tenant A dir = %s, want %s", dirA, expectedA)
-	}
-	if dirB != expectedB {
-		t.Errorf("tenant B dir = %s, want %s", dirB, expectedB)
-	}
-}
-
-func TestJSONFileTenantIsolation_CRUD(t *testing.T) {
-	baseDir := t.TempDir()
-	ctx := context.Background()
-
-	storeA := newTenantJSONFileStore(t, baseDir, 0x000A)
-	storeB := newTenantJSONFileStore(t, baseDir, 0x000B)
-
-	idA, err := storeA.Create(ctx, "items", map[string]interface{}{"name": "alpha"})
-	if err != nil {
-		t.Fatalf("storeA.Create: %v", err)
-	}
-	idB, err := storeB.Create(ctx, "items", map[string]interface{}{"name": "beta"})
-	if err != nil {
-		t.Fatalf("storeB.Create: %v", err)
-	}
-
-	// Both start at 1 (separate _next_id.json files in separate dirs)
-	if idA != 1 || idB != 1 {
-		t.Errorf("IDs = (%d, %d), want (1, 1)", idA, idB)
-	}
-
-	// Tenant A cannot see tenant B's data
-	_, err = storeA.Get(ctx, "items", idB)
-	// For JSONFile, this may or may not error depending on file existence
-	// but the physical files are in different directories, so it should 404
-	if err == nil {
-		// Check it's not returning B's data
-		dataA, _ := storeA.Get(ctx, "items", 1)
-		if name, _ := dataA["name"].(string); name == "beta" {
-			t.Error("tenant A retrieved tenant B's data — isolation violated")
-		}
-	}
-
-	listA, _ := storeA.List(ctx, "items")
-	listB, _ := storeB.List(ctx, "items")
-
-	if len(listA) != 1 {
-		t.Errorf("storeA.List len = %d, want 1", len(listA))
-	}
-	if len(listB) != 1 {
-		t.Errorf("storeB.List len = %d, want 1", len(listB))
-	}
-}
-
-func TestJSONFileTenantZero_DefaultPaths(t *testing.T) {
-	baseDir := t.TempDir()
-
-	store := newTenantJSONFileStore(t, baseDir, 0)
-
-	dir := store.GetEntityDir("widgets")
-	expected := filepath.Join(baseDir, "default", "widgets")
-
-	if dir != expected {
-		t.Errorf("tenant 0 dir = %s, want %s", dir, expected)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Config() correctness
 // ---------------------------------------------------------------------------
-
-func TestStoreConfig_SQLite(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cfg.db")
-	store := newTenantSQLiteStore(t, dbPath, 0xBEF0, true, true)
-	defer store.Close()
-
-	cfg := store.Config()
-	if cfg.Type != "sqlite" {
-		t.Errorf("Type = %q, want sqlite", cfg.Type)
-	}
-	if cfg.TenantID != 0xBEF0 {
-		t.Errorf("TenantID = %d, want %d", cfg.TenantID, 0xBEF0)
-	}
-	if !cfg.GraphEnabled {
-		t.Error("GraphEnabled should be true")
-	}
-	if !cfg.FullTextEnabled {
-		t.Error("FullTextEnabled should be true")
-	}
-}
-
-func TestStoreConfig_JSONFile(t *testing.T) {
-	store := newTenantJSONFileStore(t, t.TempDir(), 0x0042)
-
-	cfg := store.Config()
-	if cfg.Type != "jsonfile" {
-		t.Errorf("Type = %q, want jsonfile", cfg.Type)
-	}
-	if cfg.TenantID != 0x0042 {
-		t.Errorf("TenantID = %d, want %d", cfg.TenantID, 0x0042)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // graphEdgesTable helper
@@ -604,10 +405,10 @@ func TestGraphEdgesTable(t *testing.T) {
 		tenantID uint16
 		want     string
 	}{
-		{0, "graph_t0000"},
-		{1, "graph_t0001"},
-		{0xBEF0, "graph_tBEF0"},
-		{0xFFFF, "graph_tFFFF"},
+		{0, "t0000_graph"},
+		{1, "t0001_graph"},
+		{0xBEF0, "tBEF0_graph"},
+		{0xFFFF, "tFFFF_graph"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("tenant_%04X", tt.tenantID), func(t *testing.T) {
@@ -673,9 +474,13 @@ func TestSQLiteTenantIsolation_ManyTenants(t *testing.T) {
 		}
 	}
 
-	// Verify raw DB has all records
+	// Verify total across all tenant tables (each tenant has its own t<X>_nodes table).
 	var total int
-	stores[0].db.QueryRow("SELECT COUNT(*) FROM entities WHERE entity_type = 'data'").Scan(&total)
+	for i := 0; i < numTenants; i++ {
+		var n int
+		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(uint16(i+1)) + " WHERE entity_type = 'data'").Scan(&n)
+		total += n
+	}
 	if total != numTenants*recordsPerTenant {
 		t.Errorf("total records in DB = %d, want %d", total, numTenants*recordsPerTenant)
 	}

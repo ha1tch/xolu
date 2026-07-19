@@ -15,7 +15,10 @@ type mockPersister struct {
 	mappings map[string]uint16
 	saveErr  error // if set, Save returns this error
 	loadErr  error // if set, LoadAll returns this error
-	saved    []struct{ name string; id uint16 } // records Save calls
+	saved    []struct {
+		name string
+		id   uint16
+	} // records Save calls
 }
 
 func newMockPersister() *mockPersister {
@@ -38,7 +41,10 @@ func (m *mockPersister) Save(ctx context.Context, name string, id uint16) error 
 	if m.saveErr != nil {
 		return m.saveErr
 	}
-	m.saved = append(m.saved, struct{ name string; id uint16 }{name, id})
+	m.saved = append(m.saved, struct {
+		name string
+		id   uint16
+	}{name, id})
 	m.mappings[name] = id
 	return nil
 }

@@ -18,7 +18,6 @@ package graph
 // FlatGraph is safe for concurrent use via a single sync.RWMutex.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -27,7 +26,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	oluerr "github.com/ha1tch/xolu/pkg/errors"
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/tenant"
 )
@@ -35,17 +34,16 @@ import (
 // nodeRecord holds everything known about a single node.
 type nodeRecord struct {
 	typ string
-	out map[string]string // neighbour -> relationship label
-	in  map[string]string // source -> relationship label
+	out map[string]EdgeRef // neighbour -> EdgeRef{Rel, ID}
+	in  map[string]EdgeRef // source -> EdgeRef{Rel, ID}
 }
 
 // FlatGraph implements Graph with a single node map per instance.
 type FlatGraph struct {
 	nodes           map[string]*nodeRecord
 	index           map[string]map[string]struct{} // entityType -> set of nodeIDs
-	tenantNodes      map[string]map[string]struct{} // tenant prefix -> set of nodeIDs; O(1) per-tenant enumeration
+	tenantNodes     map[string]map[string]struct{} // tenant prefix -> set of nodeIDs; O(1) per-tenant enumeration
 	mu              sync.RWMutex
-	loadMu          sync.Mutex   // serialises concurrent Load calls
 	edgeCount       int
 	nodeCounters    map[string]int // tenant prefix -> count; "" = tenant-0
 	edgeCounters    map[string]int // tenant prefix -> count; "" = tenant-0
@@ -66,7 +64,7 @@ func newFlatGraph(logger zerolog.Logger, mode string) *FlatGraph {
 	case "ignore", "warn", "error":
 	default:
 		fmt.Fprintf(os.Stderr,
-			"olu/graph: unknown cycle_detection mode %q; defaulting to \"ignore\"\n", mode)
+			"xolu/graph: unknown cycle_detection mode %q; defaulting to \"ignore\"\n", mode)
 		mode = "ignore"
 	}
 	return &FlatGraph{
@@ -106,7 +104,7 @@ func NewFlatGraphWithCycleDetection(mode string) *FlatGraph {
 // A value of 0 restores the package default (DefaultCycleCheckLimit = 512).
 // Negative values are treated as 0 (i.e. the default is used).
 // This method is safe to call concurrently; it acquires the write lock.
-// It is the runtime counterpart of the OLU_GRAPH_CYCLE_CHECK_LIMIT config key.
+// It is the runtime counterpart of the XOLU_GRAPH_CYCLE_CHECK_LIMIT config key.
 func (g *FlatGraph) SetCycleCheckLimit(n int) {
 	if n <= 0 {
 		n = DefaultCycleCheckLimit
@@ -199,7 +197,7 @@ func (g *FlatGraph) CheckEdge(from, to, relationship string) error {
 	// Duplicate-edge check against current state.
 	if rec, ok := g.nodes[from]; ok {
 		if existing, exists := rec.out[to]; exists {
-			if existing == relationship {
+			if existing.Rel == relationship {
 				return nil // idempotent — already exists with same label
 			}
 			return ErrEdgeAlreadyExists
@@ -220,6 +218,46 @@ func (g *FlatGraph) AddEdge(from, to, relationship string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.addEdgeLocked(from, to, relationship)
+}
+
+// AddEdgeWithProps records the edge topology. The props argument is accepted
+// for interface compatibility but is not stored in the in-memory graph —
+// property persistence is handled by the storage layer (SQLiteStore), which
+// assigns surrogate IDs and writes to t<X>_edges. A nil or empty props map
+// makes this call identical to AddEdge.
+func (g *FlatGraph) AddEdgeWithProps(from, to, relationship string, props map[string]interface{}) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.addEdgeLocked(from, to, relationship)
+}
+
+// AddEdgeWithID adds the edge and sets EdgeRef.ID in the adjacency map.
+// Used during graph hydration to restore surrogate edge IDs from the
+// topology table so that relationship variables in Sulpher queries can
+// trigger property fetch via preHydrateEnvs.
+func (g *FlatGraph) AddEdgeWithID(from, to, relationship string, edgeID int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.addEdgeLocked(from, to, relationship); err != nil {
+		return err
+	}
+	if edgeID == 0 {
+		return nil
+	}
+	// Patch the EdgeRef with the stored ID.
+	if fromRec, ok := g.nodes[from]; ok {
+		if ref, exists := fromRec.out[to]; exists {
+			ref.ID = edgeID
+			fromRec.out[to] = ref
+		}
+	}
+	if toRec, ok := g.nodes[to]; ok {
+		if ref, exists := toRec.in[from]; exists {
+			ref.ID = edgeID
+			toRec.in[from] = ref
+		}
+	}
+	return nil
 }
 
 func (g *FlatGraph) addEdgeLocked(from, to, relationship string) error {
@@ -249,7 +287,7 @@ func (g *FlatGraph) addEdgeLocked(from, to, relationship string) error {
 	toRec := g.nodes[to]
 
 	if existing, exists := fromRec.out[to]; exists {
-		if existing == relationship {
+		if existing.Rel == relationship {
 			return nil // idempotent
 		}
 		return ErrEdgeAlreadyExists
@@ -269,8 +307,8 @@ func (g *FlatGraph) addEdgeLocked(from, to, relationship string) error {
 		}
 	}
 
-	fromRec.out[to] = relationship
-	toRec.in[from] = relationship
+	fromRec.out[to] = EdgeRef{Rel: relationship}
+	toRec.in[from] = EdgeRef{Rel: relationship}
 	g.edgeCount++
 	g.edgeCounters[fromPrefix]++
 	return nil
@@ -380,7 +418,7 @@ func (g *FlatGraph) UpdateFromEntityForTenant(tenantID uint16, entity string, id
 			// changed. We use the sentinel as internal control flow: delete the
 			// old edge and re-add with the new label, with counter-safe rollback.
 			// See the note on ErrEdgeAlreadyExists in graph.go.
-			oldRel := rec.out[targetNodeID]
+			oldRef := rec.out[targetNodeID]
 			delete(rec.out, targetNodeID)
 			if toRec, ok := g.nodes[targetNodeID]; ok {
 				delete(toRec.in, nodeID)
@@ -388,7 +426,7 @@ func (g *FlatGraph) UpdateFromEntityForTenant(tenantID uint16, entity string, id
 			g.edgeCount--
 			g.edgeCounters[nodePrefix]--
 			if addErr := g.addEdgeLocked(nodeID, targetNodeID, relationship); addErr != nil {
-				if restoreErr := g.addEdgeLocked(nodeID, targetNodeID, oldRel); restoreErr != nil {
+				if restoreErr := g.addEdgeLocked(nodeID, targetNodeID, oldRef.Rel); restoreErr != nil {
 					// Both the re-add and the restore failed. The edge is gone from the
 					// graph data and the counters were already decremented — they are
 					// already consistent with the actual (edgeless) state. Do not
@@ -396,7 +434,7 @@ func (g *FlatGraph) UpdateFromEntityForTenant(tenantID uint16, entity string, id
 					g.logger.Warn().
 						Str("from", tenant.NodeIDStripped(nodeID)).
 						Str("to", tenant.NodeIDStripped(targetNodeID)).
-						Str("old_rel", oldRel).
+						Str("old_rel", oldRef.Rel).
 						Err(restoreErr).
 						Msg("FlatGraph.UpdateFromEntityForTenant: failed to restore edge; edge removed, counters consistent")
 					// Return a wrapped error that makes the double-failure explicit.
@@ -406,13 +444,13 @@ func (g *FlatGraph) UpdateFromEntityForTenant(tenantID uint16, entity string, id
 					// safe to surface to callers without leaking tenant internals.
 					return fmt.Errorf("relabel %s->%s to %q failed and restore of %q also failed (%v): %w",
 						tenant.NodeIDStripped(nodeID), tenant.NodeIDStripped(targetNodeID),
-						relationship, oldRel, restoreErr, addErr)
+						relationship, oldRef.Rel, restoreErr, addErr)
 				}
 				// Re-add failed but restore succeeded: the original edge is intact.
 				// Wrap the error so the caller knows the graph is consistent.
 				return fmt.Errorf("relabel %s->%s to %q failed (original relationship %q preserved): %w",
 					tenant.NodeIDStripped(nodeID), tenant.NodeIDStripped(targetNodeID),
-					relationship, oldRel, addErr)
+					relationship, oldRef.Rel, addErr)
 			}
 		}
 	}
@@ -426,7 +464,7 @@ func (g *FlatGraph) addNodeLocked(nodeID, nodeType string) error {
 	}
 	rec, exists := g.nodes[nodeID]
 	if !exists {
-		rec = &nodeRecord{out: make(map[string]string), in: make(map[string]string)}
+		rec = &nodeRecord{out: make(map[string]EdgeRef), in: make(map[string]EdgeRef)}
 		g.nodes[nodeID] = rec
 		pfx := tenant.NodeIDPrefix(nodeID)
 		g.nodeCounters[pfx]++
@@ -460,8 +498,8 @@ func (g *FlatGraph) addNodeLocked(nodeID, nodeType string) error {
 		case rec.typ == "" && nodeType == NodeTypeVode:
 			// New vode: node was just created above with empty type.
 			g.vodeCounters[pfx]++
-		// case rec.typ == "" && nodeType != NodeTypeVode: plain new node, no counter change.
-		// case rec.typ == NodeTypeVode && nodeType == NodeTypeVode: idempotent, no-op.
+			// case rec.typ == "" && nodeType != NodeTypeVode: plain new node, no counter change.
+			// case rec.typ == NodeTypeVode && nodeType == NodeTypeVode: idempotent, no-op.
 		}
 		if rec.typ != "" {
 			// Remove from old type index (covers the NodeTypeVode→NodeTypeVode
@@ -494,14 +532,14 @@ func (g *FlatGraph) UpdateFromEntity(entity string, id int, data map[string]inte
 // The server layer relies on this: it calls GetNeighbors before deciding
 // whether to add/remove edges and treats "no neighbours" the same as
 // "node not yet in graph".
-func (g *FlatGraph) GetNeighbors(nodeID string) (map[string]string, error) {
+func (g *FlatGraph) GetNeighbors(nodeID string) (map[string]EdgeRef, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	rec, ok := g.nodes[nodeID]
 	if !ok {
-		return make(map[string]string), nil
+		return make(map[string]EdgeRef), nil
 	}
-	result := make(map[string]string, len(rec.out))
+	result := make(map[string]EdgeRef, len(rec.out))
 	for k, v := range rec.out {
 		result[k] = v
 	}
@@ -511,14 +549,14 @@ func (g *FlatGraph) GetNeighbors(nodeID string) (map[string]string, error) {
 // GetIncomingEdges returns a copy of the incoming-edge map for nodeID.
 // If nodeID does not exist, an empty map is returned with a nil error
 // (same silent-empty contract as GetNeighbors; see its comment).
-func (g *FlatGraph) GetIncomingEdges(nodeID string) (map[string]string, error) {
+func (g *FlatGraph) GetIncomingEdges(nodeID string) (map[string]EdgeRef, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	rec, ok := g.nodes[nodeID]
 	if !ok {
-		return make(map[string]string), nil
+		return make(map[string]EdgeRef), nil
 	}
-	result := make(map[string]string, len(rec.in))
+	result := make(map[string]EdgeRef, len(rec.in))
 	for k, v := range rec.in {
 		result[k] = v
 	}
@@ -589,6 +627,210 @@ func (g *FlatGraph) FindPath(from, to string, maxDepth int) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("no path from %s to %s within depth %d", tenant.NodeIDStripped(from), tenant.NodeIDStripped(to), maxDepth)
+}
+
+// FindPathDirected finds the shortest path between two nodes, respecting the
+// given traversal direction. PathDirOutgoing behaves identically to FindPath.
+// PathDirIncoming follows edges in reverse (target→source direction).
+// PathDirAny follows edges in either direction (undirected BFS).
+//
+// Returns the path as an ordered slice of node IDs from source to destination.
+func (g *FlatGraph) FindPathDirected(from, to string, maxDepth int, dir PathDirection) ([]string, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	fromPrefix := tenant.NodeIDPrefix(from)
+	toPrefix := tenant.NodeIDPrefix(to)
+	if fromPrefix != "" && toPrefix != "" && fromPrefix != toPrefix {
+		return nil, fmt.Errorf("%w: %q -> %q", ErrCrossTenantEdge, from, to)
+	}
+	if _, ok := g.nodes[from]; !ok {
+		return nil, fmt.Errorf("node %s not found", tenant.NodeIDStripped(from))
+	}
+	if _, ok := g.nodes[to]; !ok {
+		return nil, fmt.Errorf("node %s not found", tenant.NodeIDStripped(to))
+	}
+	if from == to {
+		return []string{from}, nil
+	}
+	visited := make(map[string]bfsEntry)
+	visited[from] = bfsEntry{}
+	queue := make([]string, 0, 64)
+	queue = append(queue, from)
+	head := 0
+	for head < len(queue) {
+		cur := queue[head]
+		head++
+		entry := visited[cur]
+		if cur == to {
+			path := make([]string, 0, entry.depth+1)
+			for n := to; n != from; n = visited[n].parent {
+				path = append(path, n)
+			}
+			path = append(path, from)
+			for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+				path[i], path[j] = path[j], path[i]
+			}
+			return path, nil
+		}
+		if entry.depth >= maxDepth {
+			continue
+		}
+		rec, ok := g.nodes[cur]
+		if !ok {
+			continue
+		}
+		nextDepth := entry.depth + 1
+		switch dir {
+		case PathDirOutgoing:
+			for neighbour := range rec.out {
+				if _, seen := visited[neighbour]; !seen {
+					visited[neighbour] = bfsEntry{parent: cur, depth: nextDepth}
+					queue = append(queue, neighbour)
+				}
+			}
+		case PathDirIncoming:
+			for neighbour := range rec.in {
+				if _, seen := visited[neighbour]; !seen {
+					visited[neighbour] = bfsEntry{parent: cur, depth: nextDepth}
+					queue = append(queue, neighbour)
+				}
+			}
+		case PathDirAny:
+			// Undirected: follow both out and in edges.
+			for neighbour := range rec.out {
+				if _, seen := visited[neighbour]; !seen {
+					visited[neighbour] = bfsEntry{parent: cur, depth: nextDepth}
+					queue = append(queue, neighbour)
+				}
+			}
+			for neighbour := range rec.in {
+				if _, seen := visited[neighbour]; !seen {
+					visited[neighbour] = bfsEntry{parent: cur, depth: nextDepth}
+					queue = append(queue, neighbour)
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("no path from %s to %s within depth %d",
+		tenant.NodeIDStripped(from), tenant.NodeIDStripped(to), maxDepth)
+}
+
+// AllShortestPaths returns all paths of minimum length from from to to,
+// using the given traversal direction. Uses a two-phase BFS:
+//  1. Find the minimum path length.
+//  2. Enumerate all paths of exactly that length.
+//
+// Returns an empty slice (not an error) when no path exists.
+func (g *FlatGraph) AllShortestPaths(from, to string, maxDepth int, dir PathDirection) ([][]string, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	fromPrefix := tenant.NodeIDPrefix(from)
+	toPrefix := tenant.NodeIDPrefix(to)
+	if fromPrefix != "" && toPrefix != "" && fromPrefix != toPrefix {
+		return nil, fmt.Errorf("%w: %q -> %q", ErrCrossTenantEdge, from, to)
+	}
+	if _, ok := g.nodes[from]; !ok {
+		return nil, fmt.Errorf("node %s not found", tenant.NodeIDStripped(from))
+	}
+	if _, ok := g.nodes[to]; !ok {
+		return nil, fmt.Errorf("node %s not found", tenant.NodeIDStripped(to))
+	}
+	if from == to {
+		return [][]string{{from}}, nil
+	}
+
+	// BFS tracking all parents at minimum depth (not just the first).
+	type nodeState struct {
+		depth   int
+		parents []string // all predecessors on shortest paths
+	}
+	states := map[string]*nodeState{
+		from: {depth: 0},
+	}
+	queue := []string{from}
+	head := 0
+	minDepth := -1
+
+	for head < len(queue) {
+		cur := queue[head]
+		head++
+		curDepth := states[cur].depth
+
+		if minDepth >= 0 && curDepth > minDepth {
+			break // beyond shortest depth — stop expanding
+		}
+		if cur == to {
+			if minDepth < 0 {
+				minDepth = curDepth
+			}
+			continue
+		}
+		if curDepth >= maxDepth {
+			continue
+		}
+
+		rec, ok := g.nodes[cur]
+		if !ok {
+			continue
+		}
+		// Collect neighbours according to direction.
+		var neighbours map[string]EdgeRef
+		switch dir {
+		case PathDirOutgoing:
+			neighbours = rec.out
+		case PathDirIncoming:
+			neighbours = rec.in
+		case PathDirAny:
+			merged := make(map[string]EdgeRef, len(rec.out)+len(rec.in))
+			for k, v := range rec.out {
+				merged[k] = v
+			}
+			for k, v := range rec.in {
+				merged[k] = v
+			}
+			neighbours = merged
+		}
+
+		for neighbour := range neighbours {
+			st, seen := states[neighbour]
+			if !seen {
+				states[neighbour] = &nodeState{
+					depth:   curDepth + 1,
+					parents: []string{cur},
+				}
+				queue = append(queue, neighbour)
+			} else if st.depth == curDepth+1 {
+				// Another shortest path to this node.
+				st.parents = append(st.parents, cur)
+			}
+		}
+	}
+
+	if minDepth < 0 {
+		return nil, nil // no path found
+	}
+
+	// Reconstruct all paths by backtracking from `to`.
+	var results [][]string
+	var backtrack func(node string, path []string)
+	backtrack = func(node string, path []string) {
+		newPath := make([]string, len(path)+1)
+		newPath[0] = node
+		copy(newPath[1:], path)
+		if node == from {
+			results = append(results, newPath)
+			return
+		}
+		st, ok := states[node]
+		if !ok {
+			return
+		}
+		for _, parent := range st.parents {
+			backtrack(parent, newPath)
+		}
+	}
+	backtrack(to, nil)
+	return results, nil
 }
 
 func (g *FlatGraph) PathExists(from, to string, maxDepth int) (bool, int, error) {
@@ -705,11 +947,11 @@ func (g *FlatGraph) GetNodeInfo(nodeID string) (*NodeInfo, error) {
 	}
 	outgoing := make(map[string]string, len(rec.out))
 	for k, v := range rec.out {
-		outgoing[k] = v
+		outgoing[k] = v.Rel
 	}
 	incoming := make(map[string]string, len(rec.in))
 	for k, v := range rec.in {
-		incoming[k] = v
+		incoming[k] = v.Rel
 	}
 	return &NodeInfo{
 		ID:       nodeID,
@@ -777,7 +1019,7 @@ func (g *FlatGraph) VodeCount() int {
 
 func (g *FlatGraph) VodeCountForTenant(tenantPrefix string) (int, error) {
 	if tenantPrefix == "" {
-		return 0, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required for vode count")
+		return 0, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required for vode count")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -849,7 +1091,7 @@ func (g *FlatGraph) HasCycle() bool {
 // Returns (false, ErrTenantRequired) when tenantPrefix is empty.
 func (g *FlatGraph) HasCycleForTenant(tenantPrefix string) (bool, error) {
 	if tenantPrefix == "" {
-		return false, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required for cycle check")
+		return false, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required for cycle check")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -913,7 +1155,7 @@ func (g *FlatGraph) HasCycleForTenant(tenantPrefix string) (bool, error) {
 
 func (g *FlatGraph) NodeCountForTenant(tenantPrefix string) (int, error) {
 	if tenantPrefix == "" {
-		return 0, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required for node count")
+		return 0, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required for node count")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -927,7 +1169,7 @@ func (g *FlatGraph) NodeCountForTenant(tenantPrefix string) (int, error) {
 
 func (g *FlatGraph) EdgeCountForTenant(tenantPrefix string) (int, error) {
 	if tenantPrefix == "" {
-		return 0, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required for edge count")
+		return 0, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required for edge count")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -942,7 +1184,7 @@ func (g *FlatGraph) EdgeCountForTenant(tenantPrefix string) (int, error) {
 func (g *FlatGraph) GetAllNodesForTenant(tenantPrefix string) ([]string, error) {
 	if tenantPrefix == "" {
 		g.logger.Warn().Msg("FlatGraph.GetAllNodesForTenant: empty prefix rejected — possible cross-tenant exfiltration attempt")
-		return nil, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required")
+		return nil, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -957,7 +1199,7 @@ func (g *FlatGraph) GetAllNodesForTenant(tenantPrefix string) ([]string, error) 
 func (g *FlatGraph) GetNodesByTypeForTenant(tenantPrefix, entityType string) ([]string, error) {
 	if tenantPrefix == "" {
 		g.logger.Warn().Str("entity_type", entityType).Msg("FlatGraph.GetNodesByTypeForTenant: empty prefix rejected — possible cross-tenant exfiltration attempt")
-		return nil, oluerr.New(oluerr.ErrTenantRequired, 400, "tenant prefix required")
+		return nil, xoluerr.New(xoluerr.ErrTenantRequired, 400, "tenant prefix required")
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -984,163 +1226,6 @@ func (g *FlatGraph) GetNodesByTypeForTenant(tenantPrefix, entityType string) ([]
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
-// flatGraphData is the JSON serialisation format for FlatGraph.
-// CycleDetection and CycleCheckLimit are included so that a graph
-// reloaded from disk recovers the same enforcement policy without
-// requiring any additional caller configuration. Both fields use
-// omitempty for backward compatibility: files written by older versions
-// of olu that lack these keys are still valid; Load leaves the
-// constructor-supplied defaults intact for absent fields.
-type flatGraphData struct {
-	Nodes           map[string]flatNodeData `json:"nodes"`
-	CycleDetection  string                  `json:"cycle_detection,omitempty"`
-	CycleCheckLimit int                     `json:"cycle_check_limit,omitempty"`
-}
-
-type flatNodeData struct {
-	Type string            `json:"type,omitempty"`
-	Out  map[string]string `json:"out,omitempty"`
-}
-
-// Save serialises the graph to filename using an atomic write (write to
-// .tmp then rename). The cycle-detection mode and limit are included in the
-// file so that Load can restore them without additional caller configuration.
-// The read lock is held only long enough to snapshot in-memory state;
-// JSON marshalling and disk I/O happen outside the lock.
-func (g *FlatGraph) Save(filename string) error {
-	g.mu.RLock()
-	snapshot := flatGraphData{
-		Nodes:           make(map[string]flatNodeData, len(g.nodes)),
-		CycleDetection:  g.cycleDetection,
-		CycleCheckLimit: g.cycleCheckLimit,
-	}
-	for nodeID, rec := range g.nodes {
-		out := make(map[string]string, len(rec.out))
-		for k, v := range rec.out {
-			out[k] = v
-		}
-		snapshot.Nodes[nodeID] = flatNodeData{Type: rec.typ, Out: out}
-	}
-	g.mu.RUnlock()
-
-	jsonBytes, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := filename + ".tmp"
-	if err := os.WriteFile(tmp, jsonBytes, 0644); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, filename); err != nil {
-		os.Remove(tmp) // prevent .tmp accumulation on cross-device or permission failures
-		return err
-	}
-	return nil
-}
-
-// Load replaces the graph's in-memory state with the contents of filename.
-// If the file was written by a current version of olu, the cycle-detection
-// mode and limit are restored from the file. Files written by older versions
-// that lack these fields leave the current runtime configuration unchanged,
-// so existing deployments that configure the mode via NewFlatGraphWithCycleDetection
-// continue to work without modification.
-// Load is a no-op (returns nil) when filename does not exist.
-func (g *FlatGraph) Load(filename string) error {
-	g.loadMu.Lock()
-	defer g.loadMu.Unlock()
-	jsonBytes, err := os.ReadFile(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var data flatGraphData
-	if err := json.Unmarshal(jsonBytes, &data); err != nil {
-		return err
-	}
-	// Validate cycle-detection mode before mutating any state.
-	newCycleDetection := ""
-	if data.CycleDetection != "" {
-		switch data.CycleDetection {
-		case "ignore", "warn", "error":
-			newCycleDetection = data.CycleDetection
-		default:
-			return fmt.Errorf("FlatGraph.Load: unrecognised cycle_detection mode %q in %q (valid: ignore, warn, error)",
-				data.CycleDetection, filename)
-		}
-	}
-
-	// Replay into a scratch graph so the receiver is never left in a partial
-	// state on error. We use "ignore" for cycle detection during replay
-	// because a well-formed saved file is cycle-free by construction; running
-	// BFS cycle checks during replay is both redundant and O(E × N) for an
-	// "error"-mode graph. The configured mode is restored after a successful
-	// replay.
-	scratch := &FlatGraph{
-		nodes:           make(map[string]*nodeRecord, len(data.Nodes)),
-		index:           make(map[string]map[string]struct{}),
-		tenantNodes:     make(map[string]map[string]struct{}),
-		nodeCounters:    make(map[string]int),
-		edgeCounters:    make(map[string]int),
-		vodeCounters:    make(map[string]int),
-		cycleDetection:  "ignore",
-		cycleCheckLimit: DefaultCycleCheckLimit,
-		logger:          g.logger,
-	}
-	if data.CycleCheckLimit > 0 {
-		scratch.cycleCheckLimit = data.CycleCheckLimit
-	} else {
-		// File was written by an older version that did not persist this field.
-		// Preserve whatever limit was set at construction time, mirroring the
-		// equivalent fallback for cycleDetection mode below.
-		scratch.cycleCheckLimit = g.cycleCheckLimit
-	}
-
-	var loadErrs []error
-	for nodeID, nd := range data.Nodes {
-		if err := scratch.addNodeLocked(nodeID, nd.Type); err != nil {
-			loadErrs = append(loadErrs, fmt.Errorf("load node %q: %w", nodeID, err))
-			continue // skip edges for a node we couldn't create
-		}
-		for target, rel := range nd.Out {
-			if err := scratch.addEdgeLocked(nodeID, target, rel); err != nil {
-				loadErrs = append(loadErrs, fmt.Errorf("load edge %q->%q (%q): %w", nodeID, target, rel, err))
-			}
-		}
-	}
-	if len(loadErrs) > 0 {
-		// Log every skipped entry so the operator can see the full picture.
-		for _, e := range loadErrs {
-			g.logger.Warn().Err(e).Msg("FlatGraph.Load: skipped entry")
-		}
-		return fmt.Errorf("FlatGraph.Load: %d entries skipped from %q (see log for details)", len(loadErrs), filename)
-	}
-
-	// Replay succeeded — apply the configured mode and atomically swap
-	// the receiver's state. The receiver is never partially mutated.
-	if newCycleDetection != "" {
-		scratch.cycleDetection = newCycleDetection
-	} else {
-		// Preserve whatever mode was set at construction time.
-		scratch.cycleDetection = g.cycleDetection
-	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.nodes = scratch.nodes
-	g.index = scratch.index
-	g.tenantNodes = scratch.tenantNodes
-	g.edgeCount = scratch.edgeCount
-	g.nodeCounters = scratch.nodeCounters
-	g.edgeCounters = scratch.edgeCounters
-	g.vodeCounters = scratch.vodeCounters
-	g.cycleDetection = scratch.cycleDetection
-	g.cycleCheckLimit = scratch.cycleCheckLimit
-	return nil
-}
-
 func (g *FlatGraph) Clear() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1153,4 +1238,3 @@ func (g *FlatGraph) Clear() error {
 	g.vodeCounters = make(map[string]int)
 	return nil
 }
-

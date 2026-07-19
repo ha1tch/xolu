@@ -171,8 +171,8 @@ func setupMigrationDB(t *testing.T) (*sql.DB, *AdaptedRegistry) {
 	ctx := context.Background()
 	dialect := &SQLiteStorageDialect{}
 
-	// Create metadata table.
-	if _, err := db.ExecContext(ctx, GenerateAdaptedSchemasTableSQL(dialect)); err != nil {
+	// Create the per-tenant schema registry table (tenant 0 for migration tests).
+	if _, err := db.ExecContext(ctx, dialect.NodeSchemaTableSQL(0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -196,7 +196,7 @@ func registerWithSchema(t *testing.T, db *sql.DB, registry *AdaptedRegistry, ent
 	t.Helper()
 	ctx := context.Background()
 	dialect := &SQLiteStorageDialect{}
-	if err := RegisterAdaptedTable(ctx, db, registry, entity, schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, entity, schema, dialect, 0); err != nil {
 		t.Fatalf("RegisterAdaptedTable failed: %v", err)
 	}
 }
@@ -218,8 +218,8 @@ func TestMigrate_AddColumn(t *testing.T) {
 	// Insert a row.
 	spec := registry.Get("users")
 	insertSQL, _ := dialect.InsertSQL(spec, spec.HasExtra)
-	// InsertSQL column order: id, tenant_id, name, _extra (additionalProperties defaults true)
-	_, err := db.ExecContext(ctx, insertSQL, 1, "", "Alice", nil)
+	// InsertSQL column order: id, name, _extra (no tenant_id — table name is the boundary)
+	_, err := db.ExecContext(ctx, insertSQL, 1, "Alice", nil)
 	if err != nil {
 		t.Fatalf("insert failed: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestMigrate_AddColumn(t *testing.T) {
 	// Read the row back — email should be NULL.
 	var name, emailPtr *string
 	err = db.QueryRowContext(ctx,
-		"SELECT name, email FROM olu_users WHERE id = 1").Scan(&name, &emailPtr)
+		"SELECT name, email FROM t0000_ndata_users WHERE id = 1").Scan(&name, &emailPtr)
 	if err != nil {
 		t.Fatalf("select failed: %v", err)
 	}
@@ -274,8 +274,8 @@ func TestMigrate_DropColumn_WithExtra(t *testing.T) {
 	// Insert a row with both fields.
 	spec := registry.Get("people")
 	insertSQL, _ := dialect.InsertSQL(spec, spec.HasExtra)
-	// InsertSQL column order: id, tenant_id, age, name, _extra (fields sorted alphabetically)
-	_, err := db.ExecContext(ctx, insertSQL, 1, "", 30, "Alice", nil)
+	// InsertSQL column order: id, age, name, _extra (fields sorted alphabetically; no tenant_id)
+	_, err := db.ExecContext(ctx, insertSQL, 1, 30, "Alice", nil)
 	if err != nil {
 		t.Fatalf("insert failed: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestMigrate_DropColumn_WithExtra(t *testing.T) {
 	var name string
 	var extra *string
 	err = db.QueryRowContext(ctx,
-		"SELECT name, _extra FROM olu_people WHERE id = 1").Scan(&name, &extra)
+		"SELECT name, _extra FROM t0000_ndata_people WHERE id = 1").Scan(&name, &extra)
 	if err != nil {
 		t.Fatalf("select failed: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestMigrate_TypeChange_Rejected(t *testing.T) {
 			"score": map[string]interface{}{"type": "string"},
 		},
 	}
-	err := RegisterAdaptedTable(ctx, db, registry, "scores", schemaV2, dialect)
+	err := RegisterAdaptedTable(ctx, db, registry, "scores", schemaV2, dialect, 0)
 	if err == nil {
 		t.Fatal("expected error for type change, got nil")
 	}
@@ -361,7 +361,7 @@ func TestMigrate_SameSchema_NoOp(t *testing.T) {
 	registerWithSchema(t, db, registry, "items", schema)
 
 	// Register again with same schema — should be a no-op.
-	err := RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
+	err := RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0)
 	if err != nil {
 		t.Fatalf("re-registration of same schema should be no-op, got: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestMigrate_AddAndDrop_Simultaneously(t *testing.T) {
 	spec := registry.Get("things")
 	insertSQL, _ := dialect.InsertSQL(spec, spec.HasExtra)
 	// InsertSQL column order: id, tenant_id, name, old, _extra (fields sorted alphabetically)
-	_, err := db.ExecContext(ctx, insertSQL, 1, "", "hello", "world", nil)
+	_, err := db.ExecContext(ctx, insertSQL, 1, "hello", "world", nil)
 	if err != nil {
 		t.Fatalf("insert failed: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestMigrate_AddAndDrop_Simultaneously(t *testing.T) {
 	var name string
 	var fresh, extra *string
 	err = db.QueryRowContext(ctx,
-		"SELECT name, fresh, _extra FROM olu_things WHERE id = 1").Scan(&name, &fresh, &extra)
+		"SELECT name, fresh, _extra FROM t0000_ndata_things WHERE id = 1").Scan(&name, &fresh, &extra)
 	if err != nil {
 		t.Fatalf("select failed: %v", err)
 	}
@@ -429,4 +429,3 @@ func TestMigrate_AddAndDrop_Simultaneously(t *testing.T) {
 		}
 	}
 }
-

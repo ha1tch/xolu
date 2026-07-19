@@ -1,20 +1,29 @@
-# Olu Manual
+# xolu Manual
 
-Complete reference documentation for Olu v0.9.7-patched43.
+Complete reference documentation for xolu v0.10.1.
 
 ## Table of Contents
 
+0. [API Reference](docs/API_REFERENCE.md) — complete REST endpoint reference
 1. [Installation](#installation)
 2. [Configuration](#configuration)
 3. [API Reference](#api-reference)
-4. [Query Languages](#query-languages)
-5. [Authentication](#authentication)
-6. [Rate Limiting](#rate-limiting)
-7. [Metrics & Monitoring](#metrics--monitoring)
-8. [Storage Backends](#storage-backends)
-9. [Graph Features](#graph-features)
-10. [Testing & Benchmarks](#testing--benchmarks)
-11. [Deployment](#deployment)
+4. [Platform Extensions (/api/v2)](#platform-extensions-apiv2)
+5. [Query Languages](#query-languages)
+6. [Authentication](#authentication)
+7. [Rate Limiting](#rate-limiting)
+8. [Metrics & Monitoring](#metrics--monitoring)
+9. [Storage Backends](#storage-backends)
+10. [Graph Features](#graph-features)
+11. [Testing & Benchmarks](#testing--benchmarks)
+12. [Deployment](#deployment)
+13. [Blob Storage](docs/BLOB_API.md)
+14. [Dynamic Configuration](docs/DYNCONFIG.md)
+15. [Async Queries](docs/ASYNC_QUERIES.md)
+16. [JSON Schema & Adapted Tables](docs/JSON_SCHEMA.md)
+17. [iolu Admin CLI](docs/IOLU.md)
+18. [Error Code Reference](docs/ERROR_CODES.md)
+19. [Upgrade Guide](docs/UPGRADE.md)
 
 Timeseries storage has its own design document: [Timeseries Design](docs/TIMESERIES_DESIGN_V3.md).
 
@@ -26,22 +35,22 @@ Timeseries storage has its own design document: [Timeseries Design](docs/TIMESER
 
 ```bash
 git clone https://github.com/ha1tch/xolu.git
-cd olu
+cd xolu
 make build
-./bin/olu
+./bin/xolu
 ```
 
 ### Using Go Install
 
 ```bash
-go install github.com/ha1tch/xolu/cmd/olu@latest
+go install github.com/ha1tch/xolu/cmd/xolu@latest
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/ha1tch/olu:latest
-docker run -p 9090:9090 -v $(pwd)/data:/data ghcr.io/ha1tch/olu:latest
+docker pull ghcr.io/ha1tch/xolu:latest
+docker run -p 9090:9090 -v $(pwd)/data:/data ghcr.io/ha1tch/xolu:latest
 ```
 
 ### Build Options
@@ -57,92 +66,101 @@ make install        # Install to $GOPATH/bin
 
 ## Configuration
 
-All configuration is via environment variables.
+All configuration is via environment variables. The most commonly set options also have command-line flag equivalents; run `xolu help` to see them, or `xolu env` for the full environment variable reference.
 
 ### Server
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_HOST` | `0.0.0.0` | Server bind address |
-| `OLU_PORT` | `9090` | Server port |
+| `XOLU_HOST` | `0.0.0.0` | Server bind address |
+| `XOLU_PORT` | `9090` | Server port |
 
 ### Storage
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_STORAGE_TYPE` | `jsonfile` | Backend: `jsonfile` or `sqlite` |
-| `OLU_BASE_DIR` | `data` | Base directory for JSONFile storage |
-| `OLU_DB_PATH` | `olu.db` | SQLite database path |
-| `OLU_SCHEMA_NAME` | `default` | Schema/namespace name |
+| `XOLU_STORAGE_TYPE` | `sqlite` | Storage backend. Only `sqlite` is supported. |
+| `XOLU_BASE_DIR` | `data` | Data root. All storage paths are derived from this; there is no separate database-path setting. |
+| `XOLU_SCHEMA_NAME` | `default` | Schema/namespace name |
 
 ### Cache
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_CACHE_TYPE` | `memory` | Cache type: `memory` or `redis` |
-| `OLU_CACHE_TTL` | `300` | Cache TTL in seconds |
-| `OLU_REDIS_HOST` | `localhost` | Redis host (if using redis cache) |
-| `OLU_REDIS_PORT` | `6379` | Redis port |
+| `XOLU_CACHE_TYPE` | `memory` | Cache type: `memory` or `redis` |
+| `XOLU_CACHE_TTL` | `300` | Entity GET and list cache TTL in seconds |
+| `XOLU_CACHE_SIZE` | `1024` | In-memory cache capacity (entries) |
+| `XOLU_CACHE_SHARDS` | `16` | Shard count for in-memory cache |
+| `XOLU_GRAPH_QUERY_CACHE_TTL` | `30` | Sulpher query result cache TTL in seconds; `0` disables |
+| `XOLU_OQL_QUERY_CACHE_TTL` | `30` | OQL query result cache TTL in seconds; `0` disables |
+| `XOLU_REDIS_HOST` | `localhost` | Redis host (if using redis cache) |
+| `XOLU_REDIS_PORT` | `6379` | Redis port |
+| `XOLU_REDIS_POOL_SIZE` | `50` | Redis connection pool size |
+| `XOLU_REDIS_MIN_IDLE_CONNS` | `10` | Redis minimum idle connections |
 
 ### Graph
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_GRAPH_MODE` | `flat` | Graph mode: `flat` or `disabled` |
-| `OLU_GRAPH_CYCLE_DETECTION` | `warn` | Cycle handling: `warn`, `error`, `ignore` |
-| `OLU_GRAPH_MAX_VISITED_NODES` | `10000` | Max nodes visited during a single traversal |
-| `OLU_GRAPH_MAX_RESULTS` | `10000` | Max result paths returned by a graph query |
+| `XOLU_GRAPH_MODE` | `flat` | Graph mode: `flat` or `disabled` |
+| `XOLU_GRAPH_CYCLE_DETECTION` | `warn` | Cycle handling: `warn`, `error`, `ignore` |
+| `XOLU_GRAPH_MAX_VISITED_NODES` | `10000` | Max nodes visited during a single traversal |
+| `XOLU_GRAPH_MAX_RESULTS` | `10000` | Max result paths returned by a graph query |
+| `XOLU_ASYNC_JOB_RETENTION_TTL` | `86400` | How long completed async job records are kept (seconds) |
 
 When a graph limit is exceeded, the server returns a specific error code:
 
 | Code | Meaning | HTTP Status |
 |------|---------|-------------|
-| `OLU-GR005` | Visited-node limit exceeded | 413 |
-| `OLU-GR006` | Result limit exceeded | 413 |
+| `XOLU-GR005` | Visited-node limit exceeded | 413 |
+| `XOLU-GR006` | Result limit exceeded | 413 |
 
-Graph queries also respect the shared `OLU_QUERY_TIMEOUT` and
-`OLU_QUERY_MAX_RESPONSE_BYTES` limits documented in the Query Guardrails
+Graph queries also respect the shared `XOLU_QUERY_TIMEOUT` and
+`XOLU_QUERY_MAX_RESPONSE_BYTES` limits documented in the Query Guardrails
 section below.
 
 ### Features
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_FULLTEXT_ENABLED` | `false` | Enable FTS5 full-text search (SQLite only) |
-| `OLU_CASCADING_DELETE` | `false` | Delete referencing entities on delete |
-| `OLU_REF_EMBED_DEPTH` | `3` | Default reference embedding depth |
-| `OLU_MAX_EMBED_DEPTH` | `10` | Maximum allowed embed depth |
-| `OLU_MAX_ENTITY_SIZE` | `1048576` | Maximum entity size in bytes |
-| `OLU_TENANT_MODE` | `path` | Tenant mode: `path` or `strict` |
-| `OLU_TENANT_AUTO_REGISTER` | `false` | Auto-create tenants on first access (path mode only) |
-| `OLU_TIMESERIES_ENABLED` | `false` | Enable Pebble-backed timeseries storage |
-| `OLU_TS_MEMTABLE_SIZE` | `67108864` | Pebble memtable size in bytes (64 MB) |
-| `OLU_TS_BLOCK_SIZE` | `32768` | Pebble block size in bytes (32 KB) |
-| `OLU_TS_COMPRESSION` | `zstd` | Compression: `zstd`, `snappy`, or `none` |
-| `OLU_TS_L0_COMPACTION_THRESHOLD` | `4` | L0 files before compaction trigger |
-| `OLU_TS_MAX_OPEN_FILES` | `500` | Per-tenant Pebble file descriptor limit |
-| `OLU_TS_DEFAULT_RETENTION_DAYS` | `90` | Default retention policy for new tenants |
-| `OLU_TS_COMPACTION_INTERVAL` | `3600` | Retention sweep interval in seconds |
-| `OLU_TS_RETENTION_ENABLED` | `false` | Run background retention goroutine |
-| `OLU_TS_QUERY_TIMEOUT` | `30` | Per-query context deadline in seconds |
-| `OLU_TS_MAX_QUERY_EVENTS` | `10000` | Maximum events returned by a single range query or Latest |
-| `OLU_TS_MAX_SCAN_EVENTS` | `500000` | Maximum events scanned before aborting (returns OLU-TS013) |
-| `OLU_TS_MAX_RANGE_DAYS` | `366` | Maximum From→To window in days (returns OLU-TS011 if exceeded) |
-| `OLU_TS_MAX_BATCH_SIZE` | `5000` | Maximum events per batch append (returns OLU-TS006 if exceeded) |
-| `OLU_TS_MAX_RESPONSE_BYTES` | `10485760` | Maximum JSON response size in bytes (10 MB) |
-| `OLU_TS_MAX_AGGREGATE_BUCKETS` | `10000` | Maximum time buckets in a windowed aggregate (returns OLU-TS019 if exceeded) |
+| `XOLU_FULLTEXT_ENABLED` | `false` | Enable FTS5 full-text search (SQLite only) |
+| `XOLU_CASCADING_DELETE` | `false` | Delete referencing entities on delete |
+| `XOLU_REF_EMBED_DEPTH` | `3` | Default reference embedding depth |
+| `XOLU_MAX_EMBED_DEPTH` | `10` | Maximum allowed embed depth |
+| `XOLU_MAX_ENTITY_SIZE` | `1048576` | Maximum entity size in bytes |
+| `XOLU_TENANT_MODE` | `path` | Tenant mode: `path` or `strict` |
+| `XOLU_TENANT_AUTO_REGISTER` | `true` | Auto-create tenants on first access (path mode only) |
+| `XOLU_TIMESERIES_ENABLED` | `false` | Enable Pebble-backed timeseries storage |
+| `XOLU_TS_MEMTABLE_SIZE` | `67108864` | Pebble memtable size in bytes (64 MB) |
+| `XOLU_TS_BLOCK_SIZE` | `32768` | Pebble block size in bytes (32 KB) |
+| `XOLU_TS_COMPRESSION` | `zstd` | Compression: `zstd`, `snappy`, or `none` |
+| `XOLU_TS_L0_COMPACTION_THRESHOLD` | `4` | L0 files before compaction trigger |
+| `XOLU_TS_MAX_OPEN_FILES` | `500` | Per-tenant Pebble file descriptor limit |
+| `XOLU_TS_DEFAULT_RETENTION_DAYS` | `90` | Default retention policy for new tenants |
+| `XOLU_TS_COMPACTION_INTERVAL` | `3600` | Retention sweep interval in seconds |
+| `XOLU_TS_RETENTION_ENABLED` | `false` | Run background retention goroutine |
+| `XOLU_TS_QUERY_TIMEOUT` | `30` | Per-query context deadline in seconds |
+| `XOLU_TS_MAX_QUERY_EVENTS` | `10000` | Maximum events returned by a single range query or Latest |
+| `XOLU_TS_MAX_SCAN_EVENTS` | `500000` | Maximum events scanned before aborting (returns XOLU-TS013) |
+| `XOLU_TS_MAX_RANGE_DAYS` | `366` | Maximum From→To window in days (returns XOLU-TS011 if exceeded) |
+| `XOLU_TS_MAX_BATCH_SIZE` | `5000` | Maximum events per batch append (returns XOLU-TS006 if exceeded) |
+| `XOLU_TS_MAX_RESPONSE_BYTES` | `10485760` | Maximum JSON response size in bytes (10 MB) |
+| `XOLU_TS_MAX_AGGREGATE_BUCKETS` | `10000` | Maximum time buckets in a windowed aggregate (returns XOLU-TS019 if exceeded) |
+| `XOLU_TS_COAL_FLUSH_INTERVAL_MS` | `10` | Write coalescer flush window in milliseconds. Only relevant when `ts.writecoal` is enabled via dynconfig. Lower values reduce per-call latency jitter; higher values increase events per fsync at high concurrency. Live-overridable per tenant via dynconfig. |
+| `XOLU_TS_COAL_MAX_EVENTS` | `2000` | Write coalescer early-flush threshold. The coalescer commits immediately when this many events are queued, regardless of the flush interval. Prevents unbounded memory use under very high ingest rates. Live-overridable per tenant via dynconfig. |
+| `XOLU_TS_ROLLUP_CASCADE_DELETE` | `true` | When `true`, deleting a rollup definition automatically removes all descendant definitions and stops their workers (leaves deleted first). When `false`, deleting a definition that has descendants returns `409 XOLU-TS026`; the caller must delete bottom-up manually. |
 
 ### SQLite Tuning
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_SQLITE_MAX_OPEN_CONNS` | `0` | Writer pool max connections (0 = backend default: 1 for WAL) |
-| `OLU_SQLITE_MAX_IDLE_CONNS` | `0` | Writer pool idle connections (0 = backend default: 1) |
-| `OLU_SQLITE_READ_POOL_SIZE` | `0` | Reader pool max connections (0 = backend default: NumCPU) |
-| `OLU_SQLITE_BUSY_TIMEOUT` | `5000` | SQLite busy timeout in milliseconds |
-| `OLU_SQLITE_CACHE_SIZE` | `2000` | SQLite page cache size (pages) |
-| `OLU_SQLITE_CONTENTION_THRESHOLD` | `95` | Adaptive lock contention threshold (0-100) |
-| `OLU_PATCH_NULL` | `store` | Null handling in PATCH: `store` or `delete` |
+| `XOLU_SQLITE_MAX_OPEN_CONNS` | `0` | Writer pool max connections (0 = backend default: 1 for WAL) |
+| `XOLU_SQLITE_MAX_IDLE_CONNS` | `0` | Writer pool idle connections (0 = backend default: 1) |
+| `XOLU_SQLITE_READ_POOL_SIZE` | `0` | Reader pool max connections (0 = backend default: NumCPU) |
+| `XOLU_SQLITE_BUSY_TIMEOUT` | `5000` | SQLite busy timeout in milliseconds |
+| `XOLU_SQLITE_CACHE_SIZE` | `2000` | SQLite page cache size (pages) |
+| `XOLU_SQLITE_CONTENTION_THRESHOLD` | `95` | Adaptive lock contention threshold (0-100) |
+| `XOLU_PATCH_NULL` | `store` | Null handling in PATCH: `store` or `delete` |
 
 ### Query Guardrails
 
@@ -152,45 +170,55 @@ and list endpoints.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_QUERY_TIMEOUT` | `30` | Max query execution time in seconds |
-| `OLU_QUERY_MAX_ROWS` | `10000` | Max rows returned by a single query |
-| `OLU_QUERY_MAX_SCAN_ROWS` | `100000` | Max rows scanned before query is aborted |
-| `OLU_QUERY_MAX_RESPONSE_BYTES` | `10485760` | Max JSON response size in bytes (10 MB) |
+| `XOLU_QUERY_TIMEOUT` | `30` | Max query execution time in seconds |
+| `XOLU_QUERY_MAX_ROWS` | `10000` | Max rows returned by a single query |
+| `XOLU_QUERY_MAX_SCAN_ROWS` | `100000` | Max rows scanned before query is aborted |
+| `XOLU_QUERY_MAX_RESPONSE_BYTES` | `10485760` | Max JSON response size in bytes (10 MB) |
 
 When a limit is exceeded, the server returns a specific error code:
 
 | Code | Meaning | HTTP Status |
 |------|---------|-------------|
-| `OLU-QL008` | Query timed out | 504 |
-| `OLU-QL009` | Too many rows returned | 413 |
-| `OLU-QL010` | Too many rows scanned | 413 |
-| `OLU-QL011` | Response too large | 413 |
+| `XOLU-QL008` | Query timed out | 504 |
+| `XOLU-QL009` | Too many rows returned | 413 |
+| `XOLU-QL010` | Too many rows scanned | 413 |
+| `XOLU-QL011` | Response too large | 413 |
 
 ### Authentication
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_AUTH_TYPE` | `none` | Auth type: `none`, `jwt`, `apikey` |
-| `OLU_JWT_SECRET` | | Secret key for JWT validation |
-| `OLU_JWT_ISSUER` | | Expected JWT issuer claim |
-| `OLU_API_KEYS` | | Comma-separated list of valid API keys |
+| `XOLU_AUTH_TYPE` | `none` | Auth type: `none`, `jwt`, `apikey`, `bearertoken` |
+| `XOLU_JWT_SECRET` | | Secret key for JWT validation |
+| `XOLU_JWT_ISSUER` | | Expected JWT issuer claim |
+| `XOLU_API_KEYS` | | Comma-separated list of valid API keys |
 
 ### Rate Limiting
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_RATE_LIMIT_ENABLED` | `false` | Enable rate limiting |
-| `OLU_RATE_LIMIT_RATE` | `100` | Requests per window |
-| `OLU_RATE_LIMIT_WINDOW` | `60` | Window duration in seconds |
-| `OLU_RATE_LIMIT_BY_IP` | `true` | Rate limit by client IP |
-| `OLU_RATE_LIMIT_BY_KEY` | `false` | Rate limit by auth key/subject |
+| `XOLU_RATE_LIMIT_ENABLED` | `false` | Enable rate limiting |
+| `XOLU_RATE_LIMIT_RATE` | `100` | Requests per window |
+| `XOLU_RATE_LIMIT_WINDOW` | `60` | Window duration in seconds |
+| `XOLU_RATE_LIMIT_BY_IP` | `true` | Rate limit by client IP |
+| `XOLU_RATE_LIMIT_BY_KEY` | `false` | Rate limit by auth key/subject |
+
+### Startup Output
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `XOLU_NO_ASCII` | `false` | Suppress ASCII art banner at startup |
+| `XOLU_NO_STARTUP_TEXT` | `false` | Suppress configuration summary at startup |
 
 ### Observability
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLU_METRICS_ENABLED` | `true` | Enable Prometheus metrics |
-| `OLU_DEBUG` | `false` | Enable debug logging |
+| `XOLU_METRICS_ENABLED` | `true` | Enable Prometheus metrics |
+| `XOLU_METRICS_PORT` | `0` | Dedicated metrics port (0 = shared with API port) |
+| `XOLU_METRICS_HOST` | `` | Bind address for dedicated metrics listener |
+| `XOLU_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `XOLU_DEBUG` | `false` | Legacy alias for `XOLU_LOG_LEVEL=debug` (deprecated; use `XOLU_LOG_LEVEL`) |
 
 ---
 
@@ -299,7 +327,7 @@ Every `GET` response includes `"_version": N` in the entity body:
 **Writing conditionally**
 
 Include `"_version": N` in the request body to make the write conditional.
-olu checks the stored version inside the write transaction:
+xolu checks the stored version inside the write transaction:
 
 ```http
 POST /api/v1/tenant/acme/objects/save/device-001
@@ -314,7 +342,7 @@ Content-Type: application/json
 
 ```json
 {
-  "error": {"code": "OLU-ST005", "message": "Version conflict ...", "status": 409},
+  "error": {"code": "XOLU-ST005", "message": "Version conflict ...", "status": 409},
   "current_version": 8
 }
 ```
@@ -333,7 +361,7 @@ existing behaviour is preserved.
 ```
 
 No locking or inter-process coordination is required. SQLite's transaction
-semantics guarantee the check-and-write is atomic on a single olu instance.
+semantics guarantee the check-and-write is atomic on a single xolu instance.
 
 ### Multi-Tenant Operations
 
@@ -391,16 +419,17 @@ GET /api/v1/export
 
 Returns a ZIP archive containing:
 - `manifest.json` - Export metadata
-- `entities.db` or `data/` - Entity data
-- `graph.json` - Graph structure
-- `graph.data`, `graph.index` - Binary graph files
+- `xolu.db` - Entity data (the store database)
+- `graph.json` - Graph structure (built from the in-database graph)
 
 ### Schema Operations
 
+See [JSON Schema & Adapted Tables](docs/JSON_SCHEMA.md) for the full reference on supported keywords, adapted table layout, REF fields, decimal types, and schema evolution.
+
 ```http
-GET /api/v1/schema
-GET /api/v1/schema/{entity}
-POST /api/v1/schema/{entity}
+GET /api/v1/schema              # List registered entity types
+GET /api/v1/schema/{entity}     # Retrieve schema for one entity
+POST /api/v1/schema/{entity}    # Register or update schema; creates adapted table
 ```
 
 ### System Operations
@@ -413,7 +442,7 @@ GET /metrics       # Prometheus metrics
 
 ### Timeseries Operations
 
-Available only when `OLU_TIMESERIES_ENABLED=true` and `OLU_TENANT_MODE=strict`.
+Available only when `XOLU_TIMESERIES_ENABLED=true` and `XOLU_TENANT_MODE=strict`.
 All timeseries endpoints are tenant-scoped under `/api/v1/tenant/{id}/ts/`.
 
 Data is stored in per-tenant Pebble (LSM) instances with Zstd compression.
@@ -427,7 +456,7 @@ POST /api/v1/tenant/{id}/ts/provision
 ```
 
 Enables timeseries storage for a tenant. Idempotent. The tenant must already
-exist in the registry (`OLU_TENANT_MODE=strict` requires this). Returns 201
+exist in the registry (`XOLU_TENANT_MODE=strict` requires this). Returns 201
 on creation, 200 if already provisioned.
 
 #### Timeline Management
@@ -442,6 +471,21 @@ GET    /api/v1/tenant/{id}/ts/timelines              # List all timelines
 GET    /api/v1/tenant/{id}/ts/timelines/{tid}        # Get a timeline
 PATCH  /api/v1/tenant/{id}/ts/timelines/{tid}        # Update name / retention
 GET    /api/v1/tenant/{id}/ts/timelines/{tid}/stats  # Timeline diagnostics
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/sync   # Read nosync setting
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/sync/on   # Enable WAL sync (default)
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/sync/off  # Disable WAL sync (nosync mode)
+# Rollup management
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/def                 # Define rollup
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/list                # List rollups for source
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/parent              # Get rollup parent
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}               # Get rollup def
+DELETE /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}               # Delete rollup (cascades per XOLU_TS_ROLLUP_CASCADE_DELETE)
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}/run           # Run rollup manually
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}/status        # Worker status
+GET    /api/v1/tenant/{id}/ts/rollup/tree                                # Full rollup tree
+# Timeline data deletion
+DELETE /api/v1/tenant/{id}/ts/timelines/{tid}/data                       # Clear all data (not definition)
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/data/purge                 # Delete time range
 ```
 
 Define request body:
@@ -456,14 +500,69 @@ Define request body:
 
 `dims` is required on define and immutable after the first write. `name` and
 `retention_days` can be changed freely via PATCH. `retention_days: 0` inherits
-the store-level default (`OLU_TS_DEFAULT_RETENTION_DAYS`); a negative value
+the store-level default (`XOLU_TS_DEFAULT_RETENTION_DAYS`); a negative value
 disables expiry for the timeline.
+
+#### Write Modes
+
+Each timeline's write behaviour is controlled by two independent mechanisms that
+can be changed at runtime without restarting the server.
+
+**Per-timeline sync mode** controls whether each `AppendBatch` call waits for
+the WAL to be flushed to durable storage before returning.
+
+```http
+# Disable WAL sync for timeline 3 (nosync mode — faster, less durable)
+POST /api/v1/tenant/{id}/ts/timelines/3/sync/off
+
+# Re-enable WAL sync for timeline 3 (default — durable)
+POST /api/v1/tenant/{id}/ts/timelines/3/sync/on
+
+# Read current setting
+GET /api/v1/tenant/{id}/ts/timelines/3/sync
+# → {"timeline_id": 3, "nosync": false}
+```
+
+With `nosync` off (default), events are on durable storage when the call
+returns — crash safe at all levels. With `nosync` on, events survive a process
+crash (they are in kernel page cache) but may be lost on a kernel panic or
+power loss. The setting is persisted and survives server restarts. If a batch
+mixes events from nosync and sync timelines, the entire batch commits with sync;
+the stricter requirement always wins.
+
+**Per-tenant write coalescing** routes events through a background goroutine
+that groups them into batches, amortising one fsync across many concurrent
+callers. This only helps when multiple goroutines are writing simultaneously.
+With a single writer it adds up to `XOLU_TS_COAL_FLUSH_INTERVAL_MS` of latency
+per call with no throughput benefit.
+
+Coalescing is controlled via dynconfig, not the HTTP API, because it is a
+store-level setting rather than a per-timeline one:
+
+```http
+# Enable coalescing for tenant "acme" via the admin API
+PUT /admin/config/tenant.acme/ts.writecoal
+Body: true
+
+# Tune the flush window to 5ms for tenant "acme"
+PUT /admin/config/tenant.acme/ts.coal_flush_interval_ms
+Body: 5
+
+# Enable coalescing globally for all tenants
+PUT /admin/config/global/ts.writecoal
+Body: true
+```
+
+Dynconfig changes are live — the coalescer reads the interval on every flush
+tick and resets without restart. The tenant namespace (`tenant.{name}`) takes
+precedence over `global`. See `TS-WRITE-MODES.md` for observed performance
+under each mode combination.
 
 #### Writing Events
 
 ```http
 POST /api/v1/tenant/{id}/ts/events         # Single event
-POST /api/v1/tenant/{id}/ts/events/batch   # Atomic batch (up to OLU_TS_MAX_BATCH_SIZE)
+POST /api/v1/tenant/{id}/ts/events/batch   # Atomic batch (up to XOLU_TS_MAX_BATCH_SIZE)
 ```
 
 Single event body:
@@ -496,7 +595,7 @@ GET /api/v1/tenant/{id}/ts/events?timeline=1&dims=42,7&from=...&to=...
 
 Query parameters: `timeline` (required), `dims` (required, comma-separated),
 `from` / `to` (required, RFC 3339), `limit` (default 1000, max capped by
-`OLU_TS_MAX_QUERY_EVENTS`), `order` (`asc` or `desc`, default `asc`).
+`XOLU_TS_MAX_QUERY_EVENTS`), `order` (`asc` or `desc`, default `asc`).
 
 `dims` may be a *prefix*: supplying fewer values than the timeline's dimension
 count returns all events matching that leading prefix across all remaining
@@ -508,7 +607,7 @@ GET /api/v1/tenant/{id}/ts/events/latest?timeline=1&dims=42,7&n=10
 ```
 
 Returns the N most recent events (default 10, max capped by
-`OLU_TS_MAX_QUERY_EVENTS`) matching the dimension prefix.
+`XOLU_TS_MAX_QUERY_EVENTS`) matching the dimension prefix.
 
 #### Aggregation
 
@@ -553,11 +652,12 @@ single Pebble scan pass. More efficient than issuing multiple `/aggregate`
 calls when several fields are needed. No `function` or `num_field` parameter —
 the result always covers all fields.
 
-Response shape:
+Response:
 
 ```json
 {
-  "count": 12500,
+  "timeline": 1,
+  "count":  12500,
   "fields": [true, true, true, false, false, false, false],
   "sums":   [1230.5, 98432.1, 0.0, 0, 0, 0, 0],
   "avgs":   [0.098,  7.874,   0.0, 0, 0, 0, 0],
@@ -566,24 +666,97 @@ Response shape:
 }
 ```
 
-`fields[i]` is `true` if field `i` was present in at least one event in the
-range. Entries for absent fields are zero and should be ignored.
+`fields[i]` is `true` if field `i` was present in at least one event. Entries for absent fields are zero.
 
-#### Convenience Range Functions
-
-Single-field scalar functions over a range. All delegate to the same scan as
-`range_aggregate` internally; performance is identical.
+#### Full Aggregate (statistics + quantiles, single pass)
 
 ```http
-GET /api/v1/tenant/{id}/ts/range/sum?timeline=1&dims=42&from=...&to=...&num_field=0
-GET /api/v1/tenant/{id}/ts/range/avg?timeline=1&dims=42&from=...&to=...&num_field=0
-GET /api/v1/tenant/{id}/ts/range/min?timeline=1&dims=42&from=...&to=...&num_field=0
-GET /api/v1/tenant/{id}/ts/range/max?timeline=1&dims=42&from=...&to=...&num_field=0
-GET /api/v1/tenant/{id}/ts/range/count?timeline=1&dims=42&from=...&to=...&num_field=0
+POST /api/v1/tenant/{id}/ts/full_aggregate
 ```
 
-Each returns `{ "value": <float64> }` (or `{ "count": <uint64> }` for count).
-Use `range_aggregate` when you need more than one statistic to avoid redundant scans.
+```json
+{
+  "timeline":        1,
+  "dims":            [42],
+  "from":            "2026-01-01T00:00:00Z",
+  "to":              "2026-01-08T00:00:00Z",
+  "quantiles":       [0.5, 0.9, 0.99],
+  "quantile_fields": [0, 1]
+}
+```
+
+Single-pass combination of exact statistics (same as `range_aggregate`) plus
+approximate quantile estimates (t-digest, compression=100) for selected fields.
+
+`quantiles`: list of float64 values in [0, 1]. If absent or empty, no t-digest
+is allocated and the result is identical to `range_aggregate`.
+
+`quantile_fields`: which numeric fields (0–6) to estimate quantiles for. If
+absent or null, all seven fields receive estimates.
+
+Response:
+
+```json
+{
+  "timeline":  1,
+  "count":     12500,
+  "fields":    [true, true, false, false, false, false, false],
+  "sums":      [1230.5, 98432.1, 0, 0, 0, 0, 0],
+  "avgs":      [0.098, 7.874, 0, 0, 0, 0, 0],
+  "mins":      [0.001, 1.2, 0, 0, 0, 0, 0],
+  "maxs":      [0.999, 99.9, 0, 0, 0, 0, 0],
+  "quantiles": [[50.1, 90.3, 99.1], [500.2, 903.1, 991.4], null, null, null, null, null]
+}
+```
+
+`quantiles[i]` is a slice of estimates for field `i`, one per requested
+quantile, in the same order as the request's `quantiles` array. `null` when
+field `i` was not requested or carried no events.
+
+#### Rollup Management
+
+Rollups maintain pre-aggregated summaries at configurable granularities so
+dashboard queries scan a small fixed number of events regardless of time range.
+All rollup timelines must be defined before rollup definitions are created.
+Workers are not started automatically — trigger the first `/run` with
+`cascade: true` to start the whole tree and optionally backfill history.
+Timeline 0 is rejected on all rollup endpoints (`XOLU-TS022`).
+
+```http
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/def
+# Body: {"dest_tid": 101, "bucket_duration": "1m", "late_window": "10s"}
+# Does not start the worker. Returns the assigned rollup ID.
+
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/list
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/parent
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}
+DELETE /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}
+# Cascade behaviour controlled by XOLU_TS_ROLLUP_CASCADE_DELETE (default true).
+
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}/run
+# Body (optional): {"from":"2026-01-01T00:00:00Z","to":"2026-06-01T00:00:00Z","cascade":true}
+# cascade:true starts all descendant workers and backfills their windows.
+
+GET    /api/v1/tenant/{id}/ts/timelines/{tid}/rollup/{rid}/status
+GET    /api/v1/tenant/{id}/ts/rollup/tree
+```
+
+Rollup event value layout: `val0`=mean[0], `val1`=min[0], `val2`=max[0],
+`val3`=sum[0], `val4`=count, `val5`=mean[1], `val6`=mean[2].
+
+See `docs/ROLLUP-SPEC.md` for the full specification including tree
+constraints, cascade semantics, and deployment examples.
+
+#### Timeline Data Deletion
+
+```http
+DELETE /api/v1/tenant/{id}/ts/timelines/{tid}/data
+# Removes all events. Timeline definition is preserved. Timeline 0 rejected.
+
+POST   /api/v1/tenant/{id}/ts/timelines/{tid}/data/purge
+# Body: {"from":"2026-06-01T00:00:00Z","to":"2026-06-15T00:00:00Z"}
+# Removes events in [from, to). Timeline 0 rejected.
+```
 
 #### Retention and Diagnostics
 
@@ -593,7 +766,7 @@ PATCH /api/v1/tenant/{id}/ts/retention    # Update store-level default retention
 GET   /api/v1/tenant/{id}/ts/stats        # Tenant store diagnostics
 ```
 
-Retention PATCH body: `{ "retention_days": 90 }`. Setting `0` disables expiry.
+Retention PATCH body: `{ "default_retention_days": 90 }`. Setting `0` disables expiry at the store level; per-timeline retention is updated via `PATCH /ts/timelines/{id}`.
 
 Stats response includes `timelines` (count) and `disk_bytes` (Pebble estimate).
 Per-timeline stats (via `GET /ts/timelines/{tid}/stats`) include
@@ -604,27 +777,70 @@ Per-timeline stats (via `GET /ts/timelines/{tid}/stats`) include
 
 | Code | HTTP | Meaning |
 |------|------|---------|
-| OLU-TS002 | 404/405 | Timeseries not enabled |
-| OLU-TS003 | 400 | Tenant not provisioned for timeseries |
-| OLU-TS004 | 400 | Timeline not defined |
-| OLU-TS005 | 400 | Timestamp before Unix epoch or invalid format |
-| OLU-TS006 | 400 | Batch exceeds `OLU_TS_MAX_BATCH_SIZE` |
-| OLU-TS007 | 400 | Dimension count mismatch |
-| OLU-TS008 | 400 | Unknown aggregate function |
-| OLU-TS009 | 400 | `num_field` out of range (0–6) |
-| OLU-TS010 | 400 | Invalid interval value |
-| OLU-TS011 | 400 | Query window exceeds `OLU_TS_MAX_RANGE_DAYS` |
-| OLU-TS013 | 400 | Scan aborted — exceeded `OLU_TS_MAX_SCAN_EVENTS` |
-| OLU-TS016 | 409 | Attempt to change dims after first write |
-| OLU-TS017 | 400 | NaN in numeric field |
-| OLU-TS018 | 400 | Reserved timeline ID (0) |
-| OLU-TS019 | 400 | Aggregate bucket limit exceeded `OLU_TS_MAX_AGGREGATE_BUCKETS` |
+| XOLU-TS002 | 404/405 | Timeseries not enabled |
+| XOLU-TS003 | 400 | Tenant not provisioned for timeseries |
+| XOLU-TS004 | 400 | Timeline not defined |
+| XOLU-TS005 | 400 | Timestamp before Unix epoch or invalid format |
+| XOLU-TS006 | 400 | Batch exceeds `XOLU_TS_MAX_BATCH_SIZE` |
+| XOLU-TS007 | 400 | Dimension count mismatch |
+| XOLU-TS008 | 400 | Unknown aggregate function |
+| XOLU-TS009 | 400 | `num_field` out of range (0–6) |
+| XOLU-TS010 | 400 | Invalid interval value |
+| XOLU-TS011 | 400 | Query window exceeds `XOLU_TS_MAX_RANGE_DAYS` |
+| XOLU-TS013 | 400 | Scan aborted — exceeded `XOLU_TS_MAX_SCAN_EVENTS` |
+| XOLU-TS016 | 409 | Attempt to change dims after first write |
+| XOLU-TS017 | 400 | NaN in numeric field |
+| XOLU-TS018 | 400 | Reserved timeline ID (0) |
+| XOLU-TS019 | 400 | Aggregate bucket limit exceeded `XOLU_TS_MAX_AGGREGATE_BUCKETS` |
+| XOLU-TS020 | 400 | Invalid write config request (missing or unrecognised field) |
+| XOLU-TS021 | 500 | Write config could not be persisted to disk |
+| XOLU-TS022 | 400 | Timeline 0 used in rollup or data deletion operation |
+| XOLU-TS023 | 400 | Rollup definition would create a cycle |
+| XOLU-TS024 | 400 | Rollup definition would exceed `ts.rollup_max_depth` |
+| XOLU-TS025 | 404 | Rollup definition not found |
+| XOLU-TS026 | 400/409 | Destination already targeted by another rollup (400); definition has descendants and `XOLU_TS_ROLLUP_CASCADE_DELETE=false` (409) |
+
+---
+
+## Platform Extensions (`/api/v2`)
+
+Everything added after the 1.0 stability commitment lives under `/api/v2`, so the `/api/v1` contract stays stable while these subsystems evolve. Each is a first-class persistence-layer primitive rather than an application-level convention. This section is an operational overview; the detailed endpoint and model references are in the linked documents.
+
+| Endpoint | Subsystem | Purpose |
+|----------|-----------|---------|
+| `/api/v2/fsm/def` | FSM definitions | Immutable executable state-machine specifications |
+| `/api/v2/fsm/machine` | FSM machines | Running machine instances |
+| `/api/v2/event/def` | Event definitions | Reactive definitions wiring subsystems to webhooks/actions |
+| `/api/v2/meta` | Entity metadata | Per-entity key/value sidecar with entity-scoped lifecycle (TTL) |
+| `/api/v2/gen` | Generators | Stateless and named value generators (UUID, sequence, token, timestamp, pick) |
+| `/api/v2/seq` | Sequences | Convenience alias for `/api/v2/gen/seq` |
+
+### Finite State Machines
+
+The FSM subsystem moves state machines from the application layer into the persistence layer. A definition (`POST /api/v2/fsm/def`) is an immutable, executable specification: states, inputs, transitions, guard expressions, and an output alphabet. A machine (`POST /api/v2/fsm/machine`) is a running instance of a definition. Transition legality is enforced at write time — an illegal state change is rejected at the same layer that rejects an invalid field type, not by application discipline.
+
+Three usage patterns are supported without forcing any into the shape of the others: a pure state transition (no document involved); a combined data-plus-state transition that participates in `/api/v1/commit` (both the write and the transition succeed or neither does); and an ordinary document write with no transition. See [FSM.md](docs/FSM.md) for the conceptual model, the three-level determinism declaration, and guard/set expression semantics, and [API_V2.md](docs/API_V2.md) for the endpoint reference.
+
+### Events
+
+Event definitions (`POST /api/v2/event/def`) declare reactions: when a given FSM transition or commit completes, a payload is delivered to a webhook. Two FSM latches are available — `fsm.output` (one event per Mealy emission) and `fsm.step` (one event per committed transition, carrying the state delta) — plus `commit.applied`, which fires once after a commit transaction succeeds, carrying the affected entity set.
+
+Every notification is wrapped in an `{origin, message}` envelope. `origin` is stamped by xolu on each delivery (agent, agent version, event-def ID, latch kind and source, and the post-commit `fired_at` timestamp); `message` is the rendered body. Delivery is asynchronous, at-most-once, single-attempt — there is no retry, backoff, dead-letter, or replay — and each firing is recorded in the delivery log (`GET /api/v2/event/def/{id}/log`). Payloads may be rendered with [jsonplate](docs/jsonplate.md), a JSON-template form whose `{"$ref": "path"}` leaves resolve against the event data. See [EVENT_MODEL.md](docs/EVENT_MODEL.md) for the full model and the deliberate Part 1 boundaries.
+
+### Entity Metadata
+
+`/api/v2/meta` provides a per-entity key/value sidecar with an entity-scoped lifecycle, including TTL-based expiry swept in the background. It stores operational metadata alongside an entity without widening the entity's own schema. See [API_V2.md](docs/API_V2.md).
+
+### Generators and Sequences
+
+`/api/v2/gen` produces values from named and stateless generators — UUIDs, tokens, timestamps, a `pick` from a set, and monotonic sequences. Sequences are also reachable as the alias `/api/v2/seq`, and within OQL via `NEXT VALUE FOR` and the `@SEQ('name')` form, which atomically increments the named sequence. See [API_V2.md](docs/API_V2.md).
 
 ---
 
 ## Query Languages
 
-### OQL (Olu Query Language)
+
+### OQL (xolu Query Language)
 
 SQL-like query language for entities.
 
@@ -699,38 +915,200 @@ GET /api/v1/oql/job/{job_id}
 
 ### Sulpher (Graph Query Language)
 
-Path-based query language for graph traversal.
+Sulpher is xolu's graph query language, implementing a substantial subset of
+openCypher 9 (OC9). Queries are submitted as Cypher strings; the executor
+walks the graph in memory using BFS or DFS and returns structured result rows.
 
 ```http
-POST /api/v1/sulpher/query
+POST /api/v1/graph/query
 Content-Type: application/json
 
-{"query": "users:1 -[*1..3]-> posts"}
+{"query": "MATCH (u:user {id: '1'})-[:knows]->(f:user) RETURN f.name"}
 ```
 
-#### Syntax
+#### Algorithm hint
 
+By default Sulpher uses BFS. To select DFS, add a leading comment:
+
+```cypher
+// sulpher.algorithm: dfs
+MATCH (u:user)-[:knows]->(f) RETURN f
 ```
-source -[edge_spec]-> target
+
+#### Pattern matching
+
+```cypher
+-- Single hop (outgoing)
+MATCH (u:user)-[:knows]->(f:user) RETURN f.name
+
+-- Single hop (incoming)
+MATCH (u:user)<-[:knows]-(f:user) RETURN f.name
+
+-- Undirected
+MATCH (u:user)-[:knows]-(f:user) RETURN f.name
+
+-- Variable-length (1 to 3 hops)
+MATCH (u:user)-[:knows*1..3]->(f:user) RETURN f.name
+
+-- Any edge type, unlimited depth
+MATCH (u:user)-[*]->(f) RETURN f
 ```
 
-Edge specifications:
-- `*` - Any edge type
-- `*1..3` - 1 to 3 hops
-- `manages` - Specific edge type
+#### Filtering with WHERE
 
-#### Examples
+```cypher
+-- Comparison
+MATCH (u:user) WHERE u.age >= 18 RETURN u.name
 
+-- String predicates
+MATCH (u:user) WHERE u.email STARTS WITH 'alice' RETURN u
+
+-- IS NULL / IS NOT NULL
+MATCH (u:user) WHERE u.email IS NOT NULL RETURN u.name
+
+-- IN list
+MATCH (u:user) WHERE u.role IN ['admin', 'owner'] RETURN u.name
+
+-- AND / OR / NOT
+MATCH (u:user) WHERE u.age > 18 AND NOT u.active = false RETURN u
 ```
--- Direct connections
-users:1 -> posts
 
--- Multi-hop paths
-users:1 -[*1..5]-> users
+#### RETURN enhancements
 
--- Bidirectional
-users:1 <-> users:2
+```cypher
+-- Property access
+MATCH (u:user) RETURN u.name, u.age
+
+-- Alias
+MATCH (u:user) RETURN u.name AS username
+
+-- Whole-node
+MATCH (u:user) RETURN u
+
+-- All bound variables
+MATCH (u:user)-[:knows]->(f) RETURN *
+
+-- Arithmetic
+MATCH (u:user) RETURN u.age + 1 AS nextAge
+
+-- DISTINCT / ORDER BY / SKIP / LIMIT
+MATCH (u:user) RETURN DISTINCT u.role ORDER BY u.name SKIP 5 LIMIT 10
 ```
+
+#### Aggregation
+
+Cypher implicit GROUP BY: non-aggregate items are grouping keys.
+
+```cypher
+-- Count all
+MATCH (u:user) RETURN count(*) AS total
+
+-- Count non-null property
+MATCH (u:user) RETURN count(u.email) AS withEmail
+
+-- Group by + count
+MATCH (u:user) RETURN u.role, count(u) AS n ORDER BY n DESC
+
+-- collect / avg / sum / min / max
+MATCH (u:user) WHERE u.age IS NOT NULL
+RETURN u.active, collect(u.name) AS names, avg(u.age) AS meanAge
+
+-- DISTINCT aggregate
+MATCH (u:user) RETURN count(DISTINCT u.role) AS distinctRoles
+```
+
+#### OPTIONAL MATCH
+
+Left-join semantics: unmatched optional variables are null.
+
+```cypher
+MATCH (u:user)
+OPTIONAL MATCH (u)-[:knows]->(f:user)
+RETURN u.name, f.name
+```
+
+#### WITH pipeline
+
+Chain two MATCH phases, filtering between them.
+
+```cypher
+MATCH (a:user {id: '1'})-[:knows]->(f:user)
+WITH f
+WHERE f.active = true
+MATCH (f)-[:knows]->(b:user)
+RETURN f.name, b.name
+```
+
+#### shortestPath
+
+```cypher
+-- Shortest path between two nodes (returns path object)
+MATCH p = shortestPath((a:user {id: '1'})-[:knows*]-(b:user {id: '5'}))
+RETURN p.length, p.nodes, p.relationships
+
+-- All-pairs within a type
+MATCH p = shortestPath((a:user)-[:knows*]->(b:user))
+WHERE ALL(n IN nodes(p) WHERE n.active = true)
+RETURN p.length
+```
+
+Path object properties: `p.nodes` (list of node maps), `p.relationships`
+(list of `{"type": label}` maps), `p.length` (number of hops).
+
+#### Path comprehension
+
+```cypher
+MATCH p = shortestPath((a:user {id: '1'})-[:knows*]->(b:user))
+WHERE ALL(n IN nodes(p) WHERE n.active = true)
+  AND NONE(n IN nodes(p) WHERE n.role = 'banned')
+RETURN b.name, p.length
+
+-- List comprehension on path nodes
+MATCH p = shortestPath((a:user)-[:knows*]->(b:user))
+RETURN [n IN nodes(p) WHERE n.active = true | n.name] AS activeNames
+```
+
+#### UNWIND
+
+```cypher
+-- Expand a list into rows
+UNWIND [1, 2, 3] AS x RETURN x * 2 AS doubled
+
+-- UNWIND then traverse
+UNWIND ['alice', 'bob'] AS name
+MATCH (u:user {name: name})
+RETURN u
+```
+
+#### UNION / UNION ALL
+
+```cypher
+MATCH (u:user {id: '1'}) RETURN u.name AS name
+UNION
+MATCH (u:user {id: '2'}) RETURN u.name AS name
+
+-- UNION ALL preserves duplicates
+MATCH (u:user {id: '1'}) RETURN u.name AS name
+UNION ALL
+MATCH (u:user {id: '1'}) RETURN u.name AS name
+```
+
+#### Built-in functions
+
+`nodes(p)`, `relationships(p)`, `length(list)`, `size(list)`, `head(list)`,
+`last(list)`, `tail(list)`, `coalesce(a, b)`, `toUpper(s)`, `toLower(s)`,
+`trim(s)`, `toString(v)`, `toInteger(v)`, `toFloat(v)`, `abs(v)`,
+`type(r)`, `id(n)`, `labels(n)`, `exists(v)`.
+
+#### Relationship types in xolu
+
+Relationship labels are derived from REF field keys. A field
+`"knows": {"type": "REF", "entity": "user", "id": 7}` creates an edge with
+label `"knows"`. Use the field key as the relationship type in Cypher patterns.
+Relationship properties are not stored; filtering on `r.since` etc. is not
+supported.
+
+For the full language reference including all supported syntax, predicates, functions, and known gaps, see [Sulpher Query Reference](docs/SULPHER_QUERY_REFERENCE.md).
 
 ---
 
@@ -739,9 +1117,9 @@ users:1 <-> users:2
 ### JWT Authentication
 
 ```bash
-export OLU_AUTH_TYPE=jwt
-export OLU_JWT_SECRET=your-secret-key-min-32-chars
-export OLU_JWT_ISSUER=your-app  # Optional
+export XOLU_AUTH_TYPE=jwt
+export XOLU_JWT_SECRET=your-secret-key-min-32-chars
+export XOLU_JWT_ISSUER=your-app  # Optional
 ```
 
 Request with JWT:
@@ -758,8 +1136,8 @@ JWT requirements:
 ### API Key Authentication
 
 ```bash
-export OLU_AUTH_TYPE=apikey
-export OLU_API_KEYS=key1,key2,key3
+export XOLU_AUTH_TYPE=apikey
+export XOLU_API_KEYS=key1,key2,key3
 ```
 
 Request with API key:
@@ -773,6 +1151,23 @@ Or:
 GET /api/v1/users
 Authorization: ApiKey key1
 ```
+
+### Bearer Token Authentication
+
+```bash
+export XOLU_AUTH_TYPE=bearertoken
+export XOLU_INTERNAL_TOKEN=your-shared-secret-token
+```
+
+Request with bearer token:
+```http
+GET /api/v1/users
+Authorization: Bearer your-shared-secret-token
+```
+
+This mode validates the `Authorization: Bearer <token>` header against the
+static `XOLU_INTERNAL_TOKEN` value. It is intended for machine-to-machine use
+where a shared secret is sufficient and JWT lifecycle management is unnecessary.
 
 ### Excluded Paths
 
@@ -788,10 +1183,10 @@ By default, these paths don't require authentication:
 Enable rate limiting to protect your API:
 
 ```bash
-export OLU_RATE_LIMIT_ENABLED=true
-export OLU_RATE_LIMIT_RATE=100      # requests
-export OLU_RATE_LIMIT_WINDOW=60     # seconds
-export OLU_RATE_LIMIT_BY_IP=true
+export XOLU_RATE_LIMIT_ENABLED=true
+export XOLU_RATE_LIMIT_RATE=100      # requests
+export XOLU_RATE_LIMIT_WINDOW=60     # seconds
+export XOLU_RATE_LIMIT_BY_IP=true
 ```
 
 ### Response Headers
@@ -828,15 +1223,15 @@ GET /metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `olu_uptime_seconds` | gauge | Server uptime |
-| `olu_requests_total` | counter | Total HTTP requests |
-| `olu_requests_by_status_total` | counter | Requests by status code |
-| `olu_request_errors_total` | counter | Total 4xx/5xx responses |
-| `olu_active_requests` | gauge | Current in-flight requests |
-| `olu_request_duration_seconds_bucket` | histogram | Request latency distribution |
-| `olu_entity_operations_total` | counter | CRUD operations by type |
-| `olu_cache_total` | counter | Cache hits/misses |
-| `olu_queries_total` | counter | Query operations by type |
+| `xolu_uptime_seconds` | gauge | Server uptime |
+| `xolu_requests_total` | counter | Total HTTP requests |
+| `xolu_requests_by_status_total` | counter | Requests by status code |
+| `xolu_request_errors_total` | counter | Total 4xx/5xx responses |
+| `xolu_active_requests` | gauge | Current in-flight requests |
+| `xolu_request_duration_seconds_bucket` | histogram | Request latency distribution |
+| `xolu_entity_operations_total` | counter | CRUD operations by type |
+| `xolu_cache_total` | counter | Cache hits/misses |
+| `xolu_queries_total` | counter | Query operations by type |
 
 ### JSON Format
 
@@ -849,57 +1244,23 @@ Accept: application/json
 
 ```yaml
 scrape_configs:
-  - job_name: 'olu'
+  - job_name: 'xolu'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['localhost:8080']
 ```
 
 ---
 
 ## Storage Backends
 
-### JSONFile Storage
-
-Human-readable storage using JSON files.
-
-```bash
-export OLU_STORAGE_TYPE=jsonfile
-export OLU_BASE_DIR=data
-export OLU_SCHEMA_NAME=myapp
-```
-
-Directory structure:
-```
-data/
-└── myapp/
-    ├── users/
-    │   ├── 1.json
-    │   ├── 2.json
-    │   └── ...
-    ├── posts/
-    │   └── ...
-    └── _schemas/
-        └── users.json
-```
-
-**Advantages:**
-- Human-readable
-- Easy debugging
-- Git-friendly
-
-**Limitations:**
-- Slower at scale
-- No ACID guarantees
-- No full-text search
-
 ### SQLite Storage
 
 Production-ready storage with ACID guarantees, WAL mode, and read/write connection pool split.
 
 ```bash
-export OLU_STORAGE_TYPE=sqlite
-export OLU_DB_PATH=olu.db
-export OLU_FULLTEXT_ENABLED=true
+export XOLU_STORAGE_TYPE=sqlite
+export XOLU_BASE_DIR=data
+export XOLU_FULLTEXT_ENABLED=true
 ```
 
 **Advantages:**
@@ -911,25 +1272,43 @@ export OLU_FULLTEXT_ENABLED=true
 
 #### Read/Write Connection Pool Split
 
-SQLite in WAL mode supports concurrent readers alongside a single writer, but only if they use separate database connections. Olu maintains two connection pools:
+SQLite in WAL mode supports concurrent readers alongside a single writer, but only if they use separate database connections. xolu maintains two connection pools:
 
-**Writer pool** (`OLU_SQLITE_MAX_OPEN_CONNS`, default: 1): Handles all INSERT, UPDATE, DELETE, and transaction operations. Default of 1 matches SQLite's single-writer constraint under WAL. A future PostgreSQL backend would use a higher default.
+**Writer pool** (`XOLU_SQLITE_MAX_OPEN_CONNS`, default: 1): Handles all INSERT, UPDATE, DELETE, and transaction operations. Default of 1 matches SQLite's single-writer constraint under WAL. A future PostgreSQL backend would use a higher default.
 
-**Reader pool** (`OLU_SQLITE_READ_POOL_SIZE`, default: NumCPU): Handles all SELECT, COUNT, and search queries. Uses `PRAGMA query_only=ON` to prevent accidental writes. Scales with available CPU cores.
+**Reader pool** (`XOLU_SQLITE_READ_POOL_SIZE`, default: NumCPU): Handles all SELECT, COUNT, and search queries. Uses `PRAGMA query_only=ON` to prevent accidental writes. Scales with available CPU cores.
 
 Both pools share identical WAL, synchronous, cache, and busy_timeout pragmas. Pool size defaults are 0, meaning "let the backend decide" — this keeps the configuration backend-neutral for future storage backends.
 
 #### Adaptive Concurrency
 
-Under high write contention, SQLite returns SQLITE_BUSY. Olu's adaptive lock monitors contention rates and automatically backs off when the threshold is exceeded (`OLU_SQLITE_CONTENTION_THRESHOLD`, default 95%). This prevents cascading failures under burst write loads.
+Under high write contention, SQLite returns SQLITE_BUSY. xolu's adaptive lock monitors contention rates and automatically backs off when the threshold is exceeded (`XOLU_SQLITE_CONTENTION_THRESHOLD`, default 95%). This prevents cascading failures under burst write loads.
 
-**Migration:**
+### Storage Layout
+
+xolu's on-disk layout is derived from a single configurable knob — the data root, set by `--base-dir` (or `XOLU_BASE_DIR`, default `data`). There is no separate database-path setting: every store, the time-series plane, schemas, blobs, and runtime config are placed by a fixed invariant beneath the data root.
+
+```
+<data-root>/
+  t0000/store/xolu.db   t0000/ts/      tenant 0 (per-file mode)
+  tNNNN/store/xolu.db   tNNNN/ts/      registered tenants (per-file mode)
+  shared/store/xolu.db  shared/ts/     shared-tenancy mode
+  schema/                             entity schemas
+  blobs/                              blob store
+  dynconfig.json                      runtime configuration
+```
+
+In per-file tenant mode (`XOLU_SQLITE_PER_FILE_TENANTS=true`) each tenant has its own store at `tNNNN/store/xolu.db`, with tenant 0 at `t0000/`. Otherwise a single shared store lives under `shared/`. The tenant segment is the tenant ID as four uppercase hex digits (`t0001`, `t00ff`, …).
+
+**Inspecting the layout.** The `layout-recon` subcommand walks the data root, prints the structure annotated against the invariant, and exits non-zero if anything does not conform:
 
 ```bash
-./bin/olu-migrate --from jsonfile --to sqlite \
-  --source-dir ./data/myapp \
-  --target-db ./olu.db
+xolu --base-dir data layout-recon
 ```
+
+**Migration safety.** On startup xolu refuses to run against a data root written by a pre-normalization layout (a base store at the root, or the old backend-first `sql/` or `ts/` groupings) rather than silently creating fresh stores beside the old data. If this happens, run `layout-recon` to inspect the directory, then migrate the data or point `--base-dir` at a fresh directory.
+
+The path-derivation rules are owned by `pkg/storelayout`, which is the single authority for both producing and validating the layout.
 
 ---
 
@@ -967,9 +1346,9 @@ References are automatically:
 Configure cycle handling:
 
 ```bash
-export OLU_GRAPH_CYCLE_DETECTION=warn   # Log warning, allow
-export OLU_GRAPH_CYCLE_DETECTION=error  # Reject edge creation
-export OLU_GRAPH_CYCLE_DETECTION=ignore # Allow silently
+export XOLU_GRAPH_CYCLE_DETECTION=warn   # Log warning, allow
+export XOLU_GRAPH_CYCLE_DETECTION=error  # Reject edge creation
+export XOLU_GRAPH_CYCLE_DETECTION=ignore # Allow silently
 ```
 
 ### Reference Embedding
@@ -1007,7 +1386,7 @@ GET /api/v1/users/1?embed_depth=1
 When enabled, deleting an entity also deletes entities that reference it:
 
 ```bash
-export OLU_CASCADING_DELETE=true
+export XOLU_CASCADING_DELETE=true
 ```
 
 ---
@@ -1056,7 +1435,7 @@ make stress-race    # With race detector
 
 ### Docker Compose Profiles
 
-Olu ships with a multi-profile `docker-compose.yml` for different scenarios:
+xolu ships with a multi-profile `docker-compose.yml` for different scenarios:
 
 ```bash
 # Basic: memory cache, no auth
@@ -1089,7 +1468,7 @@ make docker-clean       # Stop and remove volumes
 make docker-build
 ```
 
-This builds `olu:latest` using Go 1.22. No CGO is required — `modernc.org/sqlite` is a pure-Go SQLite port.
+This builds `xolu:latest` using Go 1.22. No CGO is required — `modernc.org/sqlite` is a pure-Go SQLite port.
 
 ### Development Configuration
 
@@ -1097,15 +1476,16 @@ For local development with minimal setup:
 
 ```yaml
 services:
-  olu:
+  xolu:
     build: .
     ports:
-      - "9090:9090"
+      - "8080:8080"
     environment:
-      - OLU_STORAGE_TYPE=jsonfile
-      - OLU_CACHE_TYPE=memory
-      - OLU_AUTH_TYPE=none
-      - OLU_GRAPH_MODE=flat
+      - XOLU_STORAGE_TYPE=sqlite
+      - XOLU_BASE_DIR=/app/data
+      - XOLU_CACHE_TYPE=memory
+      - XOLU_AUTH_TYPE=none
+      - XOLU_GRAPH_MODE=flat
     volumes:
       - ./data:/app/data
       - ./schema:/app/schema
@@ -1117,44 +1497,44 @@ For production with all security and performance features:
 
 ```yaml
 services:
-  olu:
-    image: olu:latest
+  xolu:
+    image: xolu:latest
     ports:
       - "9090:9090"
     environment:
       # Storage
-      - OLU_STORAGE_TYPE=sqlite
-      - OLU_DB_PATH=/app/data/olu.db
-      - OLU_FULLTEXT_ENABLED=true
+      - XOLU_STORAGE_TYPE=sqlite
+      - XOLU_BASE_DIR=/app/data
+      - XOLU_FULLTEXT_ENABLED=true
       # Cache
-      - OLU_CACHE_TYPE=redis
-      - OLU_CACHE_TTL=300
-      - OLU_REDIS_HOST=redis
-      - OLU_REDIS_PORT=6379
+      - XOLU_CACHE_TYPE=redis
+      - XOLU_CACHE_TTL=300
+      - XOLU_REDIS_HOST=redis
+      - XOLU_REDIS_PORT=6379
       # Graph
-      - OLU_GRAPH_MODE=flat
-      - OLU_GRAPH_CYCLE_DETECTION=error
+      - XOLU_GRAPH_MODE=flat
+      - XOLU_GRAPH_CYCLE_DETECTION=error
       # Authentication
-      - OLU_AUTH_TYPE=apikey
-      - OLU_API_KEYS=${API_KEYS}
+      - XOLU_AUTH_TYPE=apikey
+      - XOLU_API_KEYS=${API_KEYS}
       # Rate limiting
-      - OLU_RATE_LIMIT_ENABLED=true
-      - OLU_RATE_LIMIT_RATE=100
-      - OLU_RATE_LIMIT_WINDOW=60
-      - OLU_RATE_LIMIT_BY_KEY=true
+      - XOLU_RATE_LIMIT_ENABLED=true
+      - XOLU_RATE_LIMIT_RATE=100
+      - XOLU_RATE_LIMIT_WINDOW=60
+      - XOLU_RATE_LIMIT_BY_KEY=true
       # Metrics
-      - OLU_METRICS_ENABLED=true
+      - XOLU_METRICS_ENABLED=true
       # Multi-tenancy
-      - OLU_TENANT_MODE=strict
-      - OLU_TENANT_AUTO_REGISTER=false
+      - XOLU_TENANT_MODE=strict
+      - XOLU_TENANT_AUTO_REGISTER=false
     volumes:
-      - olu-data:/app/data
+      - xolu-data:/app/data
       - ./schema:/app/schema
     depends_on:
       - redis
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1167,7 +1547,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  olu-data:
+  xolu-data:
   redis-data:
 ```
 
@@ -1203,7 +1583,7 @@ Tests include:
 Expected output:
 ```
 ========================================
-Running Olu Integration Tests
+Running xolu Integration Tests
 ========================================
 
 --- Health & System Endpoints ---
@@ -1249,7 +1629,7 @@ Results: 17 passed, 0 failed
 ### Reverse Proxy (nginx)
 
 ```nginx
-upstream olu {
+upstream xolu {
     server 127.0.0.1:9090;
 }
 
@@ -1261,7 +1641,7 @@ server {
     ssl_certificate_key /etc/ssl/private/api.key;
 
     location / {
-        proxy_pass http://olu;
+        proxy_pass http://xolu;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1273,13 +1653,13 @@ server {
 
 ```bash
 # Simple health check
-curl -f http://localhost:9090/health
+curl -f http://localhost:8080/health
 
 # Version info
-curl http://localhost:9090/version
+curl http://localhost:8080/version
 
 # Prometheus metrics
-curl http://localhost:9090/metrics
+curl http://localhost:8080/metrics
 ```
 
 Kubernetes probes:
@@ -1306,10 +1686,10 @@ readinessProbe:
 
 ```bash
 # Using sqlite3
-sqlite3 /app/data/olu.db ".backup /backup/olu-$(date +%Y%m%d).db"
+sqlite3 /app/data/xolu.db ".backup /backup/xolu-$(date +%Y%m%d).db"
 
 # Using export endpoint (includes graph data)
-curl http://localhost:9090/api/v1/export > backup-$(date +%Y%m%d).zip
+curl http://localhost:8080/api/v1/export > backup-$(date +%Y%m%d).zip
 ```
 
 #### Timeseries Backup
@@ -1333,7 +1713,7 @@ planned backup architecture using Pebble checkpoints.
 #### Scheduled Backup (cron)
 
 ```bash
-0 2 * * * docker exec olu sqlite3 /app/data/olu.db ".backup /backup/olu-daily.db"
+0 2 * * * docker exec xolu sqlite3 /app/data/xolu.db ".backup /backup/xolu-daily.db"
 ```
 
 ### Scaling Considerations
@@ -1365,15 +1745,15 @@ planned backup architecture using Pebble checkpoints.
 
 ### Cache Backends
 
-Olu supports two cache backends:
+xolu supports two cache backends:
 
 #### Memory Cache (Default)
 
 Simple in-process LRU cache. Good for development and single-instance deployments.
 
 ```bash
-export OLU_CACHE_TYPE=memory
-export OLU_CACHE_TTL=300
+export XOLU_CACHE_TYPE=memory
+export XOLU_CACHE_TTL=300
 ```
 
 **Characteristics:**
@@ -1387,14 +1767,14 @@ export OLU_CACHE_TTL=300
 Production-grade distributed cache. Use when running multiple instances or when you need per-item TTL control.
 
 ```bash
-export OLU_CACHE_TYPE=redis
-export OLU_CACHE_TTL=300
-export OLU_REDIS_HOST=localhost
-export OLU_REDIS_PORT=6379
+export XOLU_CACHE_TYPE=redis
+export XOLU_CACHE_TTL=300
+export XOLU_REDIS_HOST=localhost
+export XOLU_REDIS_PORT=6379
 ```
 
 **Characteristics:**
-- Shared across all olu instances
+- Shared across all xolu instances
 - Survives restarts (if Redis persistence enabled)
 - Supports per-item TTL
 - Network latency on every operation
@@ -1402,7 +1782,7 @@ export OLU_REDIS_PORT=6379
 
 #### When to Use Redis
 
-- Running multiple olu instances behind a load balancer
+- Running multiple xolu instances behind a load balancer
 - Need cache to survive restarts
 - Need per-item TTL control
 - Want to inspect cache contents via redis-cli
@@ -1421,7 +1801,7 @@ This means **newly created entity types are recognised automatically** without s
 
 ### Multi-Tenancy
 
-Olu supports two operational modes for tenant isolation.
+xolu supports two operational modes for tenant isolation.
 
 #### Operational Modes
 
@@ -1440,8 +1820,8 @@ In strict mode, graph queries are available exclusively via tenant-scoped routes
 
 Configure via environment:
 ```bash
-export OLU_TENANT_MODE=strict
-export OLU_TENANT_AUTO_REGISTER=false
+export XOLU_TENANT_MODE=strict
+export XOLU_TENANT_AUTO_REGISTER=false
 ```
 
 #### Tenant Scoping Architecture
@@ -1457,9 +1837,9 @@ Tenant isolation is enforced at the **storage layer**. Each tenant gets a scoped
 
 #### Auto-Registration
 
-In `path` mode, the `OLU_TENANT_AUTO_REGISTER` flag controls whether unknown tenant names in the URL automatically create new tenants:
+In `path` mode, the `XOLU_TENANT_AUTO_REGISTER` flag controls whether unknown tenant names in the URL automatically create new tenants:
 
-| `OLU_TENANT_AUTO_REGISTER` | Behaviour |
+| `XOLU_TENANT_AUTO_REGISTER` | Behaviour |
 |-----------------------------|-----------|
 | `true` | `/api/v1/tenant/new-name/...` creates tenant "new-name" on first access |
 | `false` (default) | Unknown tenants return 404 |
@@ -1470,25 +1850,25 @@ In `strict` mode, auto-registration is ignored; tenants must be pre-registered.
 
 This is **application-level isolation** designed for trusted environments (internal services, not adversarial internet clients). The isolation model prevents accidental cross-tenant data access in normal CRUD, OQL, and search flows.
 
-It is not a compliance-grade security boundary. For hostile multi-tenancy, use separate Olu instances per tenant with separate databases.
+It is not a compliance-grade security boundary. For hostile multi-tenancy, use separate xolu instances per tenant with separate databases.
 
 #### Example Usage
 
 ```bash
 # Create entity in tenant "acme"
-curl -X POST http://localhost:9090/api/v1/tenant/acme/users \
+curl -X POST http://localhost:8080/api/v1/tenant/acme/users \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice"}'
 
 # List only acme's users
-curl http://localhost:9090/api/v1/tenant/acme/users
+curl http://localhost:8080/api/v1/tenant/acme/users
 
 # OQL scoped to tenant
-curl -X POST http://localhost:9090/api/v1/tenant/acme/oql/query \
+curl -X POST http://localhost:8080/api/v1/tenant/acme/oql/query \
   -d '{"query": "SELECT * FROM users WHERE status = '"'"'active'"'"'"}'
 
 # In strict mode, non-tenant routes return 403:
-curl http://localhost:9090/api/v1/users
+curl http://localhost:8080/api/v1/users
 # {"error": "Tenant context required. Use /api/v1/tenant/{tenant_id}/... routes"}
 ```
 
@@ -1498,9 +1878,9 @@ curl http://localhost:9090/api/v1/users
 
 ### Version Scheme
 
-Olu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
+xolu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.9.7-patched100`.
+or API. The current version is `0.15.0`.
 
 ### Database Format Stability
 
@@ -1509,7 +1889,7 @@ or API. The current version is `0.9.7-patched100`.
 it will be shipped as part of `0.10.0` or later with an explicit migration.
 
 **Across minor versions (`0.9` → `0.10`):** Schema changes are possible.
-When they occur, `olu-migrate` will be updated with the necessary migration
+When they occur, a migration procedure will be documented in [UPGRADE.md](docs/UPGRADE.md).
 subcommand. Release notes will state whether a migration is required.
 
 ### When Migrations Are Required
@@ -1527,7 +1907,7 @@ Migrations are **not** required for:
 - Configuration changes.
 - Bug fixes that don't alter stored data.
 
-The `olu-migrate schema` command is idempotent: running it against an
+Migration steps are described in [UPGRADE.md](docs/UPGRADE.md). Running them
 already-migrated database is safe and produces no changes.
 
 ### Rollback
@@ -1536,7 +1916,7 @@ Rollback is **not supported**. Migrations are forward-only. Before
 upgrading, take a backup:
 
 ```bash
-sqlite3 /app/data/olu.db ".backup /backup/olu-pre-upgrade.db"
+sqlite3 /app/data/xolu.db ".backup /backup/xolu-pre-upgrade.db"
 ```
 
 If the upgrade fails, restore from the backup and stay on the previous
@@ -1546,9 +1926,9 @@ version.
 
 1. **Back up** the SQLite database and any Pebble timeseries directories.
 2. **Stop** the running server.
-3. **Replace** the `olu` binary with the new version.
+3. **Replace** the `xolu` binary with the new version.
 4. **Run migrations** if the release notes require it:
-   `olu-migrate schema -db /path/to/olu.db`
+   See [UPGRADE.md](docs/UPGRADE.md) for the migration procedure.
 5. **Start** the server.
 6. **Verify** via `/health` and `/ready`.
 
@@ -1566,6 +1946,9 @@ minor version before removal.
 
 ## Troubleshooting
 
+For a complete list of error codes and their meanings, see [Error Code Reference](docs/ERROR_CODES.md).
+
+
 For a quick-reference operational guide covering health checks, common
 failure modes, and emergency procedures, see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
@@ -1581,16 +1964,16 @@ failure modes, and emergency procedures, see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 **Graph queries return empty**
 - Graph may not be initialized
-- Check: `OLU_GRAPH_MODE=flat`
+- Check: `XOLU_GRAPH_MODE=flat`
 
 **Rate limiting too aggressive**
-- Adjust `OLU_RATE_LIMIT_RATE` and `OLU_RATE_LIMIT_WINDOW`
-- Consider `OLU_RATE_LIMIT_BY_KEY=true` for authenticated clients
+- Adjust `XOLU_RATE_LIMIT_RATE` and `XOLU_RATE_LIMIT_WINDOW`
+- Consider `XOLU_RATE_LIMIT_BY_KEY=true` for authenticated clients
 
 ### Debug Mode
 
 ```bash
-export OLU_DEBUG=true
+export XOLU_DEBUG=true
 ```
 
 Enables verbose logging including:

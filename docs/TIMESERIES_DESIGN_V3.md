@@ -1,16 +1,31 @@
-# olu Timeseries Storage
+# xolu Timeseries Storage
 
 **Version:** 0.3  
-**Author:** haitch <h@ual.fi>  
+**Author:** haitch <h@ual.li>  
 **Date:** March 2026  
-**Status:** Active design reference  
+**Status:** Active design reference — see staleness note below
+
+> **Staleness note (2026-06-15, v0.9.9-rc16):** The `StoreFactory` signature
+> and `Manager.Provision` signature in this document are outdated. Current
+> signatures are:
+>
+> ```go
+> type StoreFactory func(dir string, cfg StoreConfig, tenantName string) (Store, error)
+> Provision(ctx context.Context, tenantID uint16, tenantName string) error
+> ```
+>
+> The `TimelineWriteConfig` struct no longer has a `WriteCoal` field; coalescing
+> is controlled via dynconfig (`ts.writecoal`). Per-timeline sync is controlled
+> via `POST /ts/tl/{tid}/sync/on` and `/sync/off`. Error codes XOLU-TS016
+> through XOLU-TS021 are not documented here; see `docs/ERROR_CODES.md`.
+> Everything else in this document remains accurate.
 
 ---
 
 ## 1. Problem
 
 Asset management systems ingest sensor events as regular JSON documents
-through olu's entity CRUD API. Each event is a row in the shared
+through xolu's entity CRUD API. Each event is a row in the shared
 `entities` table with a `(tenant_id, entity_type, id)` primary key.
 The timestamp, trigger type, sensor ID, and numeric readings are fields
 inside the JSON blob.
@@ -78,13 +93,13 @@ on batch size.
 
 TimescaleDB, QuestDB, and InfluxDB all outperform this design on raw
 throughput and compression. They also require installing and operating a
-separate database system. olu's value proposition is operational
+separate database system. xolu's value proposition is operational
 simplicity: one binary, one data directory, no external dependencies. The
 timeseries backend preserves this property.
 
-For deployments where a dedicated timeseries database is justified, olu's
+For deployments where a dedicated timeseries database is justified, xolu's
 architecture already accommodates a sidecar: event ingest dual-writes to
-olu (metadata, graph edges) and to the external store (raw telemetry).
+xolu (metadata, graph edges) and to the external store (raw telemetry).
 This design covers the single-binary deployment tier.
 
 ---
@@ -186,7 +201,7 @@ Timeseries is controlled by a configuration flag:
 
     TimeseriesEnabled  bool   // default: false
 
-Environment variable: `OLU_TIMESERIES_ENABLED`.
+Environment variable: `XOLU_TIMESERIES_ENABLED`.
 
 The flag is validated at startup:
 
@@ -210,11 +225,11 @@ A tenant without timeseries provisioning receives `404 Not Found` on
 
 ### 5.1 Data directory layout
 
-Each tenant gets an isolated Pebble instance under the olu data
+Each tenant gets an isolated Pebble instance under the xolu data
 directory:
 
-    {OLU_BASE_DIR}/
-      olu.db                    # existing SQLite database
+    {XOLU_BASE_DIR}/
+      xolu.db                    # existing SQLite database
       ts/
         t0001/                  # tenant 0x0001
           pebble/               # Pebble data directory
@@ -306,7 +321,7 @@ protobuf, msgpack, or any other encoding the application layer requires.
 The store reads and writes it as opaque bytes.
 
 NaN values in numeric fields are rejected at write time (error
-OLU-TS017). Infinity is permitted; IEEE 754 comparison semantics in
+XOLU-TS017). Infinity is permitted; IEEE 754 comparison semantics in
 aggregation handle it correctly.
 
 The `uint16` payload length prefix caps individual payloads at 65,535
@@ -346,7 +361,7 @@ type TimelineConfig struct {
 
 `Dims` is immutable after `FirstWriteAt` is set. Attempting to redefine
 the dimension count of a timeline that has received events returns
-OLU-TS016. Name and `RetentionDays` may be updated freely.
+XOLU-TS016. Name and `RetentionDays` may be updated freely.
 
 The registry also stores the store-level `DefaultRetentionDays`, which
 applies to any timeline whose `RetentionDays` is 0. A value of 0 for
@@ -430,7 +445,7 @@ All writes for one logical event (across 1–2 timelines) are committed in
 a single `batch.Commit(pebble.Sync)`. The fsync cost is paid once
 regardless of how many timeline entries are in the batch.
 
-Observed throughput (olu v0.9.2, container environment):
+Observed throughput (xolu v0.9.2, container environment):
 
 | Pattern                        | Throughput          |
 |--------------------------------|---------------------|
@@ -445,22 +460,22 @@ events from multiple sensors before committing.
 
 ## 6. Configuration
 
-New fields in the olu configuration:
+New fields in the xolu configuration:
 
     # Feature flag
-    OLU_TIMESERIES_ENABLED=true
+    XOLU_TIMESERIES_ENABLED=true
 
     # Pebble tuning
-    OLU_TS_MEMTABLE_SIZE=67108864        # 64 MB memtable (default)
-    OLU_TS_BLOCK_SIZE=32768              # 32 KB block size (default)
-    OLU_TS_COMPRESSION=zstd              # "snappy", "zstd", or "none"
-    OLU_TS_L0_COMPACTION_THRESHOLD=4     # L0 files before compaction
-    OLU_TS_MAX_OPEN_FILES=500            # Per-tenant Pebble file limit
+    XOLU_TS_MEMTABLE_SIZE=67108864        # 64 MB memtable (default)
+    XOLU_TS_BLOCK_SIZE=32768              # 32 KB block size (default)
+    XOLU_TS_COMPRESSION=zstd              # "snappy", "zstd", or "none"
+    XOLU_TS_L0_COMPACTION_THRESHOLD=4     # L0 files before compaction
+    XOLU_TS_MAX_OPEN_FILES=500            # Per-tenant Pebble file limit
 
     # Retention
-    OLU_TS_DEFAULT_RETENTION_DAYS=90     # Store-level fallback; 0 = no expiry
-    OLU_TS_COMPACTION_INTERVAL=3600      # Seconds between retention sweeps
-    OLU_TS_RETENTION_ENABLED=false       # Background retention goroutine (opt-in)
+    XOLU_TS_DEFAULT_RETENTION_DAYS=90     # Store-level fallback; 0 = no expiry
+    XOLU_TS_COMPACTION_INTERVAL=3600      # Seconds between retention sweeps
+    XOLU_TS_RETENTION_ENABLED=false       # Background retention goroutine (opt-in)
 
 Pebble instances are opened lazily on first timeseries request to a
 provisioned tenant, and closed on server shutdown.
@@ -724,7 +739,7 @@ to the lifecycle of the entity store — an asset deleted from the entity
 store could still appear in a timeseries dimension scan, requiring
 cross-store reconciliation.
 
-For applications that do not use olu's entity store, dimension
+For applications that do not use xolu's entity store, dimension
 enumeration would need to be provided by whatever registry they maintain.
 The absence of it in `pkg/timeseries` is the correct expression of this
 separation of concerns.
@@ -768,7 +783,7 @@ require explicit operator access to the server.
 
 **Define a timeline:**
 
-    POST /api/v1/tenant/{tenant_id}/ts/timelines
+    POST /api/v1/tenant/{tenant_id}/ts/tl/def
 
 Request body:
 
@@ -795,18 +810,18 @@ Response `201 Created`:
 
 **List all timelines:**
 
-    GET /api/v1/tenant/{tenant_id}/ts/timelines
+    GET /api/v1/tenant/{tenant_id}/ts/tl/list
 
 **Get a specific timeline:**
 
-    GET /api/v1/tenant/{tenant_id}/ts/timelines/{timeline_id}
+    GET /api/v1/tenant/{tenant_id}/ts/tl/{timeline_id}
 
 **Update a timeline (name and retention_days only):**
 
-    PATCH /api/v1/tenant/{tenant_id}/ts/timelines/{timeline_id}
+    PATCH /api/v1/tenant/{tenant_id}/ts/tl/{timeline_id}
 
 Attempting to change `dims` after the first write returns `409 Conflict`
-with OLU-TS016.
+with XOLU-TS016.
 
 ### 10.3 Append
 
@@ -878,7 +893,7 @@ Parameters:
 
 `dims` specifies a leading dimension prefix. The constraint is
 `1 ≤ len(dims) ≤ timeline.Dims`. Providing more values than the timeline
-declares returns OLU-TS007. Providing zero values returns OLU-TS007.
+declares returns XOLU-TS007. Providing zero values returns XOLU-TS007.
 
 When `len(dims) == timeline.Dims`, the query is a single bounded Pebble
 key seek — O(result_set). When `len(dims) < timeline.Dims`, the query
@@ -976,6 +991,32 @@ Response `200 OK` (without interval — scalar):
 }
 ```
 
+### 10.5.1 Range Aggregate (all fields, single pass)
+
+    POST /api/v1/tenant/{tenant_id}/ts/range_aggregate
+
+Computes count, sum, avg, min, max for all seven numeric fields in one Pebble
+scan. Use when multiple fields are needed; avoids redundant scans.
+
+Request body: `{"timeline", "dims", "from", "to"}` — same as aggregate but no
+`function` or `num_field`.
+
+### 10.5.2 Full Aggregate (statistics + quantiles, single pass)
+
+    POST /api/v1/tenant/{tenant_id}/ts/full_aggregate
+
+Combines exact statistics with approximate quantile estimates (t-digest,
+compression=100) in a single Pebble scan.
+
+Additional request fields:
+
+- `quantiles`: `[]float64` in [0, 1]; e.g. `[0.5, 0.9, 0.99]`. If absent or empty, no digest is allocated and behaviour is identical to range_aggregate.
+- `quantile_fields`: `[]uint8` (0–6); which numeric fields to estimate. Null means all seven.
+
+Response: same as range_aggregate plus a `quantiles [7][]float64` field where
+`quantiles[i]` is the estimate slice for field `i` (null when not requested or
+no events).
+
 ### 10.6 Retention management
 
 **View retention configuration:**
@@ -998,12 +1039,7 @@ Response:
 
     PATCH /api/v1/tenant/{tenant_id}/ts/retention
 
-```json
-{ "default_retention_days": 30 }
-```
-
-Per-timeline retention is updated via the timeline PATCH endpoint
-(Section 10.2).
+Request body: `{"default_retention_days": 30}`. Setting `0` disables expiry. Per-timeline retention is updated via `PATCH /ts/tl/{id}` (Section 10.2).
 
 ### 10.7 Diagnostics
 
@@ -1037,9 +1073,9 @@ Response:
 }
 ```
 
-### 10.8 Sugar endpoints
+### 10.8 Sugar endpoints (not implemented)
 
-The server layer exposes domain-specific composite endpoints that fan out
+The following domain-specific composite endpoints were planned that fan out
 to multiple underlying stores concurrently. For example:
 
     GET /api/v1/tenant/{tenant_id}/assets/{asset_id}/readings
@@ -1073,24 +1109,24 @@ Sugar endpoints are defined in the IoT adapter layer, not in
 
 | Code      | Meaning |
 |-----------|---------|
-| OLU-TS001 | Timeseries not available (wrong tenant mode) |
-| OLU-TS002 | Timeseries not enabled (feature flag off) |
-| OLU-TS003 | Tenant not provisioned for timeseries |
-| OLU-TS004 | Timeline not defined |
-| OLU-TS005 | Invalid timestamp (before epoch, or unparseable) |
-| OLU-TS006 | Batch too large (> 5000 events) |
-| OLU-TS007 | Wrong dimension count for timeline |
-| OLU-TS008 | Invalid aggregation function |
-| OLU-TS009 | Invalid num_field index (> 6) |
-| OLU-TS010 | Invalid interval format |
-| OLU-TS011 | Query range too wide (> 366 days) |
-| OLU-TS012 | Result limit exceeded (> 10000) |
-| OLU-TS013 | Store error (internal) |
-| OLU-TS014 | Retention update failed |
-| OLU-TS015 | Provision failed (disk error, permissions) |
-| OLU-TS016 | Timeline dims immutable after first write |
-| OLU-TS017 | NaN value rejected |
-| OLU-TS018 | Timeline ID reserved (0x0000) |
+| XOLU-TS001 | Timeseries not available (wrong tenant mode) |
+| XOLU-TS002 | Timeseries not enabled (feature flag off) |
+| XOLU-TS003 | Tenant not provisioned for timeseries |
+| XOLU-TS004 | Timeline not defined |
+| XOLU-TS005 | Invalid timestamp (before epoch, or unparseable) |
+| XOLU-TS006 | Batch too large (> 5000 events) |
+| XOLU-TS007 | Wrong dimension count for timeline |
+| XOLU-TS008 | Invalid aggregation function |
+| XOLU-TS009 | Invalid num_field index (> 6) |
+| XOLU-TS010 | Invalid interval format |
+| XOLU-TS011 | Query range too wide (> 366 days) |
+| XOLU-TS012 | Result limit exceeded (> 10000) |
+| XOLU-TS013 | Store error (internal) |
+| XOLU-TS014 | Retention update failed |
+| XOLU-TS015 | Provision failed (disk error, permissions) |
+| XOLU-TS016 | Timeline dims immutable after first write |
+| XOLU-TS017 | NaN value rejected |
+| XOLU-TS018 | Timeline ID reserved (0x0000) |
 
 ---
 
@@ -1208,7 +1244,7 @@ The pause window is typically under 1 second for a local restore.
 
 **Archive storage layout:**
 
-    s3://olu-archive/
+    s3://xolu-archive/
       acme/
         ts/
           2025-12.pebble.tar.zst
@@ -1306,7 +1342,7 @@ follow the tenant when it moves between instances.
 
 ## 15. Migration from the v0.1 Implementation
 
-The v0.1 implementation (olu v0.9.x, `pkg/timeseries`) is the starting
+The v0.1 implementation (xolu v0.9.x, `pkg/timeseries`) is the starting
 point. This section describes what changes, what is new, and what is
 deleted.
 
@@ -1348,7 +1384,7 @@ deleted.
 
 ### Phase 2: API layer
 
-- Replace error codes OLU-TS004–TS015 with the new set (Section 11).
+- Replace error codes XOLU-TS004–TS015 with the new set (Section 11).
 - Add timeline management handlers (`POST`, `GET`, `PATCH` on `/ts/timelines`).
 - Update write, read, aggregate, and retention handlers for the new types.
 - Update `pkg/server/server.go` route registration to include timeline
@@ -1368,7 +1404,7 @@ New package, no equivalent in v0.1:
 ### Phase 4: Data migration
 
 Existing v0.1 Pebble data is not readable by the v0.3 store — the key
-formats are incompatible. Run `olu-migrate ts upgrade` per tenant before
+formats are incompatible. A manual migration procedure is required per tenant before
 bringing the new store online (Section 14 covers the migration procedure).
 
 ### Phase 5: Tests

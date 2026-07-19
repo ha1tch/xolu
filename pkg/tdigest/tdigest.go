@@ -42,7 +42,7 @@
 //	p99, err := td.Quantile(0.99)
 //	td.Reset() // reuse without reallocating
 //
-// This package is internal to olu. It intentionally omits serialisation,
+// This package is internal to xolu. It intentionally omits serialisation,
 // merge, CDF, TrimmedMean, and other features not required by the timeseries
 // subsystem.
 //

@@ -1,0 +1,14 @@
+# Fuzz target registry
+#
+# Each fuzz target is a Go `func Fuzz*` that must live in the package it tests
+# (Go requires fuzz functions in-package). This file is the discoverable index:
+# target name -> the package path it lives in. The run.sh launcher reads it.
+#
+# Format: <FuzzName> <package-import-path-relative-to-module-root>
+
+FuzzEvalGuard            ./pkg/fsm/eval
+FuzzTokenise             ./pkg/jsonic
+FuzzBlobSHA              ./pkg/blob
+FuzzScalarFunctions      ./pkg/qs
+FuzzValidateFieldName    ./pkg/oql
+FuzzParseAndValidateJWT  ./pkg/middleware

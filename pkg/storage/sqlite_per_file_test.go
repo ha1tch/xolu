@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"path/filepath"
 	"testing"
 )
@@ -39,7 +40,7 @@ func newPerFileStore(t *testing.T, dbPath string, tenantID uint16) *SQLiteStore 
 // ---------------------------------------------------------------------------
 
 // TestPerFile_SchemaHasNoTenantIDColumn verifies that the entities,
-// entity_sequences, and entities_fts tables are created without a tenant_id
+// `+tenant.NodeSeqTableName(1)+`, and `+tenant.NodeFTSTableName(1)+` tables are created without a tenant_id
 // column when PerFileTenants = true.
 func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 	dir := t.TempDir()
@@ -49,7 +50,7 @@ func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 	db := store.DB()
 	ctx := context.Background()
 
-	tables := []string{"entities", "entity_sequences"}
+	tables := []string{tenant.NodesTableName(1), tenant.NodeSeqTableName(1)}
 	for _, tbl := range tables {
 		rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tbl))
 		if err != nil {
@@ -74,25 +75,25 @@ func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 		}
 	}
 
-	// entities_fts: check via fts5 content table (no PRAGMA table_info for virtual tables)
+	// `+tenant.NodeFTSTableName(1)+`: check via fts5 content table (no PRAGMA table_info for virtual tables)
 	// Insert a row and confirm it only has (entity_type, entity_id, content) columns.
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO entities_fts (entity_type, entity_id, content) VALUES (?, ?, ?)`,
+		`INSERT INTO `+tenant.NodeFTSTableName(1)+` (entity_type, entity_id, content) VALUES (?, ?, ?)`,
 		"probe", "1", "hello")
 	if err != nil {
-		t.Errorf("entities_fts INSERT without tenant_id failed: %v", err)
+		t.Errorf(tenant.NodeFTSTableName(1)+" INSERT without tenant_id failed: %v", err)
 	}
 
 	// Also confirm entities PRIMARY KEY is (entity_type, id), not (tenant_id, entity_type, id).
 	// A duplicate insert with the same (entity_type, id) should fail.
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO entities (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
 		"widget", 1, `{"id":1}`, 1)
 	if err != nil {
 		t.Fatalf("first entities INSERT failed: %v", err)
 	}
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO entities (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
 		"widget", 1, `{"id":1}`, 1)
 	if err == nil {
 		t.Error("duplicate (entity_type, id) INSERT should have failed under per-file PK, but did not")
@@ -289,7 +290,7 @@ func TestPerFile_QueryWithPlan(t *testing.T) {
 
 	// QueryWithPlan takes raw SQL + args; in per-file mode there's no tenant_id param.
 	results, err := store.QueryWithPlan(ctx,
-		`SELECT data, _version FROM entities WHERE entity_type = ? ORDER BY id`,
+		`SELECT data, _version FROM `+tenant.NodesTableName(1)+` WHERE entity_type = ? ORDER BY id`,
 		[]interface{}{"tag"})
 	if err != nil {
 		t.Fatalf("QueryWithPlan: %v", err)
@@ -344,9 +345,9 @@ func TestPerFile_AdaptedTableOmitsTenantID(t *testing.T) {
 	}
 
 	db := store.DB()
-	rows, err := db.QueryContext(ctx, "PRAGMA table_info(olu_inventory)")
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(t0001_ndata_inventory)")
 	if err != nil {
-		t.Fatalf("PRAGMA table_info(inventory): %v", err)
+		t.Fatalf("PRAGMA table_info(t0001_ndata_inventory): %v", err)
 	}
 	defer rows.Close()
 
@@ -364,13 +365,13 @@ func TestPerFile_AdaptedTableOmitsTenantID(t *testing.T) {
 	}
 
 	if colNames["tenant_id"] {
-		t.Error("adapted table 'inventory': unexpected tenant_id column in per-file mode")
+		t.Error("adapted table 't0001_ndata_inventory': unexpected tenant_id column")
 	}
 	if !colNames["sku"] {
-		t.Error("adapted table 'inventory': missing 'sku' column")
+		t.Error("adapted table 't0001_ndata_inventory': missing 'sku' column")
 	}
 	if !colNames["id"] {
-		t.Error("adapted table 'inventory': missing 'id' column")
+		t.Error("adapted table 't0001_ndata_inventory': missing 'id' column")
 	}
 
 	// CRUD on the adapted table should also work

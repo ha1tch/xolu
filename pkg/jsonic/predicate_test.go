@@ -156,7 +156,7 @@ func TestFilterExtract_PredicateFail(t *testing.T) {
 	if result.Passed {
 		t.Fatal("expected Passed=false, age 15 < 18")
 	}
-	if result.Data != nil && len(result.Data) > 0 {
+	if len(result.Data) > 0 {
 		t.Errorf("Data should be empty on failure, got %v", result.Data)
 	}
 }

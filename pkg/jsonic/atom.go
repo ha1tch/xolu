@@ -80,10 +80,10 @@ func fnv1aBytes(b []byte) uint64 {
 // The registry is safe for concurrent reads after initial registration.
 // Registration itself is mutex-protected.
 type AtomRegistry struct {
-	mu      sync.RWMutex
-	byName  map[string]Atom
-	byAtom  map[Atom]string // reverse lookup for collision detection
-	needsFull map[Atom]bool // atoms that require full string verification
+	mu        sync.RWMutex
+	byName    map[string]Atom
+	byAtom    map[Atom]string // reverse lookup for collision detection
+	needsFull map[Atom]bool   // atoms that require full string verification
 }
 
 // NewAtomRegistry creates a new empty registry.

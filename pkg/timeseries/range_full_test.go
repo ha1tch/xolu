@@ -13,7 +13,7 @@ import (
 
 func seedFullStore(t *testing.T, n int) (Store, RangeFullQuery) {
 	t.Helper()
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestRangeFullAggregate_MultipleQuantiles(t *testing.T) {
 }
 
 func TestRangeFullAggregate_QuantileFieldsSubset(t *testing.T) {
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,8 +237,8 @@ func TestRangeFullAggregate_ConsistentWithRangeQuantile(t *testing.T) {
 
 func TestRangeFullAggregate_EmptyRange(t *testing.T) {
 	s, fq := seedFullStore(t, 100)
-	fq.RangeAllQuery.From = fq.RangeAllQuery.From.Add(-48 * time.Hour)
-	fq.RangeAllQuery.To = fq.RangeAllQuery.From.Add(time.Hour)
+	fq.From = fq.From.Add(-48 * time.Hour)
+	fq.To = fq.From.Add(time.Hour)
 	fq.Quantiles = []float64{0.5}
 	fq.QuantileFields = []uint8{0}
 	res, err := s.RangeFullAggregate(context.Background(), fq)
@@ -255,7 +255,7 @@ func TestRangeFullAggregate_EmptyRange(t *testing.T) {
 
 func TestRangeFullAggregate_ScanLimit(t *testing.T) {
 	s, fq := seedFullStore(t, 200)
-	fq.RangeAllQuery.MaxScanEvents = 50
+	fq.MaxScanEvents = 50
 	fq.Quantiles = []float64{0.5}
 	fq.QuantileFields = []uint8{0}
 	_, err := s.RangeFullAggregate(context.Background(), fq)

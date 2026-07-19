@@ -349,7 +349,7 @@ func TestValidateMultipleErrors(t *testing.T) {
 func TestLoadSchemaFromFile(t *testing.T) {
 	t.Parallel()
 	// Create temp directory and schema file
-	tmpDir, err := os.MkdirTemp("", "olu-validation-test")
+	tmpDir, err := os.MkdirTemp("", "xolu-validation-test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}

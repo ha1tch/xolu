@@ -136,6 +136,9 @@ func translateAggregateExpr(
 	if err != nil {
 		return "", err
 	}
+	if fc.Distinct {
+		return fmt.Sprintf("%s(DISTINCT %s)", funcName, argSQL), nil
+	}
 	return fmt.Sprintf("%s(%s)", funcName, argSQL), nil
 }
 

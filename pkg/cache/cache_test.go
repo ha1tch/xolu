@@ -52,7 +52,7 @@ func TestMemoryCache_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	cache.Set(ctx, "key1", "value1", time.Minute)
-	
+
 	err := cache.Delete(ctx, "key1")
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
@@ -94,9 +94,9 @@ func TestMemoryCache_ComplexValues(t *testing.T) {
 
 	// Store a map
 	data := map[string]interface{}{
-		"id":    1,
-		"name":  "test",
-		"tags":  []string{"a", "b"},
+		"id":   1,
+		"name": "test",
+		"tags": []string{"a", "b"},
 	}
 
 	err := cache.Set(ctx, "complex", data, time.Minute)

@@ -25,7 +25,7 @@ var _ FilterableStore = (*SQLiteStore)(nil)
 func (s *SQLiteStore) ListWithFieldsAndFilter(ctx context.Context, entity string, fields []string, preds *jsonic.PredicateSet) ([]map[string]interface{}, error) {
 	// Adapted tables don't benefit — their List already reads native columns.
 	if spec := s.adapted.Get(entity); spec != nil {
-		return adaptedList(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID))
+		return adaptedList(ctx, s.readDB, spec, s.dialect)
 	}
 
 	// No predicates: fall through to field extraction without filtering.
@@ -34,19 +34,19 @@ func (s *SQLiteStore) ListWithFieldsAndFilter(ctx context.Context, entity string
 	}
 
 	// No field restriction with predicates: extract all fields but still filter.
-	// This path handles SELECT * with WHERE on blob entities.
+	// This path handles SELECT * with WHERE on blob `+s.nodesTable()+`.
 
-	listSQL := `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? ORDER BY id`
+	listSQL := `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? ORDER BY id`
 	stmt, err := s.stmtCache.Get(listSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare list: %w", err)
 	}
 
-	rows, err := stmt.QueryContext(ctx, s.tenantArgs(entity)...)
+	rows, err := stmt.QueryContext(ctx, entity)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list entities: %w", err)
+		return nil, fmt.Errorf("failed to list "+s.nodesTable()+": %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	outputFields := jsonic.MakeFilterFieldEntries(fields)
 
@@ -82,12 +82,12 @@ func (s *SQLiteStore) ListWithFieldsAndFilter(ctx context.Context, entity string
 }
 
 // ListWithFields returns all records for an entity, extracting only the
-// named fields from each JSON blob. For adapted entities this falls
+// named fields from each JSON blob. For adapted `+s.nodesTable()+` this falls
 // through to the regular List path (native columns are already efficient).
 func (s *SQLiteStore) ListWithFields(ctx context.Context, entity string, fields []string) ([]map[string]interface{}, error) {
 	// Adapted tables don't benefit — their List already reads native columns.
 	if spec := s.adapted.Get(entity); spec != nil {
-		return adaptedList(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID))
+		return adaptedList(ctx, s.readDB, spec, s.dialect)
 	}
 
 	// No field restriction: fall back to full deserialisation.
@@ -95,17 +95,17 @@ func (s *SQLiteStore) ListWithFields(ctx context.Context, entity string, fields 
 		return s.List(ctx, entity)
 	}
 
-	listSQL := `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? ORDER BY id`
+	listSQL := `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? ORDER BY id`
 	stmt, err := s.stmtCache.Get(listSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare list: %w", err)
 	}
 
-	rows, err := stmt.QueryContext(ctx, s.tenantArgs(entity)...)
+	rows, err := stmt.QueryContext(ctx, entity)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list entities: %w", err)
+		return nil, fmt.Errorf("failed to list "+s.nodesTable()+": %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Pre-compute atoms for the requested fields.
 	atomSet := buildAtomSet(fields)
@@ -141,7 +141,7 @@ func (s *SQLiteStore) QueryWithFields(ctx context.Context, sqlQuery string, args
 	if err != nil {
 		return nil, fmt.Errorf("push-down query failed: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	atomSet := buildAtomSet(fields)
 

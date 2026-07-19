@@ -11,7 +11,7 @@ import (
 
 // DefaultStmtCacheSize is the maximum number of prepared statements
 // kept in the cache before LRU eviction. Each entry holds a *sql.Stmt
-// against the reader pool. For a typical olu workload the number of
+// against the reader pool. For a typical xolu workload the number of
 // distinct SQL shapes is bounded (tens, not thousands), so 256 is
 // generous while keeping memory bounded.
 const DefaultStmtCacheSize = 256
@@ -37,9 +37,9 @@ type stmtEntry struct {
 //   - Reset() closes and removes all entries.
 type StmtCache struct {
 	mu      sync.Mutex
-	db      *sql.DB            // reader pool used to prepare statements
+	db      *sql.DB // reader pool used to prepare statements
 	stmts   map[string]*stmtEntry
-	gen     uint64             // monotonic generation counter
+	gen     uint64 // monotonic generation counter
 	maxSize int
 }
 
@@ -96,7 +96,7 @@ func (c *StmtCache) Invalidate(query string) {
 	defer c.mu.Unlock()
 
 	if entry, ok := c.stmts[query]; ok {
-		entry.stmt.Close()
+		_ = entry.stmt.Close()
 		delete(c.stmts, query)
 	}
 }
@@ -108,7 +108,7 @@ func (c *StmtCache) Reset() {
 	defer c.mu.Unlock()
 
 	for k, entry := range c.stmts {
-		entry.stmt.Close()
+		_ = entry.stmt.Close()
 		delete(c.stmts, k)
 	}
 }
@@ -120,7 +120,7 @@ func (c *StmtCache) Close() {
 	defer c.mu.Unlock()
 
 	for k, entry := range c.stmts {
-		entry.stmt.Close()
+		_ = entry.stmt.Close()
 		delete(c.stmts, k)
 	}
 }
@@ -148,7 +148,7 @@ func (c *StmtCache) evictLRU() {
 		}
 	}
 	if !first {
-		c.stmts[minKey].stmt.Close()
+		_ = c.stmts[minKey].stmt.Close()
 		delete(c.stmts, minKey)
 	}
 }

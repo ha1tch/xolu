@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"math"
 	"os"
 	"testing"
@@ -30,7 +31,7 @@ type fieldQueryEnv struct {
 func newFieldQueryEnv(t *testing.T) *fieldQueryEnv {
 	t.Helper()
 
-	tmpFile, err := os.CreateTemp("", "olu-fieldquery-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-fieldquery-*.db")
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}
@@ -76,12 +77,12 @@ func newFieldQueryEnv(t *testing.T) *fieldQueryEnv {
 			"tags":     []interface{}{"user"},
 		},
 		{
-			"name":                    "Charlie",
-			"email":                   "charlie@example.com",
-			"age":                     float64(40),
-			"active":                  true,
-			"score":                   float64(71.0),
-			"nickname":                nil,
+			"name":                     "Charlie",
+			"email":                    "charlie@example.com",
+			"age":                      float64(40),
+			"active":                   true,
+			"score":                    float64(71.0),
+			"nickname":                 nil,
 			"long_field_name_for_hash": "hashed_atom_test",
 		},
 	}
@@ -384,7 +385,7 @@ func TestQueryWithFields_BasicPushDown(t *testing.T) {
 	defer env.cleanup()
 	fq := env.fq(t)
 
-	sql := `SELECT data, _version FROM entities WHERE tenant_id = 0 AND entity_type = 'users' AND json_extract(data, '$.active') = 1`
+	sql := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = 'users' AND json_extract(data, '$.active') = 1`
 
 	results, err := fq.QueryWithFields(env.ctx, sql, nil, []string{"name", "email"})
 	if err != nil {
@@ -424,7 +425,7 @@ func TestQueryWithFields_MatchesQueryWithPlan(t *testing.T) {
 		t.Skip("store does not implement Queryable")
 	}
 
-	sql := `SELECT data, _version FROM entities WHERE tenant_id = 0 AND entity_type = 'users' AND json_extract(data, '$.age') > 25`
+	sql := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = 'users' AND json_extract(data, '$.age') > 25`
 	fields := []string{"name", "age", "score"}
 
 	selective, err := fq.QueryWithFields(env.ctx, sql, nil, fields)

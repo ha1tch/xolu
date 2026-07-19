@@ -19,8 +19,8 @@ func TestDefault(t *testing.T) {
 	if cfg.Port != 9090 {
 		t.Errorf("Expected Port 9090, got %d", cfg.Port)
 	}
-	if cfg.StorageType != "jsonfile" {
-		t.Errorf("Expected StorageType 'jsonfile', got '%s'", cfg.StorageType)
+	if cfg.StorageType != "sqlite" {
+		t.Errorf("Expected StorageType 'sqlite', got '%s'", cfg.StorageType)
 	}
 	if cfg.CacheType != "memory" {
 		t.Errorf("Expected CacheType 'memory', got '%s'", cfg.CacheType)
@@ -51,10 +51,10 @@ func TestDefault(t *testing.T) {
 func TestLoadFromEnv_Server(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_HOST", "127.0.0.1")
-	os.Setenv("OLU_PORT", "8080")
-	defer os.Unsetenv("OLU_HOST")
-	defer os.Unsetenv("OLU_PORT")
+	os.Setenv("XOLU_HOST", "127.0.0.1")
+	os.Setenv("XOLU_PORT", "8080")
+	defer os.Unsetenv("XOLU_HOST")
+	defer os.Unsetenv("XOLU_PORT")
 
 	LoadFromEnv(cfg)
 
@@ -69,22 +69,17 @@ func TestLoadFromEnv_Server(t *testing.T) {
 func TestLoadFromEnv_Storage(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_STORAGE_TYPE", "sqlite")
-	os.Setenv("OLU_DB_PATH", "/tmp/test.db")
-	os.Setenv("OLU_BASE_DIR", "/data")
-	os.Setenv("OLU_SCHEMA_NAME", "myschema")
-	defer os.Unsetenv("OLU_STORAGE_TYPE")
-	defer os.Unsetenv("OLU_DB_PATH")
-	defer os.Unsetenv("OLU_BASE_DIR")
-	defer os.Unsetenv("OLU_SCHEMA_NAME")
+	os.Setenv("XOLU_STORAGE_TYPE", "sqlite")
+	os.Setenv("XOLU_BASE_DIR", "/data")
+	os.Setenv("XOLU_SCHEMA_NAME", "myschema")
+	defer os.Unsetenv("XOLU_STORAGE_TYPE")
+	defer os.Unsetenv("XOLU_BASE_DIR")
+	defer os.Unsetenv("XOLU_SCHEMA_NAME")
 
 	LoadFromEnv(cfg)
 
 	if cfg.StorageType != "sqlite" {
 		t.Errorf("Expected StorageType 'sqlite', got '%s'", cfg.StorageType)
-	}
-	if cfg.DBPath != "/tmp/test.db" {
-		t.Errorf("Expected DBPath '/tmp/test.db', got '%s'", cfg.DBPath)
 	}
 	if cfg.BaseDir != "/data" {
 		t.Errorf("Expected BaseDir '/data', got '%s'", cfg.BaseDir)
@@ -97,14 +92,14 @@ func TestLoadFromEnv_Storage(t *testing.T) {
 func TestLoadFromEnv_Cache(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_CACHE_TYPE", "redis")
-	os.Setenv("OLU_CACHE_TTL", "600")
-	os.Setenv("OLU_REDIS_HOST", "redis.local")
-	os.Setenv("OLU_REDIS_PORT", "6380")
-	defer os.Unsetenv("OLU_CACHE_TYPE")
-	defer os.Unsetenv("OLU_CACHE_TTL")
-	defer os.Unsetenv("OLU_REDIS_HOST")
-	defer os.Unsetenv("OLU_REDIS_PORT")
+	os.Setenv("XOLU_CACHE_TYPE", "redis")
+	os.Setenv("XOLU_CACHE_TTL", "600")
+	os.Setenv("XOLU_REDIS_HOST", "redis.local")
+	os.Setenv("XOLU_REDIS_PORT", "6380")
+	defer os.Unsetenv("XOLU_CACHE_TYPE")
+	defer os.Unsetenv("XOLU_CACHE_TTL")
+	defer os.Unsetenv("XOLU_REDIS_HOST")
+	defer os.Unsetenv("XOLU_REDIS_PORT")
 
 	LoadFromEnv(cfg)
 
@@ -125,10 +120,10 @@ func TestLoadFromEnv_Cache(t *testing.T) {
 func TestLoadFromEnv_Graph(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_GRAPH_MODE", "disabled")
-	os.Setenv("OLU_GRAPH_CYCLE_DETECTION", "error")
-	defer os.Unsetenv("OLU_GRAPH_MODE")
-	defer os.Unsetenv("OLU_GRAPH_CYCLE_DETECTION")
+	os.Setenv("XOLU_GRAPH_MODE", "disabled")
+	os.Setenv("XOLU_GRAPH_CYCLE_DETECTION", "error")
+	defer os.Unsetenv("XOLU_GRAPH_MODE")
+	defer os.Unsetenv("XOLU_GRAPH_CYCLE_DETECTION")
 
 	LoadFromEnv(cfg)
 
@@ -146,16 +141,16 @@ func TestLoadFromEnv_Graph(t *testing.T) {
 func TestLoadFromEnv_Features(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_FULLTEXT_ENABLED", "true")
-	os.Setenv("OLU_CASCADING_DELETE", "yes")
-	os.Setenv("OLU_REF_EMBED_DEPTH", "5")
-	os.Setenv("OLU_MAX_ENTITY_SIZE", "2097152")
-	os.Setenv("OLU_PATCH_NULL", "delete")
-	defer os.Unsetenv("OLU_FULLTEXT_ENABLED")
-	defer os.Unsetenv("OLU_CASCADING_DELETE")
-	defer os.Unsetenv("OLU_REF_EMBED_DEPTH")
-	defer os.Unsetenv("OLU_MAX_ENTITY_SIZE")
-	defer os.Unsetenv("OLU_PATCH_NULL")
+	os.Setenv("XOLU_FULLTEXT_ENABLED", "true")
+	os.Setenv("XOLU_CASCADING_DELETE", "yes")
+	os.Setenv("XOLU_REF_EMBED_DEPTH", "5")
+	os.Setenv("XOLU_MAX_ENTITY_SIZE", "2097152")
+	os.Setenv("XOLU_PATCH_NULL", "delete")
+	defer os.Unsetenv("XOLU_FULLTEXT_ENABLED")
+	defer os.Unsetenv("XOLU_CASCADING_DELETE")
+	defer os.Unsetenv("XOLU_REF_EMBED_DEPTH")
+	defer os.Unsetenv("XOLU_MAX_ENTITY_SIZE")
+	defer os.Unsetenv("XOLU_PATCH_NULL")
 
 	LoadFromEnv(cfg)
 
@@ -179,12 +174,12 @@ func TestLoadFromEnv_Features(t *testing.T) {
 func TestLoadFromEnv_Auth(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_AUTH_TYPE", "jwt")
-	os.Setenv("OLU_JWT_SECRET", "my-secret-key")
-	os.Setenv("OLU_JWT_ISSUER", "my-app")
-	defer os.Unsetenv("OLU_AUTH_TYPE")
-	defer os.Unsetenv("OLU_JWT_SECRET")
-	defer os.Unsetenv("OLU_JWT_ISSUER")
+	os.Setenv("XOLU_AUTH_TYPE", "jwt")
+	os.Setenv("XOLU_JWT_SECRET", "my-secret-key")
+	os.Setenv("XOLU_JWT_ISSUER", "my-app")
+	defer os.Unsetenv("XOLU_AUTH_TYPE")
+	defer os.Unsetenv("XOLU_JWT_SECRET")
+	defer os.Unsetenv("XOLU_JWT_ISSUER")
 
 	LoadFromEnv(cfg)
 
@@ -202,10 +197,10 @@ func TestLoadFromEnv_Auth(t *testing.T) {
 func TestLoadFromEnv_APIKeys(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_AUTH_TYPE", "apikey")
-	os.Setenv("OLU_API_KEYS", "key1, key2, key3")
-	defer os.Unsetenv("OLU_AUTH_TYPE")
-	defer os.Unsetenv("OLU_API_KEYS")
+	os.Setenv("XOLU_AUTH_TYPE", "apikey")
+	os.Setenv("XOLU_API_KEYS", "key1, key2, key3")
+	defer os.Unsetenv("XOLU_AUTH_TYPE")
+	defer os.Unsetenv("XOLU_API_KEYS")
 
 	LoadFromEnv(cfg)
 
@@ -224,16 +219,16 @@ func TestLoadFromEnv_APIKeys(t *testing.T) {
 func TestLoadFromEnv_RateLimit(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_RATE_LIMIT_ENABLED", "true")
-	os.Setenv("OLU_RATE_LIMIT_RATE", "50")
-	os.Setenv("OLU_RATE_LIMIT_WINDOW", "30")
-	os.Setenv("OLU_RATE_LIMIT_BY_IP", "false")
-	os.Setenv("OLU_RATE_LIMIT_BY_KEY", "true")
-	defer os.Unsetenv("OLU_RATE_LIMIT_ENABLED")
-	defer os.Unsetenv("OLU_RATE_LIMIT_RATE")
-	defer os.Unsetenv("OLU_RATE_LIMIT_WINDOW")
-	defer os.Unsetenv("OLU_RATE_LIMIT_BY_IP")
-	defer os.Unsetenv("OLU_RATE_LIMIT_BY_KEY")
+	os.Setenv("XOLU_RATE_LIMIT_ENABLED", "true")
+	os.Setenv("XOLU_RATE_LIMIT_RATE", "50")
+	os.Setenv("XOLU_RATE_LIMIT_WINDOW", "30")
+	os.Setenv("XOLU_RATE_LIMIT_BY_IP", "false")
+	os.Setenv("XOLU_RATE_LIMIT_BY_KEY", "true")
+	defer os.Unsetenv("XOLU_RATE_LIMIT_ENABLED")
+	defer os.Unsetenv("XOLU_RATE_LIMIT_RATE")
+	defer os.Unsetenv("XOLU_RATE_LIMIT_WINDOW")
+	defer os.Unsetenv("XOLU_RATE_LIMIT_BY_IP")
+	defer os.Unsetenv("XOLU_RATE_LIMIT_BY_KEY")
 
 	LoadFromEnv(cfg)
 
@@ -257,8 +252,8 @@ func TestLoadFromEnv_RateLimit(t *testing.T) {
 func TestLoadFromEnv_Metrics(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_METRICS_ENABLED", "false")
-	defer os.Unsetenv("OLU_METRICS_ENABLED")
+	os.Setenv("XOLU_METRICS_ENABLED", "false")
+	defer os.Unsetenv("XOLU_METRICS_ENABLED")
 
 	LoadFromEnv(cfg)
 
@@ -270,10 +265,10 @@ func TestLoadFromEnv_Metrics(t *testing.T) {
 func TestLoadFromEnv_Debug(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_DEBUG", "1")
-	os.Setenv("OLU_DEBUG_LOCKS", "true")
-	defer os.Unsetenv("OLU_DEBUG")
-	defer os.Unsetenv("OLU_DEBUG_LOCKS")
+	os.Setenv("XOLU_DEBUG", "1")
+	os.Setenv("XOLU_DEBUG_LOCKS", "true")
+	defer os.Unsetenv("XOLU_DEBUG")
+	defer os.Unsetenv("XOLU_DEBUG_LOCKS")
 
 	LoadFromEnv(cfg)
 
@@ -315,8 +310,8 @@ func TestLoadFromEnv_InvalidPort(t *testing.T) {
 	cfg := Default()
 	originalPort := cfg.Port
 
-	os.Setenv("OLU_PORT", "invalid")
-	defer os.Unsetenv("OLU_PORT")
+	os.Setenv("XOLU_PORT", "invalid")
+	defer os.Unsetenv("XOLU_PORT")
 
 	LoadFromEnv(cfg)
 
@@ -329,8 +324,8 @@ func TestLoadFromEnv_InvalidPort(t *testing.T) {
 func TestLoadFromEnv_TenantMode(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_TENANT_MODE", "strict")
-	defer os.Unsetenv("OLU_TENANT_MODE")
+	os.Setenv("XOLU_TENANT_MODE", "strict")
+	defer os.Unsetenv("XOLU_TENANT_MODE")
 
 	LoadFromEnv(cfg)
 
@@ -388,29 +383,29 @@ func TestDefault_TuningDefaults(t *testing.T) {
 func TestLoadFromEnv_Tuning(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_SQLITE_MAX_OPEN_CONNS", "50")
-	os.Setenv("OLU_SQLITE_MAX_IDLE_CONNS", "10")
-	os.Setenv("OLU_SQLITE_CONTENTION_THRESHOLD", "80")
-	os.Setenv("OLU_SQLITE_BUSY_TIMEOUT", "10000")
-	os.Setenv("OLU_SQLITE_CACHE_SIZE", "4000")
-	os.Setenv("OLU_REDIS_POOL_SIZE", "100")
-	os.Setenv("OLU_REDIS_MIN_IDLE_CONNS", "20")
-	os.Setenv("OLU_HTTP_READ_TIMEOUT", "30")
-	os.Setenv("OLU_HTTP_WRITE_TIMEOUT", "60")
-	os.Setenv("OLU_HTTP_IDLE_TIMEOUT", "120")
-	os.Setenv("OLU_HTTP_REQUEST_TIMEOUT", "90")
+	os.Setenv("XOLU_SQLITE_MAX_OPEN_CONNS", "50")
+	os.Setenv("XOLU_SQLITE_MAX_IDLE_CONNS", "10")
+	os.Setenv("XOLU_SQLITE_CONTENTION_THRESHOLD", "80")
+	os.Setenv("XOLU_SQLITE_BUSY_TIMEOUT", "10000")
+	os.Setenv("XOLU_SQLITE_CACHE_SIZE", "4000")
+	os.Setenv("XOLU_REDIS_POOL_SIZE", "100")
+	os.Setenv("XOLU_REDIS_MIN_IDLE_CONNS", "20")
+	os.Setenv("XOLU_HTTP_READ_TIMEOUT", "30")
+	os.Setenv("XOLU_HTTP_WRITE_TIMEOUT", "60")
+	os.Setenv("XOLU_HTTP_IDLE_TIMEOUT", "120")
+	os.Setenv("XOLU_HTTP_REQUEST_TIMEOUT", "90")
 	defer func() {
-		os.Unsetenv("OLU_SQLITE_MAX_OPEN_CONNS")
-		os.Unsetenv("OLU_SQLITE_MAX_IDLE_CONNS")
-		os.Unsetenv("OLU_SQLITE_CONTENTION_THRESHOLD")
-		os.Unsetenv("OLU_SQLITE_BUSY_TIMEOUT")
-		os.Unsetenv("OLU_SQLITE_CACHE_SIZE")
-		os.Unsetenv("OLU_REDIS_POOL_SIZE")
-		os.Unsetenv("OLU_REDIS_MIN_IDLE_CONNS")
-		os.Unsetenv("OLU_HTTP_READ_TIMEOUT")
-		os.Unsetenv("OLU_HTTP_WRITE_TIMEOUT")
-		os.Unsetenv("OLU_HTTP_IDLE_TIMEOUT")
-		os.Unsetenv("OLU_HTTP_REQUEST_TIMEOUT")
+		os.Unsetenv("XOLU_SQLITE_MAX_OPEN_CONNS")
+		os.Unsetenv("XOLU_SQLITE_MAX_IDLE_CONNS")
+		os.Unsetenv("XOLU_SQLITE_CONTENTION_THRESHOLD")
+		os.Unsetenv("XOLU_SQLITE_BUSY_TIMEOUT")
+		os.Unsetenv("XOLU_SQLITE_CACHE_SIZE")
+		os.Unsetenv("XOLU_REDIS_POOL_SIZE")
+		os.Unsetenv("XOLU_REDIS_MIN_IDLE_CONNS")
+		os.Unsetenv("XOLU_HTTP_READ_TIMEOUT")
+		os.Unsetenv("XOLU_HTTP_WRITE_TIMEOUT")
+		os.Unsetenv("XOLU_HTTP_IDLE_TIMEOUT")
+		os.Unsetenv("XOLU_HTTP_REQUEST_TIMEOUT")
 	}()
 
 	LoadFromEnv(cfg)
@@ -517,7 +512,6 @@ func TestValidate_EnumFields(t *testing.T) {
 		mutate  func(*Config)
 		wantErr string
 	}{
-		{"valid StorageType jsonfile", func(c *Config) { c.StorageType = "jsonfile" }, ""},
 		{"valid StorageType sqlite", func(c *Config) { c.StorageType = "sqlite" }, ""},
 		{"invalid StorageType", func(c *Config) { c.StorageType = "postgres" }, "StorageType"},
 
@@ -746,14 +740,6 @@ func TestValidate_CrossFieldWarnings(t *testing.T) {
 			"RedisMinIdleConns",
 		},
 		{
-			"sqlite tuning on jsonfile backend",
-			func(c *Config) {
-				c.StorageType = "jsonfile"
-				c.SQLiteMaxOpenConns = 64
-			},
-			"SQLite tuning",
-		},
-		{
 			"redis tuning on memory cache",
 			func(c *Config) {
 				c.CacheType = "memory"
@@ -844,24 +830,24 @@ func searchString(s, substr string) bool {
 
 // --- Timeseries guardrail config tests ---
 
-// TestLoadFromEnv_TimeseriesGuardrails verifies that all six OLU_TS_* env
+// TestLoadFromEnv_TimeseriesGuardrails verifies that all six XOLU_TS_* env
 // vars are parsed and applied correctly.
 func TestLoadFromEnv_TimeseriesGuardrails(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("OLU_TS_QUERY_TIMEOUT", "60")
-	os.Setenv("OLU_TS_MAX_QUERY_EVENTS", "500")
-	os.Setenv("OLU_TS_MAX_SCAN_EVENTS", "20000")
-	os.Setenv("OLU_TS_MAX_RANGE_DAYS", "30")
-	os.Setenv("OLU_TS_MAX_BATCH_SIZE", "100")
-	os.Setenv("OLU_TS_MAX_RESPONSE_BYTES", "1048576")
+	os.Setenv("XOLU_TS_QUERY_TIMEOUT", "60")
+	os.Setenv("XOLU_TS_MAX_QUERY_EVENTS", "500")
+	os.Setenv("XOLU_TS_MAX_SCAN_EVENTS", "20000")
+	os.Setenv("XOLU_TS_MAX_RANGE_DAYS", "30")
+	os.Setenv("XOLU_TS_MAX_BATCH_SIZE", "100")
+	os.Setenv("XOLU_TS_MAX_RESPONSE_BYTES", "1048576")
 	defer func() {
-		os.Unsetenv("OLU_TS_QUERY_TIMEOUT")
-		os.Unsetenv("OLU_TS_MAX_QUERY_EVENTS")
-		os.Unsetenv("OLU_TS_MAX_SCAN_EVENTS")
-		os.Unsetenv("OLU_TS_MAX_RANGE_DAYS")
-		os.Unsetenv("OLU_TS_MAX_BATCH_SIZE")
-		os.Unsetenv("OLU_TS_MAX_RESPONSE_BYTES")
+		os.Unsetenv("XOLU_TS_QUERY_TIMEOUT")
+		os.Unsetenv("XOLU_TS_MAX_QUERY_EVENTS")
+		os.Unsetenv("XOLU_TS_MAX_SCAN_EVENTS")
+		os.Unsetenv("XOLU_TS_MAX_RANGE_DAYS")
+		os.Unsetenv("XOLU_TS_MAX_BATCH_SIZE")
+		os.Unsetenv("XOLU_TS_MAX_RESPONSE_BYTES")
 	}()
 
 	LoadFromEnv(cfg)
@@ -935,19 +921,19 @@ func TestValidate_TimeseriesConditionals(t *testing.T) {
 			"", // path mode + timeseries is valid; strict mode is no longer required
 		},
 		{
-			"ts enabled without sqlite storage",
+			"ts enabled with invalid block size",
 			func(c *Config) {
 				c.TimeseriesEnabled = true
-				c.StorageType = "jsonfile"
+				c.StorageType = "sqlite"
 				c.TenantMode = "strict"
 				c.TSMemtableSize = 64 * 1024 * 1024
-				c.TSBlockSize = 32768
+				c.TSBlockSize = -1 // invalid — must be > 0
 				c.TSL0CompactionThreshold = 4
 				c.TSMaxOpenFiles = 500
 				c.TSDefaultRetentionDays = 90
 				c.TSCompactionIntervalSecs = 3600
 			},
-			"StorageType",
+			"TSBlockSize",
 		},
 		{
 			"ts enabled, all valid",
@@ -1005,8 +991,8 @@ func TestValidate_TimeseriesConditionals(t *testing.T) {
 
 func TestReadSecret_EnvVarTakesPrecedence(t *testing.T) {
 	// Env var present — must be returned without touching the filesystem.
-	t.Setenv("OLU_INTERNAL_TOKEN", "from-env")
-	got := readSecret("olu_internal_token")
+	t.Setenv("XOLU_INTERNAL_TOKEN", "from-env")
+	got := readSecret("xolu_internal_token")
 	if got != "from-env" {
 		t.Errorf("expected 'from-env', got %q", got)
 	}
@@ -1036,14 +1022,14 @@ func TestReadSecret_FallsBackToFile(t *testing.T) {
 func TestReadSecret_EmptyWhenNeitherSet(t *testing.T) {
 	// Neither env var nor secret file — must return empty string.
 	// Use a name that is guaranteed not to be set in the test environment.
-	got := readSecret("olu_nonexistent_secret_xyzzy")
+	got := readSecret("xolu_nonexistent_secret_xyzzy")
 	if got != "" {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
 
 func TestLoadFromEnv_InternalToken_FromEnv(t *testing.T) {
-	t.Setenv("OLU_INTERNAL_TOKEN", "test-token-from-env")
+	t.Setenv("XOLU_INTERNAL_TOKEN", "test-token-from-env")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.InternalToken != "test-token-from-env" {
@@ -1052,7 +1038,7 @@ func TestLoadFromEnv_InternalToken_FromEnv(t *testing.T) {
 }
 
 func TestLoadFromEnv_OLU_ADDR(t *testing.T) {
-	t.Setenv("OLU_ADDR", "0.0.0.0:8080")
+	t.Setenv("XOLU_ADDR", "0.0.0.0:8080")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.Host != "0.0.0.0" {
@@ -1064,10 +1050,10 @@ func TestLoadFromEnv_OLU_ADDR(t *testing.T) {
 }
 
 func TestLoadFromEnv_OLU_HOST_overrides_OLU_ADDR(t *testing.T) {
-	// OLU_HOST/OLU_PORT must take precedence over OLU_ADDR.
-	t.Setenv("OLU_ADDR", "0.0.0.0:8080")
-	t.Setenv("OLU_HOST", "127.0.0.1")
-	t.Setenv("OLU_PORT", "9999")
+	// XOLU_HOST/XOLU_PORT must take precedence over XOLU_ADDR.
+	t.Setenv("XOLU_ADDR", "0.0.0.0:8080")
+	t.Setenv("XOLU_HOST", "127.0.0.1")
+	t.Setenv("XOLU_PORT", "9999")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.Host != "127.0.0.1" {
@@ -1079,7 +1065,7 @@ func TestLoadFromEnv_OLU_HOST_overrides_OLU_ADDR(t *testing.T) {
 }
 
 func TestLoadFromEnv_OLU_METRICS_ADDR(t *testing.T) {
-	t.Setenv("OLU_METRICS_ADDR", "0.0.0.0:9091")
+	t.Setenv("XOLU_METRICS_ADDR", "0.0.0.0:9091")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.MetricsHost != "0.0.0.0" {
@@ -1090,38 +1076,19 @@ func TestLoadFromEnv_OLU_METRICS_ADDR(t *testing.T) {
 	}
 }
 
-func TestLoadFromEnv_OLU_SQLITE_PATH(t *testing.T) {
-	t.Setenv("OLU_SQLITE_PATH", "/data/olu/registry.db")
-	cfg := Default()
-	LoadFromEnv(cfg)
-	if cfg.DBPath != "/data/olu/registry.db" {
-		t.Errorf("DBPath: want '/data/olu/registry.db', got %q", cfg.DBPath)
-	}
-}
-
-func TestLoadFromEnv_OLU_SQLITE_PATH_overrides_OLU_DB_PATH(t *testing.T) {
-	t.Setenv("OLU_DB_PATH", "/old/path.db")
-	t.Setenv("OLU_SQLITE_PATH", "/new/path.db")
-	cfg := Default()
-	LoadFromEnv(cfg)
-	if cfg.DBPath != "/new/path.db" {
-		t.Errorf("DBPath: want '/new/path.db', got %q", cfg.DBPath)
-	}
-}
-
 func TestLoadFromEnv_OLU_LOG_LEVEL(t *testing.T) {
 	cases := []struct{ input, want string }{
 		{"debug", "debug"},
 		{"info", "info"},
 		{"warn", "warn"},
 		{"error", "error"},
-		{"DEBUG", "debug"},  // case-insensitive
+		{"DEBUG", "debug"}, // case-insensitive
 		{"WARN", "warn"},
 		{"invalid", "info"}, // unknown value ignored; default retained
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
-			t.Setenv("OLU_LOG_LEVEL", tc.input)
+			t.Setenv("XOLU_LOG_LEVEL", tc.input)
 			cfg := Default()
 			LoadFromEnv(cfg)
 			if cfg.LogLevel != tc.want {
@@ -1132,8 +1099,8 @@ func TestLoadFromEnv_OLU_LOG_LEVEL(t *testing.T) {
 }
 
 func TestLoadFromEnv_OLU_DEBUG_compat(t *testing.T) {
-	// OLU_DEBUG=true should set LogLevel to "debug".
-	t.Setenv("OLU_DEBUG", "true")
+	// XOLU_DEBUG=true should set LogLevel to "debug".
+	t.Setenv("XOLU_DEBUG", "true")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.LogLevel != "debug" {
@@ -1142,12 +1109,143 @@ func TestLoadFromEnv_OLU_DEBUG_compat(t *testing.T) {
 }
 
 func TestLoadFromEnv_OLU_LOG_LEVEL_overrides_OLU_DEBUG(t *testing.T) {
-	// OLU_LOG_LEVEL must win even when OLU_DEBUG=true is also set.
-	t.Setenv("OLU_DEBUG", "true")
-	t.Setenv("OLU_LOG_LEVEL", "warn")
+	// XOLU_LOG_LEVEL must win even when XOLU_DEBUG=true is also set.
+	t.Setenv("XOLU_DEBUG", "true")
+	t.Setenv("XOLU_LOG_LEVEL", "warn")
 	cfg := Default()
 	LoadFromEnv(cfg)
 	if cfg.LogLevel != "warn" {
 		t.Errorf("LogLevel: want 'warn', got %q", cfg.LogLevel)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Default values for fields added in patched92–patched111
+// ---------------------------------------------------------------------------
+
+func TestDefault_NewFields(t *testing.T) {
+	cfg := Default()
+
+	// Dynamic configuration
+	if cfg.DynConfigEnabled {
+		t.Error("DynConfigEnabled: want false")
+	}
+	if cfg.DynConfigAPIEnabled {
+		t.Error("DynConfigAPIEnabled: want false")
+	}
+	if cfg.DynConfigReloadSecs != 30 {
+		t.Errorf("DynConfigReloadSecs: want 30, got %d", cfg.DynConfigReloadSecs)
+	}
+
+	// Blob GC
+	if cfg.BlobGCEnabled {
+		t.Error("BlobGCEnabled: want false")
+	}
+	if cfg.BlobGCIntervalSecs != 3600 {
+		t.Errorf("BlobGCIntervalSecs: want 3600, got %d", cfg.BlobGCIntervalSecs)
+	}
+	if cfg.BlobGCGracePeriodSecs != 600 {
+		t.Errorf("BlobGCGracePeriodSecs: want 600, got %d", cfg.BlobGCGracePeriodSecs)
+	}
+
+	// Blob quota and usage sampling
+	if cfg.BlobMaxTotalBytes != 0 {
+		t.Errorf("BlobMaxTotalBytes: want 0 (no limit), got %d", cfg.BlobMaxTotalBytes)
+	}
+	if cfg.BlobUsageSampleIntervalSecs != 300 {
+		t.Errorf("BlobUsageSampleIntervalSecs: want 300, got %d", cfg.BlobUsageSampleIntervalSecs)
+	}
+
+	// S3 auth
+	if cfg.S3RequireAuth {
+		t.Error("S3RequireAuth: want false")
+	}
+
+	// Per-file tenant isolation
+	if cfg.SQLitePerFileTenants {
+		t.Error("SQLitePerFileTenants: want false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Env-var parsing for fields added in patched92–patched111
+// ---------------------------------------------------------------------------
+
+func TestLoadFromEnv_DynConfig(t *testing.T) {
+	t.Setenv("XOLU_DYNCONFIG_ENABLED", "true")
+	t.Setenv("XOLU_DYNCONFIG_FILE", "/tmp/test-dynconfig.json")
+	t.Setenv("XOLU_DYNCONFIG_RELOAD_INTERVAL", "60")
+	t.Setenv("XOLU_DYNCONFIG_API_ENABLED", "true")
+
+	cfg := Default()
+	LoadFromEnv(cfg)
+
+	if !cfg.DynConfigEnabled {
+		t.Error("DynConfigEnabled: want true")
+	}
+	if cfg.DynConfigFile != "/tmp/test-dynconfig.json" {
+		t.Errorf("DynConfigFile: want /tmp/test-dynconfig.json, got %q", cfg.DynConfigFile)
+	}
+	if cfg.DynConfigReloadSecs != 60 {
+		t.Errorf("DynConfigReloadSecs: want 60, got %d", cfg.DynConfigReloadSecs)
+	}
+	if !cfg.DynConfigAPIEnabled {
+		t.Error("DynConfigAPIEnabled: want true")
+	}
+}
+
+func TestLoadFromEnv_BlobGC(t *testing.T) {
+	t.Setenv("XOLU_BLOB_GC_ENABLED", "true")
+	t.Setenv("XOLU_BLOB_GC_INTERVAL", "7200")
+	t.Setenv("XOLU_BLOB_GC_GRACE_PERIOD", "120")
+
+	cfg := Default()
+	LoadFromEnv(cfg)
+
+	if !cfg.BlobGCEnabled {
+		t.Error("BlobGCEnabled: want true")
+	}
+	if cfg.BlobGCIntervalSecs != 7200 {
+		t.Errorf("BlobGCIntervalSecs: want 7200, got %d", cfg.BlobGCIntervalSecs)
+	}
+	if cfg.BlobGCGracePeriodSecs != 120 {
+		t.Errorf("BlobGCGracePeriodSecs: want 120, got %d", cfg.BlobGCGracePeriodSecs)
+	}
+}
+
+func TestLoadFromEnv_BlobQuotaAndUsage(t *testing.T) {
+	t.Setenv("XOLU_BLOB_MAX_TOTAL_BYTES", "10485760")
+	t.Setenv("XOLU_BLOB_USAGE_INTERVAL", "60")
+
+	cfg := Default()
+	LoadFromEnv(cfg)
+
+	if cfg.BlobMaxTotalBytes != 10485760 {
+		t.Errorf("BlobMaxTotalBytes: want 10485760, got %d", cfg.BlobMaxTotalBytes)
+	}
+	if cfg.BlobUsageSampleIntervalSecs != 60 {
+		t.Errorf("BlobUsageSampleIntervalSecs: want 60, got %d", cfg.BlobUsageSampleIntervalSecs)
+	}
+}
+
+func TestLoadFromEnv_S3RequireAuth(t *testing.T) {
+	t.Setenv("XOLU_S3_REQUIRE_AUTH", "true")
+
+	cfg := Default()
+	LoadFromEnv(cfg)
+
+	if !cfg.S3RequireAuth {
+		t.Error("S3RequireAuth: want true")
+	}
+}
+
+func TestLoadFromEnv_SQLitePerFileTenants(t *testing.T) {
+	t.Setenv("XOLU_SQLITE_PER_FILE_TENANTS", "true")
+
+	cfg := Default()
+	LoadFromEnv(cfg)
+
+	if !cfg.SQLitePerFileTenants {
+		t.Error("SQLitePerFileTenants: want true")
 	}
 }

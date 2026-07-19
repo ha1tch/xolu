@@ -9,7 +9,7 @@ package server_test
 // Systematic coverage of every writeError call in ts_handlers.go.
 // Each test targets a specific error branch and asserts:
 //   - the correct HTTP status code
-//   - the correct OLU-TS error code in the JSON body
+//   - the correct XOLU-TS error code in the JSON body
 //
 // Tests use the shared tsEnv harness from ts_e2e_test.go.
 
@@ -36,7 +36,7 @@ func tsErrMsg(result map[string]interface{}) string { //nolint:unused
 	return msg
 }
 
-// --- OLU-TS002: timeseries not enabled ---
+// --- XOLU-TS002: timeseries not enabled ---
 
 func TestTSError_TSDisabled_Provision(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) { cfg.TimeseriesEnabled = false })
@@ -49,7 +49,7 @@ func TestTSError_TSDisabled_Provision(t *testing.T) {
 	}
 }
 
-// --- OLU-TS003: tenant not provisioned ---
+// --- XOLU-TS003: tenant not provisioned ---
 
 func TestTSError_NotProvisioned_Append(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -60,12 +60,12 @@ func TestTSError_NotProvisioned_Append(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", status)
 	}
-	if code := tsErrCode(result); code != "OLU-TS003" {
-		t.Errorf("code %q, want OLU-TS003", code)
+	if code := tsErrCode(result); code != "XOLU-TS003" {
+		t.Errorf("code %q, want XOLU-TS003", code)
 	}
 }
 
-// --- OLU-TS004: timeline not defined ---
+// --- XOLU-TS004: timeline not defined ---
 
 func TestTSError_TimelineNotDefined(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -78,12 +78,12 @@ func TestTSError_TimelineNotDefined(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", status)
 	}
-	if code := tsErrCode(result); code != "OLU-TS004" {
-		t.Errorf("code %q, want OLU-TS004", code)
+	if code := tsErrCode(result); code != "XOLU-TS004" {
+		t.Errorf("code %q, want XOLU-TS004", code)
 	}
 }
 
-// --- OLU-TS005: pre-epoch timestamp ---
+// --- XOLU-TS005: pre-epoch timestamp ---
 
 func TestTSError_PreEpochTimestamp(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -96,12 +96,12 @@ func TestTSError_PreEpochTimestamp(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS005" {
-		t.Errorf("code %q, want OLU-TS005", code)
+	if code := tsErrCode(result); code != "XOLU-TS005" {
+		t.Errorf("code %q, want XOLU-TS005", code)
 	}
 }
 
-// --- OLU-TS005: invalid timestamp format ---
+// --- XOLU-TS005: invalid timestamp format ---
 
 func TestTSError_InvalidTimestampFormat(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -114,12 +114,12 @@ func TestTSError_InvalidTimestampFormat(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS005" {
-		t.Errorf("code %q, want OLU-TS005", code)
+	if code := tsErrCode(result); code != "XOLU-TS005" {
+		t.Errorf("code %q, want XOLU-TS005", code)
 	}
 }
 
-// --- OLU-TS006: batch too large ---
+// --- XOLU-TS006: batch too large ---
 
 func TestTSError_BatchTooLarge(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) { cfg.TSMaxBatchSize = 3 })
@@ -140,12 +140,12 @@ func TestTSError_BatchTooLarge(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS006" {
-		t.Errorf("code %q, want OLU-TS006", code)
+	if code := tsErrCode(result); code != "XOLU-TS006" {
+		t.Errorf("code %q, want XOLU-TS006", code)
 	}
 }
 
-// --- OLU-TS007: dims mismatch on append ---
+// --- XOLU-TS007: dims mismatch on append ---
 
 func TestTSError_DimsMismatchOnAppend(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -159,12 +159,12 @@ func TestTSError_DimsMismatchOnAppend(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS007" {
-		t.Errorf("code %q, want OLU-TS007", code)
+	if code := tsErrCode(result); code != "XOLU-TS007" {
+		t.Errorf("code %q, want XOLU-TS007", code)
 	}
 }
 
-// --- OLU-TS008: unknown aggregate function ---
+// --- XOLU-TS008: unknown aggregate function ---
 
 func TestTSError_UnknownAggFunction(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -179,12 +179,12 @@ func TestTSError_UnknownAggFunction(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS008" {
-		t.Errorf("code %q, want OLU-TS008", code)
+	if code := tsErrCode(result); code != "XOLU-TS008" {
+		t.Errorf("code %q, want XOLU-TS008", code)
 	}
 }
 
-// --- OLU-TS009: num_field out of range ---
+// --- XOLU-TS009: num_field out of range ---
 
 func TestTSError_NumFieldOutOfRange(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -199,12 +199,12 @@ func TestTSError_NumFieldOutOfRange(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS009" {
-		t.Errorf("code %q, want OLU-TS009", code)
+	if code := tsErrCode(result); code != "XOLU-TS009" {
+		t.Errorf("code %q, want XOLU-TS009", code)
 	}
 }
 
-// --- OLU-TS010: invalid interval ---
+// --- XOLU-TS010: invalid interval ---
 
 func TestTSError_InvalidInterval(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -219,12 +219,12 @@ func TestTSError_InvalidInterval(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS010" {
-		t.Errorf("code %q, want OLU-TS010", code)
+	if code := tsErrCode(result); code != "XOLU-TS010" {
+		t.Errorf("code %q, want XOLU-TS010", code)
 	}
 }
 
-// --- OLU-TS011: query range too large ---
+// --- XOLU-TS011: query range too large ---
 
 func TestTSError_QueryRangeTooLarge(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) { cfg.TSMaxRangeDays = 7 })
@@ -237,12 +237,12 @@ func TestTSError_QueryRangeTooLarge(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS011" {
-		t.Errorf("code %q, want OLU-TS011", code)
+	if code := tsErrCode(result); code != "XOLU-TS011" {
+		t.Errorf("code %q, want XOLU-TS011", code)
 	}
 }
 
-// --- OLU-TS016: dims change after first write ---
+// --- XOLU-TS016: dims change after first write ---
 
 func TestTSError_DimsImmutableAfterFirstWrite(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -254,18 +254,18 @@ func TestTSError_DimsImmutableAfterFirstWrite(t *testing.T) {
 		"timeline": 1, "dims": []interface{}{1, 2}, "time": "2026-01-01T00:00:00Z",
 	})
 
-	status, result := env.do("POST", env.tsURL("t", "/timelines"), map[string]interface{}{
+	status, result := env.do("POST", env.tsURL("t", "/tl/def"), map[string]interface{}{
 		"id": 1, "dims": 3,
 	})
 	if status != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS016" {
-		t.Errorf("code %q, want OLU-TS016", code)
+	if code := tsErrCode(result); code != "XOLU-TS016" {
+		t.Errorf("code %q, want XOLU-TS016", code)
 	}
 }
 
-// --- OLU-TS017: NaN in numeric field ---
+// --- XOLU-TS017: NaN in numeric field ---
 
 func TestTSError_NaNInNums(t *testing.T) {
 	env := setupTSServer(t, nil)
@@ -283,20 +283,20 @@ func TestTSError_NaNInNums(t *testing.T) {
 	}
 }
 
-// --- OLU-TS018: reserved timeline ID ---
+// --- XOLU-TS018: reserved timeline ID ---
 
 func TestTSError_ReservedTimelineID(t *testing.T) {
 	env := setupTSServer(t, nil)
 	env.registerTenant("t")
 	env.provision("t")
-	status, result := env.do("POST", env.tsURL("t", "/timelines"), map[string]interface{}{
+	status, result := env.do("POST", env.tsURL("t", "/tl/def"), map[string]interface{}{
 		"id": 0, "dims": 1,
 	})
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS018" {
-		t.Errorf("code %q, want OLU-TS018", code)
+	if code := tsErrCode(result); code != "XOLU-TS018" {
+		t.Errorf("code %q, want XOLU-TS018", code)
 	}
 }
 
@@ -309,8 +309,8 @@ func TestTSError_ResponseShape(t *testing.T) {
 	env.registerTenant("t")
 	env.provision("t")
 
-	// Trigger OLU-TS018 to get a predictable error.
-	_, result := env.do("POST", env.tsURL("t", "/timelines"), map[string]interface{}{
+	// Trigger XOLU-TS018 to get a predictable error.
+	_, result := env.do("POST", env.tsURL("t", "/tl/def"), map[string]interface{}{
 		"id": 0, "dims": 1,
 	})
 
@@ -360,14 +360,14 @@ func TestTSError_MalformedBody_Define(t *testing.T) {
 	}{
 		{"not json", `not-json`, http.StatusBadRequest},
 		{"empty body", ``, http.StatusBadRequest},
-		// missing dims: dims=0 fails store validation; the handler maps all
-		// DefineTimeline errors to 409. This could be 400 but handler
-		// doesn't discriminate — test matches actual behaviour.
-		{"missing dims", `{"id":1}`, http.StatusConflict},
+		// missing dims: dims defaults to 0, which is below MinDims. The handler
+		// now validates dims range before narrowing (D-006) and returns 400 for
+		// an out-of-range request, rather than mapping it to a 409 conflict.
+		{"missing dims", `{"id":1}`, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status := rawPost(env.tsURL("t", "/timelines"), tc.body)
+			status := rawPost(env.tsURL("t", "/tl/def"), tc.body)
 			if status != tc.want {
 				t.Errorf("%s: expected %d, got %d", tc.name, tc.want, status)
 			}
@@ -409,7 +409,7 @@ func TestTSError_GetTimeline_NotFound(t *testing.T) {
 	env := setupTSServer(t, nil)
 	env.registerTenant("t")
 	env.provision("t")
-	status, result := env.do("GET", env.tsURL("t", "/timelines/42"), nil)
+	status, result := env.do("GET", env.tsURL("t", "/tl/42"), nil)
 	if status != http.StatusNotFound {
 		t.Errorf("expected 404, got %d: %v", status, result)
 	}
@@ -422,7 +422,7 @@ func TestTSError_PatchTimeline_BadBody(t *testing.T) {
 	env.registerTenant("t")
 	env.provision("t")
 	env.defineTimeline("t", map[string]interface{}{"id": 1, "dims": 1})
-	req, _ := http.NewRequest("PATCH", env.tsURL("t", "/timelines/1"), strings.NewReader("not-json"))
+	req, _ := http.NewRequest("PATCH", env.tsURL("t", "/tl/1"), strings.NewReader("not-json"))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -460,5 +460,3 @@ func TestTSError_Latest_MissingParams(t *testing.T) {
 		t.Errorf("expected 400, got %d", status)
 	}
 }
-
-

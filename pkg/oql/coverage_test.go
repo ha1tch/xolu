@@ -133,22 +133,21 @@ func TestEngine_ExecuteWithTenant(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test with empty tenant (should work, scoping is optional)
-	result, err := engine.ExecuteWithTenant(ctx, "SELECT * FROM items", "")
+	// Unscoped execution (no tenant).
+	result, err := engine.Execute(ctx, "SELECT * FROM items")
 	if err != nil {
-		t.Fatalf("ExecuteWithTenant failed: %v", err)
+		t.Fatalf("Execute failed: %v", err)
 	}
 	if len(result.Rows) != 5 {
 		t.Errorf("Expected 5 rows, got %d", len(result.Rows))
 	}
 
-	// Test with specific tenant
-	result, err = engine.ExecuteWithTenant(ctx, "SELECT * FROM items WHERE status = 'active'", "tenant1")
+	// Tenant-scoped execution via ExecuteWithStore.
+	result, err = engine.ExecuteWithStore(ctx, "SELECT * FROM items WHERE status = 'active'", store)
 	if err != nil {
-		t.Fatalf("ExecuteWithTenant with tenant failed: %v", err)
+		t.Fatalf("ExecuteWithStore with store failed: %v", err)
 	}
 	_ = result
-	_ = store
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +186,7 @@ func TestToFloatSafe(t *testing.T) {
 		{int(42), 42.0, true},
 		{int64(100), 100.0, true},
 		{float32(2.5), 2.5, true},
-		{"3.14", 3.14, true},    // toFloatSafe now parses numeric strings
+		{"3.14", 3.14, true}, // toFloatSafe now parses numeric strings
 		{nil, 0, false},
 		{"not a number", 0, false},
 	}

@@ -7,6 +7,8 @@ package cache
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -140,16 +142,83 @@ func TestMemoryCache_Close(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RedisCache — requires a running Redis instance
+// RedisCache — integration tests
 // ---------------------------------------------------------------------------
+//
+// newTestRedisCache returns a *RedisCache for testing.
+//
+// Resolution order for the Redis endpoint (first match wins):
+//
+//  1. XOLU_REDIS_HOST / XOLU_REDIS_PORT — the variables xolu itself reads when
+//     configured with CacheType=redis. Set these to run the cache tests against
+//     the same Redis instance the server would use.
+//
+//  2. REDIS_ADDR — convenience variable accepted by many Redis clients and CI
+//     setups; format "host:port".
+//
+//  3. In-process slabbis server — used when neither variable is set, so the
+//     tests run without any external dependency.
+//
+// Examples:
+//
+//	# xolu-native variables (matches production config)
+//	XOLU_REDIS_HOST=redis.example.com XOLU_REDIS_PORT=6380 go test ./pkg/cache/...
+//
+//	# convenience single-variable form
+//	REDIS_ADDR=localhost:6379 go test ./pkg/cache/...
+//
+//	# default: no env vars, uses slabbis in-process
+//	go test ./pkg/cache/...
 
 func newTestRedisCache(t *testing.T) *RedisCache {
 	t.Helper()
-	rc, err := NewRedisCache("localhost", 6379, time.Minute, 0, 0)
-	if err != nil {
-		t.Skipf("Redis not available, skipping: %v", err)
+
+	host, port, source := resolveRedisAddr()
+	if source != "" {
+		rc, err := NewRedisCache(host, port, time.Minute, 0, 0)
+		if err != nil {
+			t.Fatalf("%s set but could not connect to %s:%d: %v", source, host, port, err)
+		}
+		t.Logf("using real Redis at %s:%d (via %s)", host, port, source)
+		t.Cleanup(func() { rc.Close() })
+		return rc
 	}
+
+	rc, _ := startSlabbis(t)
 	return rc
+}
+
+// resolveRedisAddr returns (host, port, sourceDescription) for the Redis
+// endpoint to use in tests. sourceDescription is empty when no env var is set.
+// Resolution order: XOLU_REDIS_HOST/XOLU_REDIS_PORT → REDIS_ADDR → ("", 0, "").
+func resolveRedisAddr() (host string, port int, source string) {
+	// 1. xolu-native variables — highest priority
+	oluHost := os.Getenv("XOLU_REDIS_HOST")
+	oluPort := os.Getenv("XOLU_REDIS_PORT")
+	if oluHost != "" || oluPort != "" {
+		h := oluHost
+		if h == "" {
+			h = "localhost"
+		}
+		p := 6379
+		if oluPort != "" {
+			fmt.Sscan(oluPort, &p)
+		}
+		return h, p, "XOLU_REDIS_HOST/XOLU_REDIS_PORT"
+	}
+
+	// 2. Generic REDIS_ADDR convenience variable
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		h, portStr, err := net.SplitHostPort(addr)
+		if err == nil {
+			p := 6379
+			fmt.Sscan(portStr, &p)
+			return h, p, "REDIS_ADDR"
+		}
+	}
+
+	// 3. No env var set — caller should use slabbis
+	return "", 0, ""
 }
 
 func TestRedisCache_SetGetDelete(t *testing.T) {
@@ -265,7 +334,7 @@ func TestRedisCache_DeletePattern(t *testing.T) {
 	rc.Set(ctx, "test:redis:other:1", "keep", time.Minute)
 
 	// Delete pattern
-	err := rc.DeletePattern(ctx, "test:redis:pattern:")
+	err := rc.DeletePattern(ctx, "test:redis:pattern:*")
 	if err != nil {
 		t.Fatalf("DeletePattern failed: %v", err)
 	}

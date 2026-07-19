@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	ot "github.com/ha1tch/xolu/pkg/xolutime"
 )
 
 // JobStatus represents the status of a query job
@@ -24,15 +25,15 @@ const (
 
 // Job represents an async query job
 type Job struct {
-	ID        string                   `json:"id"`
-	Query     string                   `json:"query"`
-	Status    JobStatus                `json:"status"`
-	Result    *QueryResult             `json:"result,omitempty"`
-	Error     string                   `json:"error,omitempty"`
-	CreatedAt time.Time                `json:"created_at"`
-	StartedAt *time.Time               `json:"started_at,omitempty"`
-	EndedAt   *time.Time               `json:"ended_at,omitempty"`
-	MaxDepth  int                      `json:"max_depth"`
+	ID        string       `json:"id"`
+	Query     string       `json:"query"`
+	Status    JobStatus    `json:"status"`
+	Result    *QueryResult `json:"result,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	CreatedAt time.Time    `json:"created_at"`
+	StartedAt *time.Time   `json:"started_at,omitempty"`
+	EndedAt   *time.Time   `json:"ended_at,omitempty"`
+	MaxDepth  int          `json:"max_depth"`
 }
 
 // JobManager manages async query jobs
@@ -76,7 +77,7 @@ func (jm *JobManager) SetLimits(limits GraphLimits) {
 // Submit submits a new query job and returns immediately
 func (jm *JobManager) Submit(queryStr string, maxDepth int) (*Job, error) {
 	// Validate query syntax first
-	_, err := jm.parser.Parse(queryStr)
+	_, _, err := jm.parser.Parse(queryStr)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +86,7 @@ func (jm *JobManager) Submit(queryStr string, maxDepth int) (*Job, error) {
 		ID:        uuid.New().String(),
 		Query:     queryStr,
 		Status:    StatusPending,
-		CreatedAt: time.Now(),
+		CreatedAt: ot.Now().Time(),
 		MaxDepth:  maxDepth,
 	}
 
@@ -101,12 +102,12 @@ func (jm *JobManager) Submit(queryStr string, maxDepth int) (*Job, error) {
 
 // ExecuteSync executes a query synchronously
 func (jm *JobManager) ExecuteSync(ctx context.Context, queryStr string, maxDepth int) (*QueryResult, error) {
-	query, err := jm.parser.Parse(queryStr)
+	query, hint, err := jm.parser.Parse(queryStr)
 	if err != nil {
 		return nil, err
 	}
 	// ExecuteWithDepth is concurrent-safe; it does not mutate shared executor state.
-	return jm.executor.ExecuteWithDepth(ctx, query, maxDepth)
+	return jm.executor.ExecuteWithDepth(ctx, query, hint, maxDepth)
 }
 
 // GetJob retrieves a job by ID
@@ -143,11 +144,11 @@ func (jm *JobManager) GetJobResult(id string) (*QueryResult, error) {
 func (jm *JobManager) executeJob(job *Job) {
 	jm.mu.Lock()
 	job.Status = StatusRunning
-	now := time.Now()
+	now := ot.Now().Time()
 	job.StartedAt = &now
 	jm.mu.Unlock()
 
-	query, err := jm.parser.Parse(job.Query)
+	query, hint, err := jm.parser.Parse(job.Query)
 	if err != nil {
 		jm.failJob(job, err.Error())
 		return
@@ -158,7 +159,7 @@ func (jm *JobManager) executeJob(job *Job) {
 	defer cancel()
 
 	// ExecuteWithDepth is concurrent-safe; it does not mutate shared executor state.
-	result, err := jm.executor.ExecuteWithDepth(ctx, query, job.MaxDepth)
+	result, err := jm.executor.ExecuteWithDepth(ctx, query, hint, job.MaxDepth)
 
 	if err != nil {
 		jm.failJob(job, err.Error())
@@ -168,7 +169,7 @@ func (jm *JobManager) executeJob(job *Job) {
 	jm.mu.Lock()
 	job.Status = StatusCompleted
 	job.Result = result
-	endTime := time.Now()
+	endTime := ot.Now().Time()
 	job.EndedAt = &endTime
 	jm.mu.Unlock()
 }
@@ -180,7 +181,7 @@ func (jm *JobManager) failJob(job *Job, errMsg string) {
 
 	job.Status = StatusFailed
 	job.Error = errMsg
-	endTime := time.Now()
+	endTime := ot.Now().Time()
 	job.EndedAt = &endTime
 }
 
@@ -199,7 +200,7 @@ func (jm *JobManager) cleanup() {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
 
-	cutoff := time.Now().Add(-jm.ttl)
+	cutoff := ot.Now().Add(-jm.ttl).Time()
 	for id, job := range jm.jobs {
 		if job.Status == StatusCompleted || job.Status == StatusFailed {
 			if job.EndedAt != nil && job.EndedAt.Before(cutoff) {
@@ -215,6 +216,6 @@ type jobError string
 func (e jobError) Error() string { return string(e) }
 
 const (
-	ErrJobNotFound   = jobError("job not found")
+	ErrJobNotFound    = jobError("job not found")
 	ErrJobNotComplete = jobError("job not completed")
 )

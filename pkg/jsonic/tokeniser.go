@@ -40,7 +40,17 @@ type Tokeniser struct {
 	input  []byte
 	pos    int
 	tokens []Token
+	depth  int
 }
+
+// MaxNestingDepth bounds how deeply the tokeniser will recurse through nested
+// objects and arrays. Beyond this, Tokenise returns an error rather than
+// recursing further (D-003): unbounded recursion on attacker-shaped nesting
+// produces a `fatal error: stack overflow`, which is not a panic and cannot be
+// caught by recover(), so it would kill the process. The limit matches the
+// standard library's json decoder ceiling (10000), keeping jsonic self-
+// protecting independent of who fills the document column.
+const MaxNestingDepth = 10000
 
 // poolSize is the capacity of the tokeniser pool channel.
 const poolSize = 16
@@ -63,6 +73,7 @@ func GetTokeniser() *Tokeniser {
 func PutTokeniser(t *Tokeniser) {
 	t.input = nil
 	t.pos = 0
+	t.depth = 0
 	// Prevent unbounded token slice growth
 	if cap(t.tokens) > 4096 {
 		t.tokens = make([]Token, 0, 256)
@@ -80,6 +91,7 @@ func (t *Tokeniser) Tokenise(input []byte) error {
 	t.input = input
 	t.pos = 0
 	t.tokens = t.tokens[:0]
+	t.depth = 0
 	return t.parseValue()
 }
 
@@ -190,6 +202,12 @@ func (t *Tokeniser) parseValue() error {
 }
 
 func (t *Tokeniser) parseObject() error {
+	t.depth++
+	if t.depth > MaxNestingDepth {
+		t.depth--
+		return fmt.Errorf("jsonic: maximum nesting depth %d exceeded", MaxNestingDepth)
+	}
+	defer func() { t.depth-- }()
 	t.add(TokObjStart, t.pos, t.pos+1)
 	t.pos++
 	first := true
@@ -228,6 +246,12 @@ func (t *Tokeniser) parseObject() error {
 }
 
 func (t *Tokeniser) parseArray() error {
+	t.depth++
+	if t.depth > MaxNestingDepth {
+		t.depth--
+		return fmt.Errorf("jsonic: maximum nesting depth %d exceeded", MaxNestingDepth)
+	}
+	defer func() { t.depth-- }()
 	t.add(TokArrStart, t.pos, t.pos+1)
 	t.pos++
 	first := true
@@ -333,9 +357,10 @@ func SkipValue(tokens []Token, i int) int {
 		depth := 1
 		i++
 		for i < len(tokens) && depth > 0 {
-			if tokens[i].Type == TokObjStart {
+			switch tokens[i].Type {
+			case TokObjStart:
 				depth++
-			} else if tokens[i].Type == TokObjEnd {
+			case TokObjEnd:
 				depth--
 			}
 			i++
@@ -345,9 +370,10 @@ func SkipValue(tokens []Token, i int) int {
 		depth := 1
 		i++
 		for i < len(tokens) && depth > 0 {
-			if tokens[i].Type == TokArrStart {
+			switch tokens[i].Type {
+			case TokArrStart:
 				depth++
-			} else if tokens[i].Type == TokArrEnd {
+			case TokArrEnd:
 				depth--
 			}
 			i++

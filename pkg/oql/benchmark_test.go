@@ -23,10 +23,10 @@ func setupBenchmarkEngine(b *testing.B, recordCount int) (*Engine, func()) {
 	statuses := []string{"active", "inactive", "maintenance", "error"}
 	for i := 0; i < recordCount; i++ {
 		store.Create(ctx, "items", map[string]interface{}{
-			"category_id": float64(i % 100),                      // 100 categorys
-			"status":  statuses[i%len(statuses)],             // 4 statuses
-			"value": float64(20.0 + float64(i%100)/10.0),   // 20.0-29.9
-			"name":    fmt.Sprintf("item-%d", i),
+			"category_id": float64(i % 100),                    // 100 categorys
+			"status":      statuses[i%len(statuses)],           // 4 statuses
+			"value":       float64(20.0 + float64(i%100)/10.0), // 20.0-29.9
+			"name":        fmt.Sprintf("item-%d", i),
 		})
 	}
 

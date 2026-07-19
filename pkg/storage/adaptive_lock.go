@@ -67,9 +67,10 @@ func (al *AdaptiveLock) SetThreshold(threshold int) {
 	al.threshold.Store(int64(threshold * 100))
 
 	// Handle edge cases immediately
-	if threshold == 0 {
+	switch threshold {
+	case 0:
 		al.engaged.Store(false)
-	} else if threshold == 100 {
+	case 100:
 		al.engaged.Store(true)
 	}
 }

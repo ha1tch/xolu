@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/storage"
 )
 
 // ---------------------------------------------------------------------------

@@ -112,7 +112,7 @@ func calibrationSetup(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer ins.Close()
+	defer func() { _ = ins.Close() }()
 
 	regions := []string{"north", "south", "east", "west"}
 	categories := []string{"electronics", "clothing", "food", "tools"}
@@ -170,14 +170,14 @@ func benchGoPath(ctx context.Context, db *sql.DB) (float64, error) {
 		for rows.Next() {
 			var blob string
 			if err := rows.Scan(&blob); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return 0, err
 			}
 			var m map[string]interface{}
 			_ = json.Unmarshal([]byte(blob), &m) // error means empty map — handled by zero count
 			count++
 		}
-		rows.Close()
+		_ = rows.Close()
 		totalNs += time.Since(start).Nanoseconds()
 	}
 
@@ -207,7 +207,7 @@ func benchSQLPath(ctx context.Context, db *sql.DB) (float64, error) {
 			_ = rows.Scan(&region, &quantity)
 			count++
 		}
-		rows.Close()
+		_ = rows.Close()
 		elapsed := time.Since(start).Nanoseconds()
 		// Normalise to per-row cost across all scanned rows (not just matched)
 		totalNs += elapsed
@@ -241,7 +241,7 @@ func benchTempBTree(ctx context.Context, db *sql.DB) (float64, error) {
 			var count, sum int
 			_ = rows.Scan(&region, &category, &count, &sum)
 		}
-		rows.Close()
+		_ = rows.Close()
 		totalNs += time.Since(start).Nanoseconds()
 	}
 
@@ -260,7 +260,9 @@ func benchTempBTree(ctx context.Context, db *sql.DB) (float64, error) {
 // varies with query complexity.
 //
 // We estimate crossover points as:
-//   threshold ≈ fixedCost / (goPerRow - sqlPerRow)
+//
+//	threshold ≈ fixedCost / (goPerRow - sqlPerRow)
+//
 // where fixedCost is estimated from the temp B-tree benchmark.
 func deriveProfile(goNsPerRow, sqlNsPerRow, tempBTreeNsPerRow float64) *HardwareProfile {
 	profile := &HardwareProfile{Name: "calibrated"}

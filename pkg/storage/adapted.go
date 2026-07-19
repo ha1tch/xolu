@@ -9,14 +9,113 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/ha1tch/xolu/pkg/models"
+	"github.com/ha1tch/xolu/pkg/qs"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
+
+// validPersistedSQLType reports whether t is a SQL column type that the
+// dialect's ColumnType mapping can legitimately produce. SQLType is interpolated
+// into DDL unparameterised, so a persisted value outside this closed set is
+// treated as an injection payload. Keep this in sync with the values returned by
+// every StorageDialect.ColumnType implementation (currently SQLite: TEXT,
+// INTEGER, REAL).
+func validPersistedSQLType(t string) bool {
+	switch t {
+	case "TEXT", "INTEGER", "REAL":
+		return true
+	default:
+		return false
+	}
+}
+
+// validateAdaptedFieldName checks that a schema field name is safe to use as a
+// SQL column/index identifier in derived DDL. It rejects any name that is not
+// a single bare identifier.
+func validateAdaptedFieldName(field string) error {
+	// Canonical strict-identifier policy lives in pkg/qs (ASCII, leading letter
+	// required so the leading-underscore namespace stays reserved for system
+	// columns). Shared with the server entity-name validator.
+	if err := qs.ValidateStrictIdentifier(field); err != nil {
+		return fmt.Errorf("invalid schema field name %q: must start with a letter and contain only letters, digits, and underscores", field)
+	}
+	return nil
+}
+
+// validateAdaptedIndexName checks that an index name persisted in column-spec
+// metadata is a safe SQL identifier. Index names are derived (via
+// tenant.AdaptedNodeIndexField) from already-validated field names, but the
+// persisted form is read back verbatim, so it is re-checked at the trust
+// boundary alongside column names.
+func validateAdaptedIndexName(name string) error {
+	if err := qs.ValidateStrictIdentifier(name); err != nil {
+		return fmt.Errorf("invalid index name %q: must start with a letter and contain only letters, digits, and underscores", name)
+	}
+	return nil
+}
+
+// validatePersistedSpec re-validates every column and index identifier in a spec
+// that was loaded from persisted column_spec metadata (or otherwise did not pass
+// through DeriveAdaptedTableSpec). This guards the D-009 residual class: the
+// derivation path validates field names before they become identifiers, but the
+// schema-evolution migration builds DROP COLUMN / DROP INDEX / data-migration
+// SELECT statements from the *old* spec read back from storage. A column_spec
+// written by a pre-D-009 binary, restored from backup, or written by any
+// non-derivation path could otherwise carry a chained-DDL payload as a column
+// name straight into an unparameterisable identifier position.
+//
+// Every offending identifier is reported (not just the first) so an operator can
+// see the full extent of a poisoned spec in one pass.
+func validatePersistedSpec(spec *AdaptedTableSpec) error {
+	if spec == nil {
+		return nil
+	}
+	var bad []string
+	// The entity name is interpolated into the table name (t<X>_ndata_<entity>),
+	// which reaches SQL unparameterised in every adapted-table statement. The HTTP
+	// layer validates it at registration, but a persisted entity_type from a
+	// pre-fix DB / restored backup / non-derivation writer is read back raw, so it
+	// is re-validated here at the trust boundary (D-015).
+	if err := validateAdaptedFieldName(spec.Entity); err != nil {
+		bad = append(bad, fmt.Sprintf("entity name: %v", err))
+	}
+	for _, col := range spec.Columns {
+		if err := validateAdaptedFieldName(col.Name); err != nil {
+			bad = append(bad, fmt.Sprintf("column: %v", err))
+		}
+		// SQLType is interpolated into ADD COLUMN / CREATE TABLE DDL after the
+		// column name (addColumnSQL: "ADD COLUMN %s %s"). At derivation it comes
+		// from dialect.ColumnType, a closed set; but the persisted value is read
+		// back raw, so a poisoned sql_type must be rejected at the trust boundary
+		// (D-016, sibling of D-009/D-010/D-015).
+		if !validPersistedSQLType(col.SQLType) {
+			bad = append(bad, fmt.Sprintf("column %q: invalid SQL type %q", col.Name, col.SQLType))
+		}
+	}
+	for _, idx := range spec.Indexes {
+		if err := validateAdaptedIndexName(idx.Name); err != nil {
+			bad = append(bad, fmt.Sprintf("index: %v", err))
+		}
+		for _, c := range idx.Columns {
+			if err := validateAdaptedFieldName(c); err != nil {
+				bad = append(bad, fmt.Sprintf("index column: %v", err))
+			}
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("entity %q has %d invalid persisted identifier(s): %s",
+			spec.Entity, len(bad), strings.Join(bad, "; "))
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // Adapted table metadata
 // ---------------------------------------------------------------------------
 // This file implements the schema-to-DDL layer for adapted tables.
 // It derives native SQLite column definitions from JSON Schema documents,
-// manages a metadata table (adapted_table_schemas) that tracks which entity
+// manages the per-tenant t<X>_n_sch metadata table that tracks which entity
 // types have adapted tables and what their column layout is, and provides
 // the schema change detection logic used at startup and schema registration.
 //
@@ -26,24 +125,28 @@ import (
 
 // ColumnDef describes a single column in an adapted table.
 type ColumnDef struct {
-	Name      string `json:"name"`       // Column name (e.g., "age", "REF_author_entity")
-	JSONField string `json:"json_field"` // Original JSON field name (e.g., "age", "author")
-	Type      string `json:"type"`       // JSON Schema type: string, integer, number, boolean, array, object
-	Format    string `json:"format"`     // JSON Schema format: "", "decimal", "ref", "email", etc.
-	SQLType   string `json:"sql_type"`   // Backend-specific SQL type (e.g., "TEXT", "INTEGER", "REAL")
-	Required  bool   `json:"required"`   // Whether the field is in the schema's required array
-	Precision int    `json:"precision"`  // For decimal: total significant digits
-	Scale     int    `json:"scale"`      // For decimal: digits after decimal point
-	IsREF     bool   `json:"is_ref"`     // True if this column is part of a REF decomposition
+	Name        string `json:"name"`          // Column name (e.g., "age", "REF_author_entity")
+	JSONField   string `json:"json_field"`    // Original JSON field name (e.g., "age", "author")
+	Type        string `json:"type"`          // JSON Schema type: string, integer, number, boolean, array, object
+	Format      string `json:"format"`        // JSON Schema format: "", "decimal", "ref", "email", etc.
+	SQLType     string `json:"sql_type"`      // Backend-specific SQL type (e.g., "TEXT", "INTEGER", "REAL")
+	Required    bool   `json:"required"`      // Whether the field is in the schema's required array
+	Precision   int    `json:"precision"`     // For decimal: total significant digits
+	Scale       int    `json:"scale"`         // For decimal: digits after decimal point
+	IsREF       bool   `json:"is_ref"`        // True if this column is part of a REF decomposition
+	IsREFEntity bool   `json:"is_ref_entity"` // True for the _entity column of a REF pair
+	IsREFID     bool   `json:"is_ref_id"`     // True for the _id column of a REF pair
 }
 
 // AdaptedTableSpec describes the full column layout of an adapted table.
 type AdaptedTableSpec struct {
-	Entity     string      `json:"entity"`      // Entity type name
-	Columns    []ColumnDef `json:"columns"`      // Ordered column definitions
-	SchemaHash string      `json:"schema_hash"`  // SHA-256 of canonical schema JSON
-	HasExtra   bool        `json:"has_extra"`    // Whether _extra overflow column is present
-	Indexes    []IndexDef  `json:"indexes"`      // Indexes to create
+	Entity     string             `json:"entity"`      // Entity/relationship label name
+	Kind       tenant.ElementKind `json:"kind"`        // ElementNode or ElementEdge
+	TenantID   uint16             `json:"tenant_id"`   // Owning tenant; used to derive the table name
+	Columns    []ColumnDef        `json:"columns"`     // Ordered column definitions
+	SchemaHash string             `json:"schema_hash"` // SHA-256 of canonical schema JSON
+	HasExtra   bool               `json:"has_extra"`   // Whether _extra overflow column is present
+	Indexes    []IndexDef         `json:"indexes"`     // Indexes to create
 }
 
 // IndexDef describes an index on an adapted table.
@@ -54,8 +157,14 @@ type IndexDef struct {
 }
 
 // TableName returns the SQL table name for this adapted table.
+// Routes to the node or edge naming convention based on Kind:
+//   - ElementNode → t<XXXX>_ndata_<entity>   (e.g. t0001_ndata_user)
+//   - ElementEdge → t<XXXX>_edata_<label>    (e.g. t0001_edata_KNOWS)
 func (s *AdaptedTableSpec) TableName() string {
-	return "olu_" + s.Entity
+	if s.Kind == tenant.ElementEdge {
+		return tenant.AdaptedEdgeTableName(s.TenantID, s.Entity)
+	}
+	return tenant.AdaptedNodeTableName(s.TenantID, s.Entity)
 }
 
 // ColumnNames returns all column names in order (excluding system columns).
@@ -112,7 +221,7 @@ func (s *AdaptedTableSpec) ColumnByName(name string) (ColumnDef, bool) {
 // This is a convenience wrapper that creates a SchemaIntrospector from
 // the raw JSON Schema map. For direct use with queryfy (future), call
 // DeriveAdaptedTableSpecFrom with a queryfy-backed introspector.
-func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialect StorageDialect) (*AdaptedTableSpec, error) {
+func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialect StorageDialect, tenantID uint16) (*AdaptedTableSpec, error) {
 	introspector := NewJSONSchemaIntrospector(schema)
 	if introspector == nil {
 		return nil, fmt.Errorf("schema for %q has no properties", entity)
@@ -124,14 +233,22 @@ func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialec
 		return nil, fmt.Errorf("failed to hash schema for %q: %w", entity, err)
 	}
 
-	return DeriveAdaptedTableSpecFrom(entity, introspector, dialect, schemaHash)
+	return DeriveAdaptedTableSpecFrom(entity, introspector, dialect, schemaHash, tenantID)
 }
 
 // DeriveAdaptedTableSpecFrom derives an AdaptedTableSpec from a
 // SchemaIntrospector. This is the backend-agnostic core that works
 // with any schema representation (JSON Schema maps, queryfy objects,
 // or anything else that implements SchemaIntrospector).
-func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialect StorageDialect, schemaHash string) (*AdaptedTableSpec, error) {
+func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialect StorageDialect, schemaHash string, tenantID uint16) (*AdaptedTableSpec, error) {
+	// The entity name becomes part of the table name (t<X>_ndata_<entity>), which
+	// reaches SQL unparameterised. HTTP callers validate it via validateEntityName,
+	// but validate here too so a spec can never be derived with an injectable
+	// entity name regardless of the caller (defence in depth; see D-015).
+	if err := validateAdaptedFieldName(entity); err != nil {
+		return nil, fmt.Errorf("invalid entity name %q: %w", entity, err)
+	}
+
 	hasExtra := schema.AllowsAdditional()
 
 	// Get field names (already sorted), excluding system columns
@@ -148,6 +265,12 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 	var indexes []IndexDef
 
 	for _, fieldName := range fieldNames {
+		// D-009: reject any field name that is not a bare SQL identifier
+		// before it can become a column or index name in derived DDL.
+		if err := validateAdaptedFieldName(fieldName); err != nil {
+			return nil, fmt.Errorf("entity %q: %w", entity, err)
+		}
+
 		field := schema.GetField(fieldName)
 		if field == nil {
 			continue
@@ -170,29 +293,33 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 			}
 		}
 
-		if format == "ref" {
-			// REF fields decompose into two columns
+		if format == models.SchemaFormatREF {
+			// REF fields decompose into two columns: one for the target entity
+			// type and one for the target entity ID. IsREFEntity and IsREFID
+			// are set explicitly so consumers never need to inspect column names.
 			columns = append(columns, ColumnDef{
-				Name:      "REF_" + fieldName + "_entity",
-				JSONField: fieldName,
-				Type:      "string",
-				Format:    "ref",
-				SQLType:   dialect.ColumnType("string", "", 0, 0),
-				Required:  required,
-				IsREF:     true,
+				Name:        "REF_" + fieldName + "_entity",
+				JSONField:   fieldName,
+				Type:        "string",
+				Format:      models.SchemaFormatREF,
+				SQLType:     dialect.ColumnType("string", "", 0, 0),
+				Required:    required,
+				IsREF:       true,
+				IsREFEntity: true,
 			})
 			columns = append(columns, ColumnDef{
 				Name:      "REF_" + fieldName + "_id",
 				JSONField: fieldName,
 				Type:      "integer",
-				Format:    "ref",
+				Format:    models.SchemaFormatREF,
 				SQLType:   dialect.ColumnType("integer", "", 0, 0),
 				Required:  required,
 				IsREF:     true,
+				IsREFID:   true,
 			})
 			// Index on _id column for join lookups
 			indexes = append(indexes, IndexDef{
-				Name:    fmt.Sprintf("idx_olu_%s_ref_%s", entity, fieldName),
+				Name:    tenant.AdaptedNodeIndexField(tenantID, entity, "ref_"+fieldName),
 				Columns: []string{"REF_" + fieldName + "_id"},
 			})
 		} else {
@@ -212,17 +339,17 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 			enumVals := field.EnumValues()
 			if shouldAutoIndexField(fieldName, jsonType, format, required, enumVals) {
 				indexes = append(indexes, IndexDef{
-					Name:    fmt.Sprintf("idx_olu_%s_%s", entity, fieldName),
+					Name:    tenant.AdaptedNodeIndexField(tenantID, entity, fieldName),
 					Columns: []string{fieldName},
 				})
 			}
 		}
 
 		// Check for explicit index override
-		if idx, ok := field.Meta("x-olu-index"); ok {
+		if idx, ok := field.Meta("x-xolu-index"); ok {
 			if b, ok := idx.(bool); ok && b {
 				indexes = append(indexes, IndexDef{
-					Name:    fmt.Sprintf("idx_olu_%s_%s", entity, fieldName),
+					Name:    tenant.AdaptedNodeIndexField(tenantID, entity, fieldName),
 					Columns: []string{fieldName},
 				})
 			}
@@ -231,6 +358,7 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 
 	return &AdaptedTableSpec{
 		Entity:     entity,
+		TenantID:   tenantID,
 		Columns:    columns,
 		SchemaHash: schemaHash,
 		HasExtra:   hasExtra,
@@ -257,7 +385,6 @@ func shouldAutoIndexField(name, jsonType, format string, required bool, enumVals
 	//  When queryfy introspection lands, we can add PatternString() check.)
 	return false
 }
-
 
 // canonicalSchemaHash produces a deterministic SHA-256 hash of a JSON Schema.
 // The schema is re-serialised with sorted keys to ensure stability.
@@ -301,12 +428,6 @@ func GenerateIndexSQL(spec *AdaptedTableSpec, dialect StorageDialect) []string {
 	return dialect.CreateIndexSQL(spec)
 }
 
-// GenerateAdaptedSchemasTableSQL returns the DDL for the metadata table
-// that tracks adapted table schemas, using the given dialect.
-func GenerateAdaptedSchemasTableSQL(dialect StorageDialect) string {
-	return dialect.MetadataTableSQL()
-}
-
 // ---------------------------------------------------------------------------
 // Data partitioning (decompose map into columns + overflow)
 // ---------------------------------------------------------------------------
@@ -329,15 +450,17 @@ func PartitionData(spec *AdaptedTableSpec, data map[string]interface{}) (columnV
 	columnValues = make([]interface{}, len(spec.Columns))
 	for i, col := range spec.Columns {
 		if col.IsREF {
-			// REF decomposition: extract entity/id from the REF object
+			// REF decomposition: extract entity/id from the REF object.
+			// IsREFEntity and IsREFID identify which half of the pair this is,
+			// with no dependency on the column name string.
 			refObj, _ := data[col.JSONField].(map[string]interface{})
 			if refObj == nil {
 				columnValues[i] = nil
 				continue
 			}
-			if strings.HasSuffix(col.Name, "_entity") {
+			if col.IsREFEntity {
 				columnValues[i] = refObj["entity"]
-			} else if strings.HasSuffix(col.Name, "_id") {
+			} else if col.IsREFID {
 				switch v := refObj["id"].(type) {
 				case float64:
 					columnValues[i] = int(v)
@@ -387,18 +510,19 @@ func ReassembleData(spec *AdaptedTableSpec, columnValues []interface{}, extra ma
 		}
 
 		if col.IsREF {
-			// Accumulate REF parts
+			// Accumulate REF parts using the explicit part flags,
+			// not by inspecting the column name suffix.
 			if refFields[col.JSONField] == nil {
 				refFields[col.JSONField] = map[string]interface{}{
-					"type": "REF",
+					"type": models.RefTypeValue,
 				}
 			}
-			if strings.HasSuffix(col.Name, "_entity") {
+			if col.IsREFEntity {
 				refFields[col.JSONField]["entity"] = val
-			} else if strings.HasSuffix(col.Name, "_id") {
+			} else if col.IsREFID {
 				refFields[col.JSONField]["id"] = val
 			}
-		} else if col.Type == "array" || (col.Type == "object" && col.Format != "ref") {
+		} else if col.Type == "array" || (col.Type == "object" && col.Format != models.SchemaFormatREF) {
 			// Deserialise JSON-stored columns
 			if s, ok := val.(string); ok && s != "" {
 				var parsed interface{}

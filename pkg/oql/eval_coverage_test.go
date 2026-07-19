@@ -204,11 +204,11 @@ func TestEvalComparison_FloatOperators(t *testing.T) {
 		query string
 		want  int // expected row count
 	}{
-		{"greater than float", "SELECT name FROM products WHERE price > 10.0", 2},   // 25.5, 100
-		{"less than float", "SELECT name FROM products WHERE price < 10.0", 2},      // 7.25, 0
-		{"greater or equal", "SELECT name FROM products WHERE price >= 10.0", 3},    // 10, 25.5, 100
-		{"less or equal", "SELECT name FROM products WHERE price <= 10.0", 3},       // 10, 7.25, 0
-		{"not equal", "SELECT name FROM products WHERE category <> 'hardware'", 3},  // electronics x2, misc
+		{"greater than float", "SELECT name FROM products WHERE price > 10.0", 2},  // 25.5, 100
+		{"less than float", "SELECT name FROM products WHERE price < 10.0", 2},     // 7.25, 0
+		{"greater or equal", "SELECT name FROM products WHERE price >= 10.0", 3},   // 10, 25.5, 100
+		{"less or equal", "SELECT name FROM products WHERE price <= 10.0", 3},      // 10, 7.25, 0
+		{"not equal", "SELECT name FROM products WHERE category <> 'hardware'", 3}, // electronics x2, misc
 	}
 
 	for _, tt := range tests {

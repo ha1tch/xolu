@@ -136,9 +136,10 @@ func TestSQLGen_Where(t *testing.T) {
 			expectArgs: 4, // entity_type + 3 values
 		},
 		{
-			name:       "in_numbers",
+			name: "in_numbers",
+			// Numeric IN values → CAST extraction for cross-backend correctness.
 			oql:        "SELECT * FROM widgets WHERE id IN (1, 2, 3)",
-			expectSQL:  "json_extract(data, '$.id') IN (?, ?, ?)",
+			expectSQL:  "CAST(json_extract(data, '$.id') AS REAL) IN (?, ?, ?)",
 			expectArgs: 4,
 		},
 		{
@@ -515,7 +516,7 @@ func TestSQLGen_BaseQueryStructure(t *testing.T) {
 	}
 
 	// Must start with base SELECT
-	if !strings.HasPrefix(gen.SQL, "SELECT data, _version FROM entities WHERE entity_type = ?") {
+	if !strings.HasPrefix(gen.SQL, "SELECT data, _version FROM t0000_nodes WHERE entity_type = ?") {
 		t.Errorf("SQL should start with base query, got: %s", gen.SQL)
 	}
 
@@ -544,7 +545,7 @@ func TestSQLGen_FullOutput(t *testing.T) {
 			oql:      "SELECT * FROM assets WHERE status = 'active'",
 			entity:   "assets",
 			plan:     wherePush(),
-			wantSQL:  "SELECT data, _version FROM entities WHERE entity_type = ? AND (json_extract(data, '$.status') = ?)",
+			wantSQL:  "SELECT data, _version FROM t0000_nodes WHERE entity_type = ? AND (json_extract(data, '$.status') = ?)",
 			wantArgs: []interface{}{"assets", "active"},
 		},
 		{
@@ -553,7 +554,7 @@ func TestSQLGen_FullOutput(t *testing.T) {
 			entity:   "assets",
 			tenant:   "t1",
 			plan:     wherePush(),
-			wantSQL:  "SELECT data, _version FROM entities WHERE entity_type = ? AND json_extract(data, '$.tenant_id') = ? AND (json_extract(data, '$.status') = ?)",
+			wantSQL:  "SELECT data, _version FROM t0000_nodes WHERE entity_type = ? AND json_extract(data, '$.tenant_id') = ? AND (json_extract(data, '$.status') = ?)",
 			wantArgs: []interface{}{"assets", "t1", "active"},
 		},
 		{
@@ -561,7 +562,7 @@ func TestSQLGen_FullOutput(t *testing.T) {
 			oql:    "SELECT TOP 10 * FROM readings WHERE sensor_id = 'S1' ORDER BY timestamp DESC",
 			entity: "readings",
 			plan:   allPush(),
-			wantSQL: "SELECT data, _version FROM entities WHERE entity_type = ? AND (json_extract(data, '$.sensor_id') = ?)" +
+			wantSQL: "SELECT data, _version FROM t0000_nodes WHERE entity_type = ? AND (json_extract(data, '$.sensor_id') = ?)" +
 				" ORDER BY json_extract(data, '$.timestamp') DESC LIMIT ?",
 			wantArgs: []interface{}{"readings", "S1", int64(10)},
 		},
@@ -634,7 +635,7 @@ func TestSQLGen_PushNone(t *testing.T) {
 	}
 
 	// Should just be the base query with no WHERE/ORDER BY appended
-	expected := "SELECT data, _version FROM entities WHERE entity_type = ?"
+	expected := "SELECT data, _version FROM t0000_nodes WHERE entity_type = ?"
 	if gen.SQL != expected {
 		t.Errorf("PushNone SQL:\n  got:  %s\n  want: %s", gen.SQL, expected)
 	}
@@ -679,7 +680,7 @@ func TestSQLGen_BetweenStringBoundsUseTextExtraction(t *testing.T) {
 			wantNoSQL: "",
 		},
 		{
-			name:    "mixed_bounds_string_low_uses_text",
+			name: "mixed_bounds_string_low_uses_text",
 			// Low is string, high is string — uses text extraction
 			oql:     "SELECT * FROM items WHERE name BETWEEN 'apple' AND 'mango'",
 			wantSQL: "json_extract(data, '$.name') BETWEEN ? AND ?",

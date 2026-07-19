@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 // https://www.apache.org/licenses/LICENSE-2.0
 
-// Package oql provides SQL-compatible query language for olu.
+// Package oql provides SQL-compatible query language for xolu.
 //
 // OQL supports a subset of T-SQL syntax for querying and mutating data:
 //
@@ -13,7 +13,7 @@
 //   - UPDATE with WHERE (required)
 //   - DELETE with WHERE (required)
 //
-// JOIN support
+// # JOIN support
 //
 // Two-table joins are pushed to SQLite as a single SQL statement. All four
 // standard join types are supported. Each entity is classified independently
@@ -27,12 +27,14 @@ package oql
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/ha1tch/tsqlparser"
 	"github.com/ha1tch/tsqlparser/ast"
+	ot "github.com/ha1tch/xolu/pkg/xolutime"
 	"github.com/ha1tch/xolu/pkg/storage"
 )
 
@@ -65,6 +67,22 @@ func (e *Engine) SetProfile(profile *HardwareProfile) {
 	e.executor.SetProfile(profile)
 }
 
+// SetSeqIncrementor wires the sequence increment function into the OQL executor.
+// Call once after the engine is created, when API v2 sequences are enabled.
+func (e *Engine) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.executor.SetSeqIncrementor(fn)
+}
+
+// SetGenDispatcher forwards the named-generator dispatch function to the
+// underlying executor.
+func (e *Engine) SetGenDispatcher(fn func(tenantID uint16, name string) (string, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.executor.SetGenDispatcher(fn)
+}
+
 // NewEngine creates a new OQL engine
 func NewEngine(store storage.Store, schemaDir string) *Engine {
 	// Check if store supports entity listing
@@ -74,11 +92,12 @@ func NewEngine(store storage.Store, schemaDir string) *Engine {
 	} else {
 		validator = NewValidator(schemaDir)
 	}
-	
+	exec := NewExecutor(store, nil)
+	RegisterSeqGenFuncs(exec) // register @SEQ and @GEN (stub) unconditionally
 	return &Engine{
 		store:     store,
 		validator: validator,
-		executor:  NewExecutor(store, nil),
+		executor:  exec,
 	}
 }
 
@@ -91,40 +110,29 @@ func NewEngineWithSchemaValidator(store storage.Store, schemaDir string, sv Sche
 	} else {
 		validator = NewValidator(schemaDir)
 	}
-	
+	exec := NewExecutor(store, sv)
+	RegisterSeqGenFuncs(exec) // register @SEQ and @GEN (stub) unconditionally
 	return &Engine{
 		store:           store,
 		validator:       validator,
-		executor:        NewExecutor(store, sv),
+		executor:        exec,
 		schemaValidator: sv,
 	}
 }
 
 // Execute parses, validates, and executes an OQL query
 func (e *Engine) Execute(ctx context.Context, sql string) (*Result, error) {
-	return e.ExecuteWithTenant(ctx, sql, "")
-}
-
-// ExecuteWithTenant parses, validates, and executes an OQL query scoped to a tenant.
-// When tenantID is non-empty, all operations are filtered to the specified tenant.
-// Deprecated: Use ExecuteWithStore for new code.
-func (e *Engine) ExecuteWithTenant(ctx context.Context, sql string, tenantID string) (*Result, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// 1. Parse
 	stmt, err := e.parse(sql)
 	if err != nil {
 		return nil, err
 	}
-
-	// 2. Validate
 	if err := e.validator.Validate(stmt); err != nil {
 		return nil, err
 	}
-
-	// 3. Execute with tenant scoping
-	return e.executor.ExecuteWithTenant(ctx, stmt, tenantID)
+	return e.executor.ExecuteWithTenant(ctx, stmt, "")
 }
 
 // ExecuteWithStore parses, validates, and executes an OQL query using a specific store.
@@ -149,6 +157,22 @@ func (e *Engine) ExecuteWithStore(ctx context.Context, sql string, store storage
 func (e *Engine) parse(sql string) (ast.Statement, error) {
 	program, errs := tsqlparser.Parse(sql)
 	if len(errs) > 0 {
+		errMsg := fmt.Sprintf("%v", errs[0])
+		// tsqlparser emits "no prefix parse function for X found" when a
+		// reserved SQL keyword is used as an identifier. Rewrite this to a
+		// actionable message so query authors know what went wrong.
+		if strings.Contains(errMsg, "no prefix parse function for") {
+			// Extract the keyword from the error message.
+			// Format: "line N, col M: no prefix parse function for KEYWORD found"
+			msg := errMsg
+			if i := strings.LastIndex(msg, "for "); i >= 0 {
+				rest := msg[i+4:]
+				if j := strings.Index(rest, " found"); j >= 0 {
+					kw := rest[:j]
+					return nil, fmt.Errorf("parse error: %q is a reserved SQL keyword and cannot be used as a field or table name — rename the field or quote it with backticks (e.g. `%s`)", kw, strings.ToLower(kw))
+				}
+			}
+		}
 		return nil, fmt.Errorf("parse error: %v", errs[0])
 	}
 
@@ -160,7 +184,17 @@ func (e *Engine) parse(sql string) (ast.Statement, error) {
 		return nil, fmt.Errorf("only single statements are supported")
 	}
 
-	return program.Statements[0], nil
+	stmt := program.Statements[0]
+
+	// Defence-in-depth: reject any delimiter-smuggled identifier
+	// (T-SQL [..]/".." carrying SQL metacharacters) before the statement reaches
+	// any SQL generator. This closes the alias / ORDER BY identifier-injection
+	// class at the parser boundary; the per-sink validators remain as backstops.
+	if err := checkASTForSmuggledIdentifiers(stmt); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
 }
 
 // RefreshSchema reloads the entity list from disk
@@ -222,23 +256,36 @@ func (jm *JobManager) SetQueryTimeout(d time.Duration) {
 	jm.queryTimeout = d
 }
 
+// SetSeqIncrementor wires the sequence increment function into the underlying
+// OQL engine. Call once after the JobManager is created, when v2 is enabled.
+func (jm *JobManager) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64, error)) {
+	jm.engine.SetSeqIncrementor(fn)
+}
+
+// SetGenDispatcher forwards the named-generator dispatch function to the
+// underlying executor, enabling @GEN('name') resolution.
+func (jm *JobManager) SetGenDispatcher(fn func(tenantID uint16, name string) (string, error)) {
+	jm.engine.SetGenDispatcher(fn)
+}
+
 // Submit submits a query for async execution using the provided store.
 // The store is captured at submission time so the background goroutine
 // executes against the correct tenant scope.
 func (jm *JobManager) Submit(query string, store storage.Store) string {
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
 
 	id := generateJobID()
 	job := &Job{
 		ID:        id,
 		Query:     query,
 		Status:    JobPending,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: ot.Now().Time(),
+		UpdatedAt: ot.Now().Time(),
 		store:     store,
 	}
 	jm.jobs[id] = job
+
+	jm.mu.Unlock() // release before launching goroutine
 
 	// Execute in background
 	go jm.executeJob(job)
@@ -249,12 +296,6 @@ func (jm *JobManager) Submit(query string, store storage.Store) string {
 // ExecuteSync executes a query synchronously
 func (jm *JobManager) ExecuteSync(ctx context.Context, query string) (*Result, error) {
 	return jm.engine.Execute(ctx, query)
-}
-
-// ExecuteSyncWithTenant executes a query synchronously scoped to a tenant
-// Deprecated: Use ExecuteSyncWithStore for new code.
-func (jm *JobManager) ExecuteSyncWithTenant(ctx context.Context, query string, tenantID string) (*Result, error) {
-	return jm.engine.ExecuteWithTenant(ctx, query, tenantID)
 }
 
 // ExecuteSyncWithStore executes a query synchronously using a specific store.
@@ -299,7 +340,7 @@ func (jm *JobManager) GetJobResult(id string) (*Result, error) {
 func (jm *JobManager) executeJob(job *Job) {
 	jm.mu.Lock()
 	job.Status = JobRunning
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = ot.Now().Time()
 	jm.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), jm.queryTimeout)
@@ -326,7 +367,7 @@ func (jm *JobManager) executeJob(job *Job) {
 		job.Status = JobCompleted
 		job.Result = result
 	}
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = ot.Now().Time()
 }
 
 func (jm *JobManager) cleanupLoop() {
@@ -347,7 +388,7 @@ func (jm *JobManager) cleanup() {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
 
-	cutoff := time.Now().Add(-jm.ttl)
+	cutoff := ot.Now().Add(-jm.ttl).Time()
 	for id, job := range jm.jobs {
 		if job.UpdatedAt.Before(cutoff) {
 			delete(jm.jobs, id)

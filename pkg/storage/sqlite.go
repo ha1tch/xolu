@@ -10,14 +10,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/tenant"
+	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
@@ -35,16 +38,28 @@ type SQLiteStore struct {
 	config      SQLiteConfig
 	storeConfig StoreConfig
 	alock       *AdaptiveLock
-	adapted     *AdaptedRegistry // nil-safe: Get() returns nil for unknown entities
+	adapted     *AdaptedRegistry // nil-safe: Get() returns nil for unknown entity types
 	dialect     StorageDialect   // backend-specific SQL generation
 	stmtCache   *StmtCache       // prepared statement cache for reader pool
 	logger      zerolog.Logger   // structured logger; zerolog.Nop() by default
+
+	// edgeWarnSuppressed tracks relationship labels for which the
+	// unregistered-schema warning has already fired (or been suppressed).
+	// Keyed by rel label. Protected by edgeWarnMu.
+	// Reset on restart — suppression is in-memory only.
+	edgeWarnMu         sync.Mutex
+	edgeWarnSuppressed map[string]bool
 }
 
 // DB returns the underlying *sql.DB for advanced operations such as
 // batch seeding or direct SQL execution. Use with care — callers must
 // respect the store's locking and schema conventions.
 func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
+}
+
+// WriterDB implements storage.WriterDBProvider.
+func (s *SQLiteStore) WriterDB() *sql.DB {
 	return s.db
 }
 
@@ -72,23 +87,27 @@ func (s *SQLiteStore) IsPerFileTenant() bool {
 	return s.config.PerFileTenants
 }
 
-// tenantWhere returns the WHERE fragment for tenant scoping in shared mode,
-// or an empty string in per-file mode (isolation is provided by the file itself).
-// Always ends with "AND " so callers can append the next predicate directly.
-func (s *SQLiteStore) tenantWhere() string {
-	if s.config.PerFileTenants {
-		return ""
-	}
-	return "tenant_id = ? AND "
+// nodesTable returns the per-tenant blob node store table name (t<XXXX>_nodes).
+// All node CRUD methods use this rather than the hardcoded "entities" string.
+func (s *SQLiteStore) nodesTable() string {
+	return tenant.NodesTableName(s.config.TenantID)
 }
 
-// tenantArgs prepends the tenant_id argument in shared mode, or returns extra
-// unchanged in per-file mode. Use in conjunction with tenantWhere().
-func (s *SQLiteStore) tenantArgs(extra ...interface{}) []interface{} {
-	if s.config.PerFileTenants {
-		return extra
-	}
-	return append([]interface{}{int(s.config.TenantID)}, extra...)
+// NodesTable returns the per-tenant blob node store table name (t<XXXX>_nodes).
+// Implements storage.TableNamer; used by the OQL SQL generator to build
+// correct push-down queries without hardcoding the table name.
+func (s *SQLiteStore) NodesTable() string {
+	return tenant.NodesTableName(s.config.TenantID)
+}
+
+// nodeSeqTable returns the per-tenant node ID sequence table name (t<XXXX>_nseq).
+func (s *SQLiteStore) nodeSeqTable() string {
+	return tenant.NodeSeqTableName(s.config.TenantID)
+}
+
+// nodeFTSTable returns the per-tenant node FTS virtual table name (t<XXXX>_nfts).
+func (s *SQLiteStore) nodeFTSTable() string {
+	return tenant.NodeFTSTableName(s.config.TenantID)
 }
 
 // AdaptedRegistry returns the store's adapted table registry.
@@ -109,13 +128,13 @@ func (s *SQLiteStore) WithLogger(logger zerolog.Logger) *SQLiteStore {
 // from its JSON Schema and creates the table if it doesn't exist.
 // This is called by the server layer when a schema is loaded or registered.
 func (s *SQLiteStore) RegisterAdaptedEntity(ctx context.Context, entity string, schema map[string]interface{}) error {
-	return RegisterAdaptedTable(ctx, s.db, s.adapted, entity, schema, s.dialect)
+	return RegisterAdaptedTable(ctx, s.db, s.adapted, entity, schema, s.dialect, s.config.TenantID)
 }
 
 // SQLiteConfig holds SQLite-specific configuration
 type SQLiteConfig struct {
 	DBPath            string
-	EnableWAL         bool   // Write-Ahead Logging for better concurrency
+	EnableWAL         bool // Write-Ahead Logging for better concurrency
 	EnableForeignKeys bool
 	CacheSize         int    // Page cache size in KB
 	BusyTimeout       int    // Milliseconds to wait on locked database
@@ -185,7 +204,6 @@ func (s *SQLiteStore) withRetry(fn func() error) error {
 	return err
 }
 
-
 // withRetryRead executes a read operation, using the adaptive lock's RLock
 // when engaged. Reads don't retry — SQLITE_BUSY on reads is extremely rare
 // with WAL mode, and when the lock is engaged reads are already protected.
@@ -250,9 +268,21 @@ func (s *SQLiteStore) withRetryCreateVal(fn func() (int, error)) (int, error) {
 // vice-versa, so splitting pools maximises concurrency.
 func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 	if dbPath == "" {
-		dbPath = "olu.db"
+		dbPath = "xolu.db"
 	}
-	
+
+	// Ensure the parent directory exists before opening. The on-disk layout is
+	// derived from the data root by invariant (see pkg/storelayout), so the
+	// store owns creation of its own directory rather than relying on every
+	// caller to do it. In-memory databases have no directory.
+	if dbPath != ":memory:" && !strings.Contains(dbPath, ":memory:") {
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create store directory %q: %w", dir, err)
+			}
+		}
+	}
+
 	// Base DSN with pragmas inherited by every connection in both pools.
 	baseDSN := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=cache_size(-%d)&_pragma=busy_timeout(%d)",
 		dbPath, config.CacheSize, config.BusyTimeout)
@@ -281,7 +311,7 @@ func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 	readDSN := baseDSN + "&_pragma=query_only(ON)"
 	readDB, err := sql.Open("sqlite", readDSN)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to open reader database: %w", err)
 	}
 	readPoolSize := config.ReadPoolSize
@@ -317,155 +347,138 @@ func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 			SQLiteContentionThreshold: contentionThreshold,
 			SQLitePerFileTenants:      config.PerFileTenants,
 		},
-		alock:     NewAdaptiveLock(contentionThreshold),
-		adapted:   NewAdaptedRegistry(),
-		dialect:   &SQLiteStorageDialect{PerFileTenants: config.PerFileTenants},
-		stmtCache: NewStmtCache(readDB, 0), // default size; prepares against reader pool
-		logger:    zerolog.Nop(),           // silent until WithLogger is called
+		alock:              NewAdaptiveLock(contentionThreshold),
+		adapted:            NewAdaptedRegistry(),
+		dialect:            &SQLiteStorageDialect{},
+		stmtCache:          NewStmtCache(readDB, 0), // default size; prepares against reader pool
+		logger:             zerolog.Nop(),           // silent until WithLogger is called
+		edgeWarnSuppressed: make(map[string]bool),
 	}
-	
+
 	// Initialize database schema
 	initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer initCancel()
 	if err := store.initialize(initCtx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
-	
+
 	// Load adapted table registry from metadata
 	loadCtx, loadCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer loadCancel()
-	adapted, err := LoadAdaptedRegistry(loadCtx, db)
+	adapted, err := LoadAdaptedRegistry(loadCtx, db, config.TenantID)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to load adapted table registry: %w", err)
 	}
 	store.adapted = adapted
-	
+
+	// Pre-suppress edge schema warnings for labels already registered in t<X>_e_sch.
+	if err := store.loadEdgeSchemaSuppressions(loadCtx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to load edge schema suppressions: %w", err)
+	}
+
+	// Load adapted edge specs (column_spec populated) from t<X>_e_sch.
+	if err := store.loadAdaptedEdgeSpecs(loadCtx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to load adapted edge specs: %w", err)
+	}
+
 	return store, nil
 }
 
 // initialize creates the necessary tables and triggers
 
-// createSchemaShared creates the shared-mode schema (all tenants in one file,
-// isolated by the tenant_id column). This is the default mode.
-func (s *SQLiteStore) createSchemaShared(ctx context.Context) error {
-	schema := `
-		-- Main entities table (JSON blob approach)
-		CREATE TABLE IF NOT EXISTS entities (
-			tenant_id INTEGER NOT NULL DEFAULT 0,
-			entity_type TEXT NOT NULL,
-			id INTEGER NOT NULL,
-			data TEXT NOT NULL, -- JSON stored as TEXT
-			_version INTEGER NOT NULL DEFAULT 1,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, entity_type, id)
-		);
+// createSchema creates the per-tenant table family for this store's TenantID,
+// plus the global tables (schema_version, tenants) that are shared across all
+// tenants in the same database file.
+//
+// The two historical modes (shared vs per-file) are now unified: table names
+// encode the tenant, so no tenant_id column is needed inside any data table.
+// In shared-file mode all tenants share one file but each gets its own
+// t<XXXX>_* tables. In per-file mode each tenant has a separate file; the
+// tables are still named t<XXXX>_* for consistency and to allow future
+// consolidation without data migration.
+func (s *SQLiteStore) createSchema(ctx context.Context) error {
+	tid := s.config.TenantID
+	nodes := tenant.NodesTableName(tid)
+	nseq := tenant.NodeSeqTableName(tid)
+	nfts := tenant.NodeFTSTableName(tid)
+	nIdxE := tenant.NodesIndexEntityType(tid)
+	nIdxU := tenant.NodesIndexUpdatedAt(tid)
 
-		CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(entity_type);
-		CREATE INDEX IF NOT EXISTS idx_updated_at ON entities(updated_at);
-		CREATE INDEX IF NOT EXISTS idx_tenant_entity ON entities(tenant_id, entity_type);
-
-		-- Tenant-scoped ID sequences
-		CREATE TABLE IF NOT EXISTS entity_sequences (
-			tenant_id INTEGER NOT NULL DEFAULT 0,
-			entity_type TEXT NOT NULL,
-			next_id INTEGER NOT NULL DEFAULT 1,
-			PRIMARY KEY (tenant_id, entity_type)
-		);
-
-		-- Schema metadata table (optional schema storage)
-		CREATE TABLE IF NOT EXISTS schemas (
-			entity_type TEXT PRIMARY KEY,
-			schema TEXT NOT NULL, -- JSON schema
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Version tracking for migrations
+	// Global tables — one per database file regardless of tenant.
+	// schema_version and tenants are intentionally not prefixed.
+	globalDDL := `
 		CREATE TABLE IF NOT EXISTS schema_version (
-			version INTEGER PRIMARY KEY,
+			version    INTEGER PRIMARY KEY,
 			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
-
-		-- Tenant registry: stable name-to-ID mapping across restarts
 		CREATE TABLE IF NOT EXISTS tenants (
-			id INTEGER NOT NULL PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
+			id         INTEGER NOT NULL PRIMARY KEY,
+			name       TEXT NOT NULL UNIQUE,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
-
-		-- Full-text search virtual table (FTS5) with tenant_id
-		CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
-			tenant_id UNINDEXED,
-			entity_type UNINDEXED,
-			entity_id UNINDEXED,
-			content
-		);
 	`
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("failed to create shared schema: %w", err)
+	if _, err := s.db.ExecContext(ctx, globalDDL); err != nil {
+		return fmt.Errorf("createSchema: global tables: %w", err)
 	}
-	return nil
-}
 
-// createSchemaPerFile creates the per-file-tenant schema. In this mode each
-// tenant has its own SQLite file so the tenant_id column is omitted.
-func (s *SQLiteStore) createSchemaPerFile(ctx context.Context) error {
-	schema := `
-		-- Main entities table — no tenant_id column (file = isolation boundary)
-		CREATE TABLE IF NOT EXISTS entities (
+	// Per-tenant node tables.
+	nodeDDL := fmt.Sprintf(`
+		-- Blob node store: one row per node, JSON data column.
+		-- The table name encodes the tenant; no tenant_id column needed.
+		CREATE TABLE IF NOT EXISTS %s (
 			entity_type TEXT NOT NULL,
-			id INTEGER NOT NULL,
-			data TEXT NOT NULL,
-			_version INTEGER NOT NULL DEFAULT 1,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			id          INTEGER NOT NULL,
+			data        TEXT NOT NULL,
+			_version    INTEGER NOT NULL DEFAULT 1,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (entity_type, id)
 		);
+		CREATE INDEX IF NOT EXISTS %s ON %s(entity_type);
+		CREATE INDEX IF NOT EXISTS %s ON %s(updated_at);
 
-		CREATE INDEX IF NOT EXISTS idx_entity_type ON entities(entity_type);
-		CREATE INDEX IF NOT EXISTS idx_updated_at ON entities(updated_at);
-
-		-- ID sequences — no tenant_id column
-		CREATE TABLE IF NOT EXISTS entity_sequences (
+		-- Node ID sequences: one row per entity type.
+		CREATE TABLE IF NOT EXISTS %s (
 			entity_type TEXT NOT NULL,
-			next_id INTEGER NOT NULL DEFAULT 1,
+			next_id     INTEGER NOT NULL DEFAULT 1,
 			PRIMARY KEY (entity_type)
 		);
 
-		-- Schema metadata table (unchanged)
-		CREATE TABLE IF NOT EXISTS schemas (
-			entity_type TEXT PRIMARY KEY,
-			schema TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Version tracking for migrations (unchanged)
-		CREATE TABLE IF NOT EXISTS schema_version (
-			version INTEGER PRIMARY KEY,
-			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Tenant registry (lives in base store; created here for uniformity)
-		CREATE TABLE IF NOT EXISTS tenants (
-			id INTEGER NOT NULL PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Full-text search virtual table (FTS5) — no tenant_id column
-		CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+		-- Node full-text search virtual table (FTS5).
+		CREATE VIRTUAL TABLE IF NOT EXISTS %s USING fts5(
 			entity_type UNINDEXED,
-			entity_id UNINDEXED,
+			entity_id   UNINDEXED,
 			content
 		);
-	`
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("failed to create per-file schema: %w", err)
+	`, nodes, nIdxE, nodes, nIdxU, nodes, nseq, nfts)
+	if _, err := s.db.ExecContext(ctx, nodeDDL); err != nil {
+		return fmt.Errorf("createSchema: node tables for tenant %04X: %w", tid, err)
 	}
+
+	// Per-tenant edge FTS table — created unconditionally alongside the node
+	// tables (not gated on GraphEnabled) so it is always available for text
+	// search over edge property content regardless of graph mode.
+	efts := tenant.EdgeFTSTableName(tid)
+	eftsDDL := fmt.Sprintf(`
+		-- Edge full-text search virtual table (FTS5).
+		-- Indexes the text content of edge properties for full-text search.
+		-- rel:      relationship label (e.g. "KNOWS")
+		-- edge_id:  surrogate edge ID from t<X>_eseq (0 for topology-only edges)
+		-- content:  searchable text extracted from the property blob
+		CREATE VIRTUAL TABLE IF NOT EXISTS %s USING fts5(
+			rel      UNINDEXED,
+			edge_id  UNINDEXED,
+			content
+		);
+	`, efts)
+	if _, err := s.db.ExecContext(ctx, eftsDDL); err != nil {
+		return fmt.Errorf("createSchema: edge FTS table for tenant %04X: %w", tid, err)
+	}
+
 	return nil
 }
 
@@ -478,85 +491,123 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 		fmt.Sprintf("PRAGMA cache_size = -%d", s.config.CacheSize),
 		fmt.Sprintf("PRAGMA busy_timeout = %d", s.config.BusyTimeout),
 	}
-	
+
 	for _, pragma := range pragmas {
 		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
 			return fmt.Errorf("failed to set pragma: %w", err)
 		}
 	}
-	
-	// Create schema — branch on per-file vs shared mode.
-	if s.config.PerFileTenants {
-		if err := s.createSchemaPerFile(ctx); err != nil {
-			return err
-		}
-	} else {
-		if err := s.createSchemaShared(ctx); err != nil {
-			return err
-		}
+
+	// Create per-tenant table family (nodes, sequences, FTS) and global
+	// tables (schema_version, tenants). Graph table created below when enabled.
+	if err := s.createSchema(ctx); err != nil {
+		return err
 	}
-	
-	// Create per-tenant graph edge table when graph is enabled.
-	// All tenants, including tenant 0, get their own graph_tXXXX table.
+
+	// Create per-tenant graph topology table when graph is enabled.
 	if s.config.GraphEnabled {
-		table := tenant.GraphEdgesTableName(s.config.TenantID)
-		tenantGraphSchema := fmt.Sprintf(`
+		tid := s.config.TenantID
+		table := tenant.GraphTableName(tid)
+		graphDDL := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
-				source_entity TEXT NOT NULL,
-				source_id INTEGER NOT NULL,
-				target_entity TEXT NOT NULL,
-				target_id INTEGER NOT NULL,
+				source_entity     TEXT NOT NULL,
+				source_id         INTEGER NOT NULL,
+				target_entity     TEXT NOT NULL,
+				target_id         INTEGER NOT NULL,
 				relationship_name TEXT NOT NULL,
-				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				edge_id           INTEGER,
+				created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 				PRIMARY KEY (source_entity, source_id, target_entity, target_id, relationship_name)
 			);
-			CREATE INDEX IF NOT EXISTS idx_%s_source ON %s(source_entity, source_id);
-			CREATE INDEX IF NOT EXISTS idx_%s_target ON %s(target_entity, target_id);
-			CREATE INDEX IF NOT EXISTS idx_%s_rel    ON %s(relationship_name);
-		`, table, table, table, table, table, table, table)
-		if _, err := s.db.ExecContext(ctx, tenantGraphSchema); err != nil {
-			return fmt.Errorf("failed to create tenant graph table %s: %w", table, err)
+			CREATE INDEX IF NOT EXISTS %s ON %s(source_entity, source_id);
+			CREATE INDEX IF NOT EXISTS %s ON %s(target_entity, target_id);
+			CREATE INDEX IF NOT EXISTS %s ON %s(relationship_name);
+		`, table,
+			tenant.GraphIndexSource(tid), table,
+			tenant.GraphIndexTarget(tid), table,
+			tenant.GraphIndexRel(tid), table)
+		if _, err := s.db.ExecContext(ctx, graphDDL); err != nil {
+			return fmt.Errorf("failed to create graph table %s: %w", table, err)
+		}
+
+		// Blob edge property store: one row per edge with properties,
+		// keyed by surrogate edge ID. Edges without properties have no row here;
+		// their edge_id in t<X>_graph stays NULL.
+		edgesTable := tenant.EdgePropsTableName(tid)
+		edgesDDL := fmt.Sprintf(`
+			CREATE TABLE IF NOT EXISTS %s (
+				edge_id    INTEGER PRIMARY KEY,
+				rel        TEXT NOT NULL,
+				data       TEXT NOT NULL,
+				_version   INTEGER NOT NULL DEFAULT 1,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			);
+		`, edgesTable)
+		if _, err := s.db.ExecContext(ctx, edgesDDL); err != nil {
+			return fmt.Errorf("failed to create edge props table %s: %w", edgesTable, err)
+		}
+
+		// Edge ID sequences: one row per relationship label, auto-incrementing.
+		// Mirrors t<X>_nseq for nodes.
+		eseqTable := tenant.EdgeSeqTableName(tid)
+		eseqDDL := fmt.Sprintf(`
+			CREATE TABLE IF NOT EXISTS %s (
+				rel     TEXT NOT NULL,
+				next_id INTEGER NOT NULL DEFAULT 1,
+				PRIMARY KEY (rel)
+			);
+		`, eseqTable)
+		if _, err := s.db.ExecContext(ctx, eseqDDL); err != nil {
+			return fmt.Errorf("failed to create edge seq table %s: %w", eseqTable, err)
+		}
+
+		// Edge schema registry: one row per registered relationship label.
+		// Presence here suppresses the warn-once log in AddEdgeWithProps and
+		// is a prerequisite for adapted edge tables (Stage 7).
+		// column_spec and has_extra are NULL for schema-only registrations
+		// (Stage 6) and populated when an adapted table is created (Stage 7).
+		eschTable := tenant.EdgeSchemaTableName(tid)
+		eschDDL := fmt.Sprintf(`
+			CREATE TABLE IF NOT EXISTS %s (
+				rel         TEXT PRIMARY KEY,
+				schema_hash TEXT NOT NULL,
+				schema_json TEXT NOT NULL,
+				column_spec TEXT,
+				has_extra   INTEGER,
+				created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			);
+		`, eschTable)
+		if _, err := s.db.ExecContext(ctx, eschDDL); err != nil {
+			return fmt.Errorf("failed to create edge schema table %s: %w", eschTable, err)
 		}
 	}
-	
-	// Create triggers for automatic graph synchronization
-	if err := s.createGraphTriggers(ctx); err != nil {
-		return fmt.Errorf("failed to create triggers: %w", err)
+
+	// Graph triggers: not implemented — see initGraphSchema for manual sync strategy.
+	if err := s.initGraphSchema(ctx); err != nil {
+		return fmt.Errorf("failed to initialise graph schema: %w", err)
 	}
-	
-	// Mark current schema version
-	if _, err := s.db.ExecContext(ctx, 
-		"INSERT OR IGNORE INTO schema_version (version) VALUES (2)"); err != nil {
-		return fmt.Errorf("failed to set schema version: %w", err)
-	}
-	
-	// Migration v3: add _version column for optimistic concurrency
-	var hasV3 int
-	_ = s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM schema_version WHERE version = 3").Scan(&hasV3)
-	if hasV3 == 0 {
-		// ALTER TABLE ADD COLUMN is idempotent-safe: if the column already
-		// exists (new database), the error is harmless and we just skip it.
-		_, alterErr := s.db.ExecContext(ctx,
-			"ALTER TABLE entities ADD COLUMN _version INTEGER NOT NULL DEFAULT 1")
-		if alterErr != nil {
-			// Column may already exist from the CREATE TABLE — that's fine
-			errMsg := alterErr.Error()
-			if !strings.Contains(errMsg, "duplicate column") {
-				return fmt.Errorf("failed to add _version column: %w", alterErr)
-			}
-		}
+
+	// Mark schema versions.
+	// v2: initial shared schema. v3: _version column (part of DDL for new databases).
+	// v4: per-tenant table naming (t<XXXX>_nodes replaces entities).
+	// v5: edge property infrastructure (t<X>_edges, t<X>_eseq, edge_id on t<X>_graph).
+	for _, v := range []int{2, 3, 4, 5} {
 		if _, err := s.db.ExecContext(ctx,
-			"INSERT OR IGNORE INTO schema_version (version) VALUES (3)"); err != nil {
-			return fmt.Errorf("failed to set schema version 3: %w", err)
+			"INSERT OR IGNORE INTO schema_version (version) VALUES (?)", v); err != nil {
+			return fmt.Errorf("failed to set schema version %d: %w", v, err)
 		}
 	}
 
 	return nil
 }
 
-// createGraphTriggers creates triggers to automatically sync the tenant graph table with REF fields in JSON
-func (s *SQLiteStore) createGraphTriggers(ctx context.Context) error {
+// initGraphSchema is called during schema initialisation. Graph edge
+// synchronisation is handled manually inside each write transaction
+// via syncGraphEdges() — not via SQLite triggers. See the comment block
+// below for the rationale.
+func (s *SQLiteStore) initGraphSchema(ctx context.Context) error {
 	// NOTE: Graph synchronization strategy
 	// =====================================
 	// We use MANUAL graph synchronization instead of triggers for the following reasons:
@@ -575,7 +626,334 @@ func (s *SQLiteStore) createGraphTriggers(ctx context.Context) error {
 	//
 	// The syncGraphEdges() method is called within every transaction that modifies documents,
 	// ensuring document-graph consistency is always maintained atomically.
-	
+
+	return nil
+}
+
+// initV2Schema creates the v2-specific schema tables on first enable.
+//
+// --- v2 schema versioning convention ---
+//
+// v1 schema versions live in the shared `schema_version` table (integers 2-5
+// at the time v2 work begins). v2 schema versions live in a separate
+// `schema_version_v2` table so that:
+//
+//   - Disabling v2 (XOLU_API_V2_ENABLED=false) leaves no orphaned version
+//     markers in the v1 schema_version table.
+//   - The v2 table is only created when v2 is first enabled; it does not
+//     appear in v1-only deployments at all.
+//   - Each v2 development stage (S1-S10 in the plan) inserts its own row.
+//
+// v2 version numbers correspond directly to plan stages:
+//
+//   Stage | Version | Tables created
+//   ------|---------|-----------------------------------------------
+//   S1    |   1     | schema_version_v2 itself (bootstrap)
+//   S3    |   3     | entity_meta
+//   S5    |   5     | gen_definitions, sequences
+//   S7    |   7     | fsm_definitions, fsm_machines,
+//         |         | fsm_history, fsm_terminal_states,
+//         |         | fsm_id_seq (created)
+//   S9    |   9     | event_defs, event_delivery_log
+//
+// initV2Schema is called by the server when XOLU_API_V2_ENABLED=true, before
+// any v2 handler is registered. It is idempotent: repeated calls are safe
+// because all DDL uses CREATE TABLE IF NOT EXISTS and INSERT OR IGNORE.
+// A failure here logs a warning and disables v2 for this run; it does not
+// prevent the server from starting.
+
+// InitV2Schema implements storage.V2SchemaInitialiser.
+func (s *SQLiteStore) InitV2Schema(ctx context.Context) error {
+	return s.initV2Schema(ctx)
+}
+
+func (s *SQLiteStore) initV2Schema(ctx context.Context) error {
+	// Bootstrap: create the v2 version table if not present.
+	bootstrapDDL := `
+		CREATE TABLE IF NOT EXISTS schema_version_v2 (
+			version    INTEGER PRIMARY KEY,
+			stage      TEXT NOT NULL,
+			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, bootstrapDDL); err != nil {
+		return fmt.Errorf("v2 schema bootstrap failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 1, "S1-scaffold"); err != nil {
+		return fmt.Errorf("v2 schema version 1 insert failed: %w", err)
+	}
+
+	// Subsequent stages add their DDL here (S3, S5, S7, S9 ...).
+	// Each block is guarded by CREATE TABLE IF NOT EXISTS and INSERT OR IGNORE,
+	// so running initV2Schema after a stage upgrade is safe.
+
+	// S3: entity metadata sidecar with TTL support.
+	metaDDL := `
+		CREATE TABLE IF NOT EXISTS entity_meta (
+			tenant_id  INTEGER   NOT NULL DEFAULT 0,
+			entity     TEXT      NOT NULL,
+			id         INTEGER   NOT NULL,
+			key        TEXT      NOT NULL,
+			value      TEXT      NOT NULL,
+			expires_at TIMESTAMP NULL DEFAULT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, entity, id, key)
+		);
+		CREATE INDEX IF NOT EXISTS idx_entity_meta_entity
+			ON entity_meta(tenant_id, entity, id);
+		CREATE INDEX IF NOT EXISTS idx_entity_meta_expires
+			ON entity_meta(expires_at) WHERE expires_at IS NOT NULL;
+	`
+	if _, err := s.db.ExecContext(ctx, metaDDL); err != nil {
+		return fmt.Errorf("v2 schema S3 (entity_meta) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 3, "S3-meta"); err != nil {
+		return fmt.Errorf("v2 schema version 3 insert failed: %w", err)
+	}
+
+	// S5: named sequence definitions and state.
+	seqDDL := `
+		CREATE TABLE IF NOT EXISTS gen_definitions (
+			tenant_id   INTEGER NOT NULL DEFAULT 0,
+			type        TEXT    NOT NULL,
+			name        TEXT    NOT NULL,
+			config_json TEXT    NOT NULL DEFAULT '{}',
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, type, name)
+		);
+		CREATE TABLE IF NOT EXISTS sequences (
+			tenant_id    INTEGER NOT NULL DEFAULT 0,
+			name         TEXT    NOT NULL,
+			current_val  INTEGER NOT NULL,
+			start_val    INTEGER NOT NULL DEFAULT 1,
+			increment_by INTEGER NOT NULL DEFAULT 1,
+			min_val      INTEGER,
+			max_val      INTEGER,
+			cycle        INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (tenant_id, name)
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, seqDDL); err != nil {
+		return fmt.Errorf("v2 schema S5 (sequences) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 5, "S5-sequences"); err != nil {
+		return fmt.Errorf("v2 schema version 5 insert failed: %w", err)
+	}
+
+	// S7: FSM definitions and machines.
+	//
+	// Prototype-snapshot model: fsm_machines.fsm_def_id records lineage
+	// only and has no foreign-key constraint. A definition may be deleted
+	// without affecting machines already derived from it; each machine holds
+	// a self-contained snapshot in snapshot_json. fsm_terminal_states is a
+	// denormalised per-machine terminal-state index for fast walk checks.
+	fsmDDL := `
+		CREATE TABLE IF NOT EXISTS fsm_definitions (
+			tenant_id     INTEGER NOT NULL DEFAULT 0,
+			id            INTEGER NOT NULL,
+			name          TEXT    NOT NULL,
+			spec_json     TEXT    NOT NULL,
+			analysis_json TEXT    NOT NULL DEFAULT '{}',
+			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_fsm_definitions_name
+			ON fsm_definitions(tenant_id, name);
+
+		CREATE TABLE IF NOT EXISTS fsm_machines (
+			tenant_id       INTEGER NOT NULL DEFAULT 0,
+			id              INTEGER NOT NULL,
+			fsm_def_id      INTEGER NOT NULL,
+			definition_name TEXT    NOT NULL,
+			snapshot_json   TEXT    NOT NULL,
+			state           TEXT    NOT NULL,
+			vars_json       TEXT    NOT NULL DEFAULT '{}',
+			ref             TEXT    NULL DEFAULT NULL,
+			created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_fsm_machines_definition
+			ON fsm_machines(tenant_id, fsm_def_id);
+		CREATE INDEX IF NOT EXISTS idx_fsm_machines_state
+			ON fsm_machines(tenant_id, state);
+		CREATE INDEX IF NOT EXISTS idx_fsm_machines_ref
+			ON fsm_machines(tenant_id, ref) WHERE ref IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS fsm_history (
+			tenant_id   INTEGER NOT NULL DEFAULT 0,
+			id          INTEGER NOT NULL,
+			machine_id  INTEGER NOT NULL,
+			from_state  TEXT    NULL DEFAULT NULL,
+			to_state    TEXT    NOT NULL,
+			input       TEXT    NULL DEFAULT NULL,
+			payload_json TEXT   NULL DEFAULT NULL,
+			vars_json   TEXT    NOT NULL DEFAULT '{}',
+			output_json TEXT    NULL DEFAULT NULL,
+			note        TEXT    NULL DEFAULT NULL,
+			at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_fsm_history_machine
+			ON fsm_history(tenant_id, machine_id, id);
+
+		CREATE TABLE IF NOT EXISTS fsm_terminal_states (
+			tenant_id  INTEGER NOT NULL DEFAULT 0,
+			machine_id INTEGER NOT NULL,
+			state      TEXT    NOT NULL,
+			PRIMARY KEY (tenant_id, machine_id, state)
+		);
+
+		-- Per-tenant, per-kind monotonic ID allocator for FSM definitions,
+		-- machines, and history rows. Allocation uses the same atomic
+		-- INSERT ... ON CONFLICT DO UPDATE SET next_id = next_id + 1 RETURNING
+		-- pattern as the node-sequence allocator (see nextNodeID), chosen over
+		-- a per-insert MAX(id)+1 scan for consistency with existing storage
+		-- conventions and to avoid read-modify-write contention under
+		-- concurrent inserts. 'kind' is one of 'def', 'machine', 'history'.
+		CREATE TABLE IF NOT EXISTS fsm_id_seq (
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			kind      TEXT    NOT NULL,
+			next_id   INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (tenant_id, kind)
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, fsmDDL); err != nil {
+		return fmt.Errorf("v2 schema S7 (fsm) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 7, "S7-fsm"); err != nil {
+		return fmt.Errorf("v2 schema version 7 insert failed: %w", err)
+	}
+
+	// S9: event subscriptions and delivery log.
+	//
+	// A subscription binds an event_type (entity.created/updated/deleted or
+	// fsm.output) to an action (webhook or oql) with a JSON config. execution
+	// records the requested mode; Part 1 always dispatches async regardless and
+	// reports the downgrade via an X-Executed-As header. The delivery log records
+	// one row per dispatch attempt (Part 1 is single-attempt, at-most-once), so a
+	// dropped or failed delivery is observable after the fact.
+	eventDDL := `
+		CREATE TABLE IF NOT EXISTS event_defs (
+			tenant_id   INTEGER NOT NULL DEFAULT 0,
+			id          INTEGER NOT NULL,
+			event_type  TEXT    NOT NULL,
+			action_type TEXT    NOT NULL,
+			config_json TEXT    NOT NULL DEFAULT '{}',
+			execution   TEXT    NOT NULL DEFAULT 'async',
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_event_defs_type
+			ON event_defs(tenant_id, event_type);
+
+		CREATE TABLE IF NOT EXISTS event_delivery_log (
+			tenant_id       INTEGER NOT NULL DEFAULT 0,
+			id              INTEGER NOT NULL,
+			event_def_id    INTEGER NOT NULL,
+			event_type      TEXT    NOT NULL,
+			status          TEXT    NOT NULL,
+			detail          TEXT    NOT NULL DEFAULT '',
+			attempted_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_event_delivery_log_sub
+			ON event_delivery_log(tenant_id, event_def_id);
+	`
+	if _, err := s.db.ExecContext(ctx, eventDDL); err != nil {
+		return fmt.Errorf("v2 schema S9 (events) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 9, "S9-events"); err != nil {
+		return fmt.Errorf("v2 schema version 9 insert failed: %w", err)
+	}
+
+	// S11: cal scheduling primitive — the authoritative booking record (H1) the
+	// derived Pebble occupancy index is rebuilt from. Follows the fsm table
+	// convention (tenant_id column + PRIMARY KEY (tenant_id, ...), unprefixed
+	// names) rather than the prefixed per-tenant data-table convention: these are
+	// definition/instance/history records like the fsm family, not high-volume
+	// blob/graph data tables.
+	//
+	// Times are absolute UTC instants stored as INTEGER UnixNano (the xolutime
+	// invariant; cal never stores local_time + zone_id — that intention is the
+	// caller's, per R-T1). The Pebble index (occupancy bitmap, rollup, ordinal
+	// map) is derived and rebuildable from these tables; losing it is never a lost
+	// booking (H1). Secondary indices target the LiveBookingsOn(calendar, state)
+	// hot path used by every lifecycle mutation, Move check, and MatchCommit
+	// pre-check (see docs/KNOWN_ISSUES.md "cal design — schema gaps").
+	calDDL := `
+		CREATE TABLE IF NOT EXISTS cal_calendars (
+			tenant_id     INTEGER NOT NULL DEFAULT 0,
+			calendar_id   TEXT    NOT NULL,
+			ordinal       INTEGER NOT NULL,
+			entity_ref    INTEGER NOT NULL DEFAULT 0,
+			capacity      INTEGER NOT NULL DEFAULT 1,
+			default_state TEXT    NOT NULL DEFAULT 'binding',
+			match_policy  TEXT    NOT NULL DEFAULT 'binding',
+			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, calendar_id)
+		);
+		-- ordinal is unique within a tenant (it is the dense key-space coordinate).
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_cal_calendars_ordinal
+			ON cal_calendars(tenant_id, ordinal);
+
+		CREATE TABLE IF NOT EXISTS cal_bookings (
+			tenant_id        INTEGER NOT NULL DEFAULT 0,
+			calendar_id      TEXT    NOT NULL,
+			booking_id       TEXT    NOT NULL,
+			state            TEXT    NOT NULL,
+			start_utc        INTEGER NOT NULL,           -- UnixNano, UTC
+			end_utc          INTEGER NOT NULL,           -- UnixNano, UTC, half-open
+			mode             TEXT    NOT NULL DEFAULT 'exclusive',
+			bearer           INTEGER NOT NULL DEFAULT 0, -- entity handle (0 = EntityNil)
+			buffer_after_utc INTEGER NULL DEFAULT NULL,  -- UnixNano, UTC; NULL = no buffer
+			created_utc      INTEGER NOT NULL,
+			updated_utc      INTEGER NOT NULL,
+			detail_ref       TEXT    NULL DEFAULT NULL,
+			PRIMARY KEY (tenant_id, calendar_id, booking_id)
+		);
+		-- The hot path: LiveBookingsOn(calendar_id, plane) filters by calendar and
+		-- state on every lifecycle mutation, Move feasibility check, and
+		-- MatchCommit pre-check.
+		CREATE INDEX IF NOT EXISTS idx_cal_bookings_cal_state
+			ON cal_bookings(tenant_id, calendar_id, state);
+		-- bookings/list?state=missed and other cross-calendar state scans.
+		CREATE INDEX IF NOT EXISTS idx_cal_bookings_state
+			ON cal_bookings(tenant_id, state);
+
+		-- Reserved for per-participant optionality (optionality = per-participant).
+		-- Created with the family per xolu's schema convention (cf. the fsm_* set);
+		-- empty until the participant model lands.
+		CREATE TABLE IF NOT EXISTS cal_participants (
+			tenant_id   INTEGER NOT NULL DEFAULT 0,
+			calendar_id TEXT    NOT NULL,
+			booking_id  TEXT    NOT NULL,
+			entity      INTEGER NOT NULL,
+			required    INTEGER NOT NULL DEFAULT 1,  -- 1 = required, 0 = optional
+			PRIMARY KEY (tenant_id, calendar_id, booking_id, entity)
+		);
+
+		-- Per-tenant monotonic ordinal allocator (GATE-3 #5), mirroring fsm_id_seq.
+		-- next_ord is the dense uint32 counter (ascending from 1). The retired-pool
+		-- for the reuse policy lives in the Pebble 0x03 metadata, not here.
+		CREATE TABLE IF NOT EXISTS cal_ord_seq (
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			next_ord  INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (tenant_id)
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, calDDL); err != nil {
+		return fmt.Errorf("v2 schema S11 (cal) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 11, "S11-cal"); err != nil {
+		return fmt.Errorf("v2 schema version 11 insert failed: %w", err)
+	}
+
 	return nil
 }
 
@@ -598,45 +976,35 @@ func (s *SQLiteStore) Create(ctx context.Context, entity string, data map[string
 }
 
 func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[string]interface{}) (int, error) {
-	
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	
-	// Get next ID (tenant-scoped sequence)
+
+	// Get next ID from per-tenant sequence table (no tenant_id column — table is the boundary).
 	var nextID int
-	var seqSQL string
-	if s.config.PerFileTenants {
-		seqSQL = `
-			INSERT INTO entity_sequences (entity_type, next_id)
-			VALUES (?, 1)
-			ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
-			RETURNING next_id`
-		err = tx.QueryRowContext(ctx, seqSQL, entity).Scan(&nextID)
-	} else {
-		seqSQL = `
-			INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-			VALUES (?, ?, 1)
-			ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
-			RETURNING next_id`
-		err = tx.QueryRowContext(ctx, seqSQL, int(s.config.TenantID), entity).Scan(&nextID)
-	}
+	seqSQL := `
+		INSERT INTO ` + s.nodeSeqTable() + ` (entity_type, next_id)
+		VALUES (?, 1)
+		ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
+		RETURNING next_id`
+	err = tx.QueryRowContext(ctx, seqSQL, entity).Scan(&nextID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get next ID: %w", err)
 	}
-	
+
 	// Create a copy of data to avoid mutating input
 	dataCopy := make(map[string]interface{}, len(data)+1)
 	for k, v := range data {
 		dataCopy[k] = v
 	}
 	dataCopy["id"] = nextID
-	
+
 	// Insert entity: adapted table or blob
 	if spec := s.adapted.Get(entity); spec != nil {
-		if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), nextID, dataCopy); err != nil {
+		if err := adaptedCreate(ctx, tx, spec, s.dialect, nextID, dataCopy); err != nil {
 			return 0, err
 		}
 	} else {
@@ -645,37 +1013,29 @@ func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[s
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal data: %w", err)
 		}
-		var insErr error
-		if s.config.PerFileTenants {
-			_, insErr = tx.ExecContext(ctx, `
-				INSERT INTO entities (entity_type, id, data)
-				VALUES (?, ?, ?)
-			`, entity, nextID, string(jsonData))
-		} else {
-			_, insErr = tx.ExecContext(ctx, `
-				INSERT INTO entities (tenant_id, entity_type, id, data)
-				VALUES (?, ?, ?, ?)
-			`, int(s.config.TenantID), entity, nextID, string(jsonData))
-		}
+		_, insErr := tx.ExecContext(ctx, `
+			INSERT INTO `+s.nodesTable()+` (entity_type, id, data)
+			VALUES (?, ?, ?)
+		`, entity, nextID, string(jsonData))
 		if insErr != nil {
 			return 0, fmt.Errorf("failed to insert entity: %w", insErr)
 		}
 	}
-	
+
 	// Manually sync graph edges
 	if err := s.syncGraphEdges(ctx, tx, entity, nextID, dataCopy); err != nil {
 		return 0, fmt.Errorf("failed to sync graph: %w", err)
 	}
-	
+
 	// Index for full-text search
 	if err := s.indexForFTS(ctx, tx, entity, nextID, dataCopy); err != nil {
 		return 0, fmt.Errorf("failed to index for FTS: %w", err)
 	}
-	
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit: %w", err)
 	}
-	
+
 	return nextID, nil
 }
 
@@ -729,7 +1089,7 @@ func (s *SQLiteStore) syncGraphEdges(ctx context.Context, tx *sql.Tx, sourceEnti
 	if err != nil {
 		return fmt.Errorf("syncGraphEdges: prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, e := range edges {
 		if _, err := stmt.ExecContext(ctx, e.sourceEntity, e.sourceID, e.targetEntity, e.targetID, e.relationship); err != nil {
@@ -748,33 +1108,92 @@ func (s *SQLiteStore) Get(ctx context.Context, entity string, id int) (map[strin
 }
 
 func (s *SQLiteStore) getInner(ctx context.Context, entity string, id int) (map[string]interface{}, error) {
-	
+
 	// Adapted table path
 	if spec := s.adapted.Get(entity); spec != nil {
-		return adaptedGet(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID), id)
+		return adaptedGet(ctx, s.readDB, spec, s.dialect, id)
 	}
 
 	var jsonData string
 	var version int
 	err := s.readDB.QueryRowContext(ctx, `
-		SELECT data, _version FROM entities 
-		WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
-	`, s.tenantArgs(entity, id)...).Scan(&jsonData, &version)
-	
+		SELECT data, _version FROM `+s.nodesTable()+` 
+		WHERE `+`entity_type = ? AND id = ?
+	`, entity, id).Scan(&jsonData, &version)
+
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query entity: %w", err)
 	}
-	
+
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonData), &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal data: %w", err)
 	}
-	
+
 	result["_version"] = version
 	return result, nil
+}
+
+// GetMany fetches multiple " + s.nodesTable() + " of the same type in a single query.
+// Returns a map[id]data for every id found; missing ids are absent.
+func (s *SQLiteStore) GetMany(ctx context.Context, entity string, ids []int) (map[int]map[string]interface{}, error) {
+	if len(ids) == 0 {
+		return map[int]map[string]interface{}{}, nil
+	}
+	results := make(map[int]map[string]interface{}, len(ids))
+
+	// Adapted table path — fall back to individual Gets (rare in practice).
+	if spec := s.adapted.Get(entity); spec != nil {
+		for _, id := range ids {
+			data, err := s.getInner(ctx, entity, id)
+			if err == ErrNotFound {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			results[id] = data
+		}
+		return results, nil
+	}
+
+	// Blob path: one query with WHERE id IN (...).
+	placeholders := make([]string, len(ids))
+	args := []interface{}{entity}
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	query := `SELECT id, data, _version FROM ` + s.nodesTable() + ` WHERE ` +
+		`entity_type = ? AND id IN (` +
+		strings.Join(placeholders, ",") + `)`
+
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("GetMany query: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id, version int
+		var jsonData string
+		if err := rows.Scan(&id, &jsonData, &version); err != nil {
+			return nil, fmt.Errorf("GetMany scan: %w", err)
+		}
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
+			return nil, fmt.Errorf("GetMany unmarshal id=%d: %w", id, err)
+		}
+		data["_version"] = version
+		results[id] = data
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetMany rows: %w", err)
+	}
+	return results, nil
 }
 
 // Update replaces an entity completely
@@ -785,13 +1204,13 @@ func (s *SQLiteStore) Update(ctx context.Context, entity string, id int, data ma
 }
 
 func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, data map[string]interface{}) error {
-	
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Extract _version for optimistic concurrency (opt-in: if absent, no check)
 	var expectVersion int
 	var hasVersion bool
@@ -804,7 +1223,7 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 			expectVersion = tv
 		}
 	}
-	
+
 	// Create a copy to avoid mutating input; strip _version from the JSON blob
 	dataCopy := make(map[string]interface{}, len(data)+1)
 	for k, v := range data {
@@ -814,10 +1233,10 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 		dataCopy[k] = v
 	}
 	dataCopy["id"] = id
-	
+
 	// Update entity: adapted table or blob
 	if spec := s.adapted.Get(entity); spec != nil {
-		if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy, expectVersion, hasVersion); err != nil {
+		if err := adaptedUpdate(ctx, tx, spec, s.dialect, id, dataCopy, expectVersion, hasVersion); err != nil {
 			return err
 		}
 	} else {
@@ -830,21 +1249,21 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 		var result sql.Result
 		if hasVersion {
 			result, err = tx.ExecContext(ctx, `
-				UPDATE entities 
+				UPDATE `+s.nodesTable()+` 
 				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?
-			`, append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id, expectVersion)...)...)
+				WHERE `+`entity_type = ? AND id = ? AND _version = ?
+			`, string(jsonData), entity, id, expectVersion)
 		} else {
 			result, err = tx.ExecContext(ctx, `
-				UPDATE entities 
+				UPDATE `+s.nodesTable()+` 
 				SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP 
-				WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
-			`, append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id)...)...)
+				WHERE `+`entity_type = ? AND id = ?
+			`, string(jsonData), entity, id)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to update entity: %w", err)
 		}
-		
+
 		rows, err := result.RowsAffected()
 		if err != nil {
 			return err
@@ -854,9 +1273,9 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 			if hasVersion {
 				var exists int
 				_ = tx.QueryRowContext(ctx, `
-					SELECT 1 FROM entities 
-					WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?
-				`, s.tenantArgs(entity, id)...).Scan(&exists)
+					SELECT 1 FROM `+s.nodesTable()+` 
+					WHERE `+`entity_type = ? AND id = ?
+				`, entity, id).Scan(&exists)
 				if exists == 1 {
 					return ErrConflict
 				}
@@ -864,17 +1283,17 @@ func (s *SQLiteStore) updateInner(ctx context.Context, entity string, id int, da
 			return ErrNotFound
 		}
 	}
-	
+
 	// Manually sync graph edges
 	if err := s.syncGraphEdges(ctx, tx, entity, id, dataCopy); err != nil {
 		return fmt.Errorf("failed to sync graph: %w", err)
 	}
-	
+
 	// Update FTS index
 	if err := s.indexForFTS(ctx, tx, entity, id, dataCopy); err != nil {
 		return fmt.Errorf("failed to update FTS index: %w", err)
 	}
-	
+
 	return tx.Commit()
 }
 
@@ -894,13 +1313,13 @@ func (s *SQLiteStore) PatchValidated(ctx context.Context, entity string, id int,
 }
 
 func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, updates map[string]interface{}, validate func(merged map[string]interface{}) error) error {
-	
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Extract _version for optimistic concurrency (opt-in: if absent, no check)
 	var expectVersion int
 	var hasVersion bool
@@ -913,14 +1332,14 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 			expectVersion = tv
 		}
 	}
-	
+
 	spec := s.adapted.Get(entity)
 
 	// Get existing data (adapted or blob path)
 	var existing map[string]interface{}
 	if spec != nil {
 		var currentVersion int
-		existing, currentVersion, err = adaptedGetInTx(ctx, tx, spec, s.dialect, int(s.config.TenantID), id)
+		existing, currentVersion, err = adaptedGetInTx(ctx, tx, spec, s.dialect, id)
 		if err != nil {
 			return err
 		}
@@ -931,21 +1350,21 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 	} else {
 		var jsonData string
 		err = tx.QueryRowContext(ctx,
-			`SELECT data FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
-			s.tenantArgs(entity, id)...).Scan(&jsonData)
-		
+			`SELECT data FROM `+s.nodesTable()+` WHERE `+`entity_type = ? AND id = ?`,
+			entity, id).Scan(&jsonData)
+
 		if err == sql.ErrNoRows {
 			return ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("failed to query entity: %w", err)
 		}
-		
+
 		if err := json.Unmarshal([]byte(jsonData), &existing); err != nil {
 			return fmt.Errorf("failed to unmarshal data: %w", err)
 		}
 	}
-	
+
 	// Merge updates into existing data; skip _version (it's metadata, not document content).
 	// nil values are stored as-is (JSON null). The handler is responsible for
 	// removing keys from the patch map when PatchNullBehavior is "delete".
@@ -955,10 +1374,10 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 		}
 		existing[key] = value
 	}
-	
+
 	// Ensure ID is set
 	existing["id"] = id
-	
+
 	// Run validation against the merged data (inside the transaction)
 	if validate != nil {
 		if err := validate(existing); err != nil {
@@ -968,11 +1387,11 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 
 	// Strip _version from the data (it lives in the column, not the document)
 	delete(existing, "_version")
-	
+
 	// Write back: adapted or blob path
 	if spec != nil {
 		// For adapted path, use adaptedUpdate with version already checked above
-		if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, existing, 0, false); err != nil {
+		if err := adaptedUpdate(ctx, tx, spec, s.dialect, id, existing, 0, false); err != nil {
 			return err
 		}
 	} else {
@@ -981,22 +1400,22 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 		if err != nil {
 			return fmt.Errorf("failed to marshal data: %w", err)
 		}
-		
+
 		// Update with optional version check
 		var result sql.Result
 		if hasVersion {
 			result, err = tx.ExecContext(ctx,
-				`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?`,
-				append([]interface{}{string(updatedJSON)}, s.tenantArgs(entity, id, expectVersion)...)...)
+				`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ? AND _version = ?`,
+				string(updatedJSON), entity, id, expectVersion)
 		} else {
 			result, err = tx.ExecContext(ctx,
-				`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
-				append([]interface{}{string(updatedJSON)}, s.tenantArgs(entity, id)...)...)
+				`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ?`,
+				string(updatedJSON), entity, id)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to update entity: %w", err)
 		}
-		
+
 		rows, err := result.RowsAffected()
 		if err != nil {
 			return err
@@ -1009,17 +1428,17 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 			return ErrNotFound
 		}
 	}
-	
+
 	// Manually sync graph edges
 	if err := s.syncGraphEdges(ctx, tx, entity, id, existing); err != nil {
 		return fmt.Errorf("failed to sync graph: %w", err)
 	}
-	
+
 	// Update FTS index
 	if err := s.indexForFTS(ctx, tx, entity, id, existing); err != nil {
 		return fmt.Errorf("failed to update FTS index: %w", err)
 	}
-	
+
 	return tx.Commit()
 }
 
@@ -1031,26 +1450,26 @@ func (s *SQLiteStore) Delete(ctx context.Context, entity string, id int) error {
 }
 
 func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) error {
-	
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	
+
 	// Delete entity: adapted table or blob
 	if spec := s.adapted.Get(entity); spec != nil {
-		if err := adaptedDelete(ctx, tx, spec, s.dialect, int(s.config.TenantID), id); err != nil {
+		if err := adaptedDelete(ctx, tx, spec, s.dialect, id); err != nil {
 			return err
 		}
 	} else {
 		result, err := tx.ExecContext(ctx,
-			`DELETE FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
-			s.tenantArgs(entity, id)...)
+			`DELETE FROM `+s.nodesTable()+` WHERE `+`entity_type = ? AND id = ?`,
+			entity, id)
 		if err != nil {
 			return fmt.Errorf("failed to delete entity: %w", err)
 		}
-		
+
 		rows, err := result.RowsAffected()
 		if err != nil {
 			return err
@@ -1059,7 +1478,7 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) er
 			return ErrNotFound
 		}
 	}
-	
+
 	// Clean up graph edges
 	if s.config.GraphEnabled {
 		edgeTable := tenant.GraphEdgesTableName(s.config.TenantID)
@@ -1072,23 +1491,25 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) er
 			return fmt.Errorf("failed to delete graph edges: %w", err)
 		}
 	}
-	
+
 	// Remove from FTS index
 	idStr := fmt.Sprintf("%d", id)
-	if s.config.PerFileTenants {
-		_, err = tx.ExecContext(ctx, `
-			DELETE FROM entities_fts WHERE entity_type = ? AND entity_id = ?
+
+	_, err = tx.ExecContext(ctx, `
+			DELETE FROM `+s.nodeFTSTable()+` WHERE entity_type = ? AND entity_id = ?
 		`, entity, idStr)
-	} else {
-		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-		_, err = tx.ExecContext(ctx, `
-			DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
-		`, tidStr, entity, idStr)
-	}
+
 	if err != nil {
 		return fmt.Errorf("failed to delete from FTS index: %w", err)
 	}
-	
+
+	// Cascade delete v2 entity metadata (entity_meta is a global table;
+	// always attempt regardless of v2 enabled state — the table may not
+	// exist on v1-only deployments, in which case the error is ignored).
+	_, _ = tx.ExecContext(ctx,
+		`DELETE FROM entity_meta WHERE tenant_id=? AND entity=? AND id=?`,
+		s.config.TenantID, entity, id)
+
 	return tx.Commit()
 }
 
@@ -1145,8 +1566,8 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 			spec.TableName()), id).Scan(&exists)
 	} else {
 		err = tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
-			s.tenantArgs(entity, id)...).Scan(&exists)
+			`SELECT EXISTS(SELECT 1 FROM `+s.nodesTable()+` WHERE `+`entity_type = ? AND id = ?)`,
+			entity, id).Scan(&exists)
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to check existence: %w", err)
@@ -1155,7 +1576,7 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 	if exists {
 		// Overwrite path: conditional or unconditional update in place.
 		if spec != nil {
-			if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy, expectVersion, hasVersion); err != nil {
+			if err := adaptedUpdate(ctx, tx, spec, s.dialect, id, dataCopy, expectVersion, hasVersion); err != nil {
 				return false, err
 			}
 		} else {
@@ -1166,12 +1587,12 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 			var result sql.Result
 			if hasVersion {
 				result, err = tx.ExecContext(ctx,
-					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ?`,
-					append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id, expectVersion)...)...)
+					`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ? AND _version = ?`,
+					string(jsonData), entity, id, expectVersion)
 			} else {
 				result, err = tx.ExecContext(ctx,
-					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?`,
-					append([]interface{}{string(jsonData)}, s.tenantArgs(entity, id)...)...)
+					`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ?`,
+					string(jsonData), entity, id)
 			}
 			if err != nil {
 				return false, fmt.Errorf("failed to overwrite entity: %w", err)
@@ -1191,27 +1612,20 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 
 		// Update sequence so future auto-IDs stay above this one.
 		var seqErr error
-		if s.config.PerFileTenants {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (entity_type, next_id)
+
+		_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO `+s.nodeSeqTable()+` (entity_type, next_id)
 				VALUES (?, ?)
 				ON CONFLICT(entity_type) DO UPDATE
 				SET next_id = MAX(next_id, excluded.next_id + 1)
 			`, entity, id+1)
-		} else {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-				VALUES (?, ?, ?)
-				ON CONFLICT(tenant_id, entity_type) DO UPDATE
-				SET next_id = MAX(next_id, excluded.next_id + 1)
-			`, int(s.config.TenantID), entity, id+1)
-		}
+
 		if seqErr != nil {
 			return false, fmt.Errorf("failed to update sequence: %w", seqErr)
 		}
 
 		if spec != nil {
-			if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy); err != nil {
+			if err := adaptedCreate(ctx, tx, spec, s.dialect, id, dataCopy); err != nil {
 				return false, err
 			}
 		} else {
@@ -1220,17 +1634,12 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 				return false, fmt.Errorf("failed to marshal data: %w", err)
 			}
 			var insErr error
-			if s.config.PerFileTenants {
-				_, insErr = tx.ExecContext(ctx, `
-					INSERT INTO entities (entity_type, id, data)
+
+			_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO `+s.nodesTable()+` (entity_type, id, data)
 					VALUES (?, ?, ?)
 				`, entity, id, string(jsonData))
-			} else {
-				_, insErr = tx.ExecContext(ctx, `
-					INSERT INTO entities (tenant_id, entity_type, id, data)
-					VALUES (?, ?, ?, ?)
-				`, int(s.config.TenantID), entity, id, string(jsonData))
-			}
+
 			if insErr != nil {
 				return false, fmt.Errorf("failed to save entity: %w", insErr)
 			}
@@ -1294,11 +1703,34 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 		appended = append(appended, CommitAppendResult{Entity: a.Entity, ID: id})
 	}
 
+	// FSM walk, atomic with the entity write. The walk runs on this same
+	// transaction, so a walk failure rolls back the document update and an
+	// entity-write failure prevents the state advance. Walk errors carry an
+	// XOLU-FSM code; the server maps a walk failure inside a commit to
+	// XOLU-FSM008.
+	var fsmResult *CommitFsmWalkResult
+	if req.FsmWalk != nil {
+		wr, werr := s.FsmWalkInTx(ctx, tx, s.config.TenantID,
+			int64(req.FsmWalk.Machine), req.FsmWalk.Input, req.FsmWalk.Payload, nil)
+		if werr != nil {
+			return CommitResult{}, werr
+		}
+		fsmResult = &CommitFsmWalkResult{
+			Machine:    req.FsmWalk.Machine,
+			Previous:   wr.Previous,
+			Current:    wr.Current,
+			Terminal:   wr.Terminal,
+			Outputs:    wr.Outputs,
+			Vars:       wr.Vars,
+			Definition: wr.Definition,
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return CommitResult{}, fmt.Errorf("commit transaction failed: %w", err)
 	}
 
-	return CommitResult{Update: updateResult, Appended: appended}, nil
+	return CommitResult{Update: updateResult, Appended: appended, FsmWalk: fsmResult}, nil
 }
 
 // saveInTx performs the upsert half of a Commit inside an existing transaction.
@@ -1324,8 +1756,8 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 			spec.TableName()), u.ID).Scan(&exists)
 	} else {
 		existsErr = tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
-			s.tenantArgs(u.Entity, u.ID)...).Scan(&exists)
+			`SELECT EXISTS(SELECT 1 FROM `+s.nodesTable()+` WHERE `+`entity_type = ? AND id = ?)`,
+			u.Entity, u.ID).Scan(&exists)
 	}
 	if existsErr != nil {
 		return CommitUpdateResult{}, fmt.Errorf("saveInTx: existence check: %w", existsErr)
@@ -1343,7 +1775,7 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 				hasVersion = true
 				expectVersion = *u.Version
 			}
-			if err := adaptedUpdate(ctx, tx, spec, s.dialect, int(s.config.TenantID), u.ID, dataCopy, expectVersion, hasVersion); err != nil {
+			if err := adaptedUpdate(ctx, tx, spec, s.dialect, u.ID, dataCopy, expectVersion, hasVersion); err != nil {
 				return CommitUpdateResult{}, err
 			}
 			// Retrieve the new version from the adapted table column.
@@ -1359,12 +1791,12 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 			}
 			if u.Version != nil {
 				err = tx.QueryRowContext(ctx,
-					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? AND _version = ? RETURNING _version`,
-					append([]interface{}{string(jsonData)}, s.tenantArgs(u.Entity, u.ID, *u.Version)...)...).Scan(&newVersion)
+					`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ? AND _version = ? RETURNING _version`,
+					string(jsonData), u.Entity, u.ID, *u.Version).Scan(&newVersion)
 			} else {
 				err = tx.QueryRowContext(ctx,
-					`UPDATE entities SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+s.tenantWhere()+`entity_type = ? AND id = ? RETURNING _version`,
-					append([]interface{}{string(jsonData)}, s.tenantArgs(u.Entity, u.ID)...)...).Scan(&newVersion)
+					`UPDATE `+s.nodesTable()+` SET data = ?, _version = _version + 1, updated_at = CURRENT_TIMESTAMP WHERE `+`entity_type = ? AND id = ? RETURNING _version`,
+					string(jsonData), u.Entity, u.ID).Scan(&newVersion)
 			}
 			if err == sql.ErrNoRows && u.Version != nil {
 				return CommitUpdateResult{}, ErrConflict
@@ -1377,26 +1809,19 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 	} else {
 		// Create path — update sequence, then insert.
 		var seqErr error
-		if s.config.PerFileTenants {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (entity_type, next_id)
+
+		_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO `+s.nodeSeqTable()+` (entity_type, next_id)
 				VALUES (?, ?)
 				ON CONFLICT(entity_type) DO UPDATE
 				SET next_id = MAX(next_id, excluded.next_id + 1)
 			`, u.Entity, u.ID+1)
-		} else {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-				VALUES (?, ?, ?)
-				ON CONFLICT(tenant_id, entity_type) DO UPDATE
-				SET next_id = MAX(next_id, excluded.next_id + 1)
-			`, int(s.config.TenantID), u.Entity, u.ID+1)
-		}
+
 		if seqErr != nil {
 			return CommitUpdateResult{}, fmt.Errorf("saveInTx: sequence: %w", seqErr)
 		}
 		if spec != nil {
-			if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), u.ID, dataCopy); err != nil {
+			if err := adaptedCreate(ctx, tx, spec, s.dialect, u.ID, dataCopy); err != nil {
 				return CommitUpdateResult{}, err
 			}
 		} else {
@@ -1405,15 +1830,11 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 				return CommitUpdateResult{}, fmt.Errorf("saveInTx: marshal: %w", err)
 			}
 			var insErr error
-			if s.config.PerFileTenants {
-				_, insErr = tx.ExecContext(ctx, `
-					INSERT INTO entities (entity_type, id, data) VALUES (?, ?, ?)
+
+			_, insErr = tx.ExecContext(ctx, `
+					INSERT INTO `+s.nodesTable()+` (entity_type, id, data) VALUES (?, ?, ?)
 				`, u.Entity, u.ID, string(jsonData))
-			} else {
-				_, insErr = tx.ExecContext(ctx, `
-					INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
-				`, int(s.config.TenantID), u.Entity, u.ID, string(jsonData))
-			}
+
 			if insErr != nil {
 				return CommitUpdateResult{}, fmt.Errorf("saveInTx: insert: %w", insErr)
 			}
@@ -1451,22 +1872,13 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 	var id int
 	if a.ID == nil {
 		// Auto-generate via sequence.
-		var seqErr error
-		if s.config.PerFileTenants {
-			seqErr = tx.QueryRowContext(ctx, `
-				INSERT INTO entity_sequences (entity_type, next_id)
+		seqErr := tx.QueryRowContext(ctx, `
+				INSERT INTO `+s.nodeSeqTable()+` (entity_type, next_id)
 				VALUES (?, 1)
 				ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
 				RETURNING next_id
 			`, a.Entity).Scan(&id)
-		} else {
-			seqErr = tx.QueryRowContext(ctx, `
-				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-				VALUES (?, ?, 1)
-				ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = next_id + 1
-				RETURNING next_id
-			`, int(s.config.TenantID), a.Entity).Scan(&id)
-		}
+
 		if seqErr != nil {
 			return 0, fmt.Errorf("createInTx: sequence: %w", seqErr)
 		}
@@ -1474,21 +1886,14 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 		id = *a.ID
 		// Keep sequence ahead of explicit IDs.
 		var seqErr error
-		if s.config.PerFileTenants {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (entity_type, next_id)
+
+		_, seqErr = tx.ExecContext(ctx, `
+				INSERT INTO `+s.nodeSeqTable()+` (entity_type, next_id)
 				VALUES (?, ?)
 				ON CONFLICT(entity_type) DO UPDATE
 				SET next_id = MAX(next_id, excluded.next_id + 1)
 			`, a.Entity, id+1)
-		} else {
-			_, seqErr = tx.ExecContext(ctx, `
-				INSERT INTO entity_sequences (tenant_id, entity_type, next_id)
-				VALUES (?, ?, ?)
-				ON CONFLICT(tenant_id, entity_type) DO UPDATE
-				SET next_id = MAX(next_id, excluded.next_id + 1)
-			`, int(s.config.TenantID), a.Entity, id+1)
-		}
+
 		if seqErr != nil {
 			return 0, fmt.Errorf("createInTx: sequence bump: %w", seqErr)
 		}
@@ -1497,7 +1902,7 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 	dataCopy["id"] = id
 
 	if spec != nil {
-		if err := adaptedCreate(ctx, tx, spec, s.dialect, int(s.config.TenantID), id, dataCopy); err != nil {
+		if err := adaptedCreate(ctx, tx, spec, s.dialect, id, dataCopy); err != nil {
 			return 0, err
 		}
 	} else {
@@ -1506,15 +1911,11 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 			return 0, fmt.Errorf("createInTx: marshal: %w", err)
 		}
 		var insErr error
-		if s.config.PerFileTenants {
-			_, insErr = tx.ExecContext(ctx, `
-				INSERT INTO entities (entity_type, id, data) VALUES (?, ?, ?)
+
+		_, insErr = tx.ExecContext(ctx, `
+				INSERT INTO `+s.nodesTable()+` (entity_type, id, data) VALUES (?, ?, ?)
 			`, a.Entity, id, string(jsonData))
-		} else {
-			_, insErr = tx.ExecContext(ctx, `
-				INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (?, ?, ?, ?)
-			`, int(s.config.TenantID), a.Entity, id, string(jsonData))
-		}
+
 		if insErr != nil {
 			if strings.Contains(insErr.Error(), "UNIQUE constraint failed") {
 				return 0, ErrAlreadyExists
@@ -1533,22 +1934,22 @@ func (s *SQLiteStore) createInTx(ctx context.Context, tx *sql.Tx, a CommitAppend
 	return id, nil
 }
 
-// List returns all entities of a given type
+// List returns all `+s.nodesTable()+` of a given type
 func (s *SQLiteStore) List(ctx context.Context, entity string) ([]map[string]interface{}, error) {
-	
+
 	// Adapted table path
 	if spec := s.adapted.Get(entity); spec != nil {
-		return adaptedList(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID))
+		return adaptedList(ctx, s.readDB, spec, s.dialect)
 	}
 
 	rows, err := s.readDB.QueryContext(ctx,
-		`SELECT data, _version FROM entities WHERE `+s.tenantWhere()+`entity_type = ? ORDER BY id`,
-		s.tenantArgs(entity)...)
+		`SELECT data, _version FROM `+s.nodesTable()+` WHERE `+`entity_type = ? ORDER BY id`,
+		entity)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list entities: %w", err)
+		return nil, fmt.Errorf("failed to list "+s.nodesTable()+": %w", err)
 	}
-	defer rows.Close()
-	
+	defer func() { _ = rows.Close() }()
+
 	var results []map[string]interface{}
 	for rows.Next() {
 		var jsonData string
@@ -1556,16 +1957,16 @@ func (s *SQLiteStore) List(ctx context.Context, entity string) ([]map[string]int
 		if err := rows.Scan(&jsonData, &version); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
-		
+
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal data: %w", err)
 		}
-		
+
 		data["_version"] = version
 		results = append(results, data)
 	}
-	
+
 	return results, rows.Err()
 }
 
@@ -1574,13 +1975,13 @@ func (s *SQLiteStore) Exists(ctx context.Context, entity string, id int) bool {
 
 	// Adapted table path
 	if spec := s.adapted.Get(entity); spec != nil {
-		return adaptedExists(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID), id)
+		return adaptedExists(ctx, s.readDB, spec, s.dialect, id)
 	}
 
 	var exists bool
 	err := s.readDB.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM entities WHERE `+s.tenantWhere()+`entity_type = ? AND id = ?)`,
-		s.tenantArgs(entity, id)...).Scan(&exists)
+		`SELECT EXISTS(SELECT 1 FROM `+s.nodesTable()+` WHERE `+`entity_type = ? AND id = ?)`,
+		entity, id).Scan(&exists)
 
 	return err == nil && exists
 }
@@ -1602,40 +2003,40 @@ func (s *SQLiteStore) Close() error {
 	}
 	// Close reader pool first (drains in-flight queries), then writer.
 	if s.readDB != nil {
-		s.readDB.Close()
+		_ = s.readDB.Close()
 	}
 	return s.db.Close()
 }
 
 // Search implements field-based search using JSON extraction
 func (s *SQLiteStore) Search(ctx context.Context, entity string, field string, query string, matchType string) ([]map[string]interface{}, error) {
-	
+
 	var sqlQuery string
 	var args []interface{}
-	
+
 	switch matchType {
 	case "exact":
-		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) = ? ORDER BY id`
-		args = s.tenantArgs(entity, field, query)
+		sqlQuery = `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? AND json_extract(data, '$.' || ?) = ? ORDER BY id`
+		args = []interface{}{entity, field, query}
 	case "contains":
-		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
-		args = s.tenantArgs(entity, field, "%"+query+"%")
+		sqlQuery = `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = []interface{}{entity, field, "%" + query + "%"}
 	case "starts":
-		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
-		args = s.tenantArgs(entity, field, query+"%")
+		sqlQuery = `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = []interface{}{entity, field, query + "%"}
 	case "ends":
-		sqlQuery = `SELECT data, _version FROM entities WHERE ` + s.tenantWhere() + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
-		args = s.tenantArgs(entity, field, "%"+query)
+		sqlQuery = `SELECT data, _version FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ? AND json_extract(data, '$.' || ?) LIKE ? ORDER BY id`
+		args = []interface{}{entity, field, "%" + query}
 	default:
 		return nil, fmt.Errorf("invalid match type: %s", matchType)
 	}
-	
+
 	rows, err := s.readDB.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
 	}
-	defer rows.Close()
-	
+	defer func() { _ = rows.Close() }()
+
 	var results []map[string]interface{}
 	for rows.Next() {
 		var jsonData string
@@ -1643,25 +2044,329 @@ func (s *SQLiteStore) Search(ctx context.Context, entity string, field string, q
 		if err := rows.Scan(&jsonData, &version); err != nil {
 			return nil, err
 		}
-		
+
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
 			return nil, err
 		}
-		
+
 		data["_version"] = version
 		results = append(results, data)
 	}
-	
+
 	return results, rows.Err()
 }
 
 // VerifyGraphIntegrity checks whether the tenant edge table matches the REF
 // fields in stored entity JSON. Returns a joined error listing every
 // discrepancy found (missing edges + unexpected edges); does not stop at the
+// ---------------------------------------------------------------------------
+// Edge property storage — implements EdgePropertyStore
+// ---------------------------------------------------------------------------
+
+// nextEdgeID atomically increments the global edge ID sequence in t<X>_eseq
+// and returns the assigned ID. A single row keyed "__global__" provides a
+// monotonically increasing ID that is unique across all relationship labels
+// within the tenant — required because GetEdge and GetManyEdges look up edges
+// by ID without knowing the label in advance.
+func (s *SQLiteStore) nextEdgeID(ctx context.Context, tx *sql.Tx, _ string) (int, error) {
+	const globalSeqKey = "__global__"
+	eseq := tenant.EdgeSeqTableName(s.config.TenantID)
+	_, err := tx.ExecContext(ctx,
+		"INSERT INTO "+eseq+" (rel, next_id) VALUES (?, 2)"+
+			" ON CONFLICT(rel) DO UPDATE SET next_id = next_id + 1",
+		globalSeqKey)
+	if err != nil {
+		return 0, fmt.Errorf("nextEdgeID: upsert global seq: %w", err)
+	}
+	var id int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT next_id - 1 FROM "+eseq+" WHERE rel = ?", globalSeqKey,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("nextEdgeID: read global seq: %w", err)
+	}
+	return id, nil
+}
+
+// AddEdgeWithProps persists edge topology and, if props is non-nil and
+// non-empty, writes a property blob to t<X>_edges and sets edge_id in
+// t<X>_graph. Returns the assigned surrogate edge ID (0 = no props stored).
+func (s *SQLiteStore) AddEdgeWithProps(ctx context.Context, from, to, relationship string, props map[string]interface{}) (int, error) {
+	if !s.config.GraphEnabled {
+		return 0, fmt.Errorf("AddEdgeWithProps: graph not enabled")
+	}
+
+	// Auto-register the edge label in t<X>_e_sch before opening the write
+	// transaction. RegisterEdgeSchema uses s.db directly, so it must not run
+	// inside a tx to avoid a writer deadlock.
+	if len(props) > 0 && !s.isEdgeSuppressed(relationship) {
+		if registered, _ := s.IsEdgeSchemaRegistered(ctx, relationship); !registered {
+			_ = s.RegisterEdgeSchema(ctx, relationship, map[string]interface{}{})
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("AddEdgeWithProps: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	graphTable := tenant.GraphTableName(s.config.TenantID)
+
+	// Parse node IDs: "entity:id" or "XXXX@entity:id"
+	parseNode := func(nodeID string) (string, int, error) {
+		stripped := tenant.NodeIDStripped(nodeID)
+		parts := strings.SplitN(stripped, ":", 2)
+		if len(parts) != 2 {
+			return "", 0, fmt.Errorf("malformed node ID: %q", nodeID)
+		}
+		var id int
+		if _, err := fmt.Sscanf(parts[1], "%d", &id); err != nil {
+			return "", 0, fmt.Errorf("malformed node ID %q: %w", nodeID, err)
+		}
+		return parts[0], id, nil
+	}
+
+	srcEntity, srcID, err := parseNode(from)
+	if err != nil {
+		return 0, err
+	}
+	dstEntity, dstID, err := parseNode(to)
+	if err != nil {
+		return 0, err
+	}
+
+	// Determine edge ID: assign one only if there are properties to store.
+	var edgeID int
+	hasProps := len(props) > 0
+	if hasProps {
+		// Fire warn-once if this label has no registered schema.
+		if !s.isEdgeSuppressed(relationship) {
+			s.warnOnceEdge(relationship)
+		}
+
+		eid, err := s.nextEdgeID(ctx, tx, relationship)
+		if err != nil {
+			return 0, err
+		}
+		edgeID = eid
+
+		if spec := s.edgeSpecFor(relationship); spec != nil {
+			// Adapted path: write to t<X>_edata_<label>.
+			if err := adaptedCreate(ctx, tx, spec, s.dialect, edgeID, props); err != nil {
+				return 0, fmt.Errorf("AddEdgeWithProps: adapted write to %s: %w", spec.TableName(), err)
+			}
+		} else {
+			// Blob path: write to t<X>_edges.
+			dataJSON, err := json.Marshal(props)
+			if err != nil {
+				return 0, fmt.Errorf("AddEdgeWithProps: marshal props: %w", err)
+			}
+			edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+			_, err = tx.ExecContext(ctx,
+				"INSERT INTO "+edgesTable+" (edge_id, rel, data) VALUES (?, ?, ?)"+
+					" ON CONFLICT(edge_id) DO UPDATE SET data = excluded.data, _version = _version + 1, updated_at = CURRENT_TIMESTAMP",
+				edgeID, relationship, string(dataJSON))
+			if err != nil {
+				return 0, fmt.Errorf("AddEdgeWithProps: write props: %w", err)
+			}
+		}
+	}
+
+	// Upsert topology row. If edge_id is 0 (no props), the column stays NULL
+	// via the COALESCE so that an existing non-NULL edge_id is not overwritten.
+	var upsertSQL string
+	if hasProps {
+		upsertSQL = fmt.Sprintf(
+			"INSERT INTO %s (source_entity, source_id, target_entity, target_id, relationship_name, edge_id)"+
+				" VALUES (?, ?, ?, ?, ?, ?)"+
+				" ON CONFLICT(source_entity, source_id, target_entity, target_id, relationship_name)"+
+				" DO UPDATE SET edge_id = excluded.edge_id",
+			graphTable)
+		_, err = tx.ExecContext(ctx, upsertSQL, srcEntity, srcID, dstEntity, dstID, relationship, edgeID)
+	} else {
+		upsertSQL = fmt.Sprintf(
+			"INSERT OR IGNORE INTO %s (source_entity, source_id, target_entity, target_id, relationship_name)"+
+				" VALUES (?, ?, ?, ?, ?)",
+			graphTable)
+		_, err = tx.ExecContext(ctx, upsertSQL, srcEntity, srcID, dstEntity, dstID, relationship)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("AddEdgeWithProps: upsert topology: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("AddEdgeWithProps: commit: %w", err)
+	}
+
+	// Index edge property content in the FTS table after the transaction
+	// commits, so that a query failure doesn't roll back the property write.
+	// FTS index is best-effort: failures are logged but not returned to caller.
+	if hasProps {
+		if err := s.IndexEdgeContent(ctx, relationship, edgeID, props); err != nil {
+			s.logger.Warn().Err(err).
+				Str("rel", relationship).
+				Int("edge_id", edgeID).
+				Msg("AddEdgeWithProps: FTS indexing failed (non-fatal)")
+		}
+	}
+
+	return edgeID, nil
+}
+
+// GetEdge retrieves property data for a single edge by surrogate ID.
+// Routes to the adapted table (t<X>_edata_<label>) when the relationship
+// label has an adapted spec; otherwise reads from the blob t<X>_edges table.
+func (s *SQLiteStore) GetEdge(ctx context.Context, edgeID int) (*EdgePropsResult, error) {
+	if !s.config.GraphEnabled {
+		return nil, ErrNotFound
+	}
+
+	// Resolve the relationship label from the topology table.
+	graphTable := tenant.GraphTableName(s.config.TenantID)
+	var rel string
+	err := s.readDB.QueryRowContext(ctx,
+		"SELECT relationship_name FROM "+graphTable+" WHERE edge_id = ?", edgeID,
+	).Scan(&rel)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetEdge(%d): resolve rel: %w", edgeID, err)
+	}
+
+	// Adapted path.
+	if spec := s.edgeSpecFor(rel); spec != nil {
+		data, err := adaptedGet(ctx, s.readDB, spec, s.dialect, edgeID)
+		if err != nil {
+			return nil, fmt.Errorf("GetEdge(%d): adapted get from %s: %w", edgeID, spec.TableName(), err)
+		}
+		return &EdgePropsResult{EdgeID: edgeID, Rel: rel, Properties: data}, nil
+	}
+
+	// Blob path.
+	edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+	var dataJSON string
+	err = s.readDB.QueryRowContext(ctx,
+		"SELECT data FROM "+edgesTable+" WHERE edge_id = ?", edgeID,
+	).Scan(&dataJSON)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetEdge(%d): %w", edgeID, err)
+	}
+	var props map[string]interface{}
+	if err := json.Unmarshal([]byte(dataJSON), &props); err != nil {
+		return nil, fmt.Errorf("GetEdge(%d): unmarshal: %w", edgeID, err)
+	}
+	return &EdgePropsResult{EdgeID: edgeID, Rel: rel, Properties: props}, nil
+}
+
+// GetManyEdges retrieves property data for multiple edge IDs in one pass.
+// Dispatches each ID to adapted or blob path based on the relationship label.
+// Edge IDs with no property row are absent from the result map.
+func (s *SQLiteStore) GetManyEdges(ctx context.Context, edgeIDs []int) (map[int]*EdgePropsResult, error) {
+	if !s.config.GraphEnabled || len(edgeIDs) == 0 {
+		return make(map[int]*EdgePropsResult), nil
+	}
+
+	result := make(map[int]*EdgePropsResult, len(edgeIDs))
+
+	// Resolve relationship labels for all IDs from the topology table.
+	placeholders := make([]string, len(edgeIDs))
+	args := make([]interface{}, len(edgeIDs))
+	for i, id := range edgeIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	graphTable := tenant.GraphTableName(s.config.TenantID)
+	relRows, err := s.readDB.QueryContext(ctx,
+		"SELECT edge_id, relationship_name FROM "+graphTable+
+			" WHERE edge_id IN ("+strings.Join(placeholders, ",")+")",
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("GetManyEdges: resolve rels: %w", err)
+	}
+
+	// Partition into adapted and blob buckets.
+	// adaptedBuckets: spec.TableName() → {spec, []id}
+	type bucket struct {
+		spec *AdaptedTableSpec
+		ids  []int
+	}
+	adaptedBuckets := make(map[string]*bucket)
+	blobIDs := make([]int, 0)
+	idToRel := make(map[int]string, len(edgeIDs))
+
+	for relRows.Next() {
+		var eid int
+		var rel string
+		if err := relRows.Scan(&eid, &rel); err != nil {
+			_ = relRows.Close()
+			return nil, fmt.Errorf("GetManyEdges: scan rel: %w", err)
+		}
+		idToRel[eid] = rel
+		if spec := s.edgeSpecFor(rel); spec != nil {
+			tbl := spec.TableName()
+			if adaptedBuckets[tbl] == nil {
+				adaptedBuckets[tbl] = &bucket{spec: spec}
+			}
+			adaptedBuckets[tbl].ids = append(adaptedBuckets[tbl].ids, eid)
+		} else {
+			blobIDs = append(blobIDs, eid)
+		}
+	}
+	_ = relRows.Close()
+
+	// Fetch adapted edges per table.
+	for _, b := range adaptedBuckets {
+		for _, eid := range b.ids {
+			data, err := adaptedGet(ctx, s.readDB, b.spec, s.dialect, eid)
+			if err != nil {
+				continue // absent rows are silently skipped per contract
+			}
+			result[eid] = &EdgePropsResult{EdgeID: eid, Rel: idToRel[eid], Properties: data}
+		}
+	}
+
+	// Fetch blob edges.
+	if len(blobIDs) > 0 {
+		blobPH := make([]string, len(blobIDs))
+		blobArgs := make([]interface{}, len(blobIDs))
+		for i, id := range blobIDs {
+			blobPH[i] = "?"
+			blobArgs[i] = id
+		}
+		edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+		blobRows, err := s.readDB.QueryContext(ctx,
+			"SELECT edge_id, data FROM "+edgesTable+
+				" WHERE edge_id IN ("+strings.Join(blobPH, ",")+")",
+			blobArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("GetManyEdges: blob query: %w", err)
+		}
+		defer func() { _ = blobRows.Close() }()
+		for blobRows.Next() {
+			var eid int
+			var dataJSON string
+			if err := blobRows.Scan(&eid, &dataJSON); err != nil {
+				return nil, fmt.Errorf("GetManyEdges: blob scan: %w", err)
+			}
+			var props map[string]interface{}
+			if err := json.Unmarshal([]byte(dataJSON), &props); err != nil {
+				return nil, fmt.Errorf("GetManyEdges: unmarshal edge %d: %w", eid, err)
+			}
+			result[eid] = &EdgePropsResult{EdgeID: eid, Rel: idToRel[eid], Properties: props}
+		}
+	}
+
+	return result, nil
+}
+
 // first violation.
 //
-// Both reads (entities and edge table) are issued inside a single read
+// Both reads (" + s.nodesTable() + " and edge table) are issued inside a single read
 // transaction so that concurrent writes cannot produce false violations.
 //
 // Memory: only one map is materialised (expected edges derived from entity
@@ -1678,12 +2383,11 @@ func (s *SQLiteStore) VerifyGraphIntegrity(ctx context.Context) error {
 	expectedEdges := make(map[string]bool)
 
 	entityRows, err := tx.QueryContext(ctx,
-		"SELECT entity_type, id, data FROM entities WHERE "+s.tenantWhere()+"1=1",
-		s.tenantArgs()...)
+		"SELECT entity_type, id, data FROM "+s.nodesTable()+" WHERE 1=1")
 	if err != nil {
-		return fmt.Errorf("VerifyGraphIntegrity: query entities: %w", err)
+		return fmt.Errorf("VerifyGraphIntegrity: query "+s.nodesTable()+": %w", err)
 	}
-	defer entityRows.Close()
+	defer func() { _ = entityRows.Close() }()
 
 	for entityRows.Next() {
 		var entity string
@@ -1712,7 +2416,7 @@ func (s *SQLiteStore) VerifyGraphIntegrity(ctx context.Context) error {
 		}
 	}
 	if err := entityRows.Err(); err != nil {
-		return fmt.Errorf("VerifyGraphIntegrity: iterate entities: %w", err)
+		return fmt.Errorf("VerifyGraphIntegrity: iterate "+s.nodesTable()+": %w", err)
 	}
 
 	// Phase 2: stream the actual edge table; mark expected edges as seen and
@@ -1723,7 +2427,7 @@ func (s *SQLiteStore) VerifyGraphIntegrity(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("VerifyGraphIntegrity: query edge table: %w", err)
 	}
-	defer edgeRows.Close()
+	defer func() { _ = edgeRows.Close() }()
 
 	var violations []string
 	for edgeRows.Next() {
@@ -1769,7 +2473,6 @@ func sortStrings(ss []string) { sort.Strings(ss) }
 // ~6500 rows. 500 keeps memory bounded while staying well under that limit.
 const rebuildBatchSize = 500
 
-
 // GraphTenantIDs implements TenantIDLister. It returns all tenant IDs for which
 // a graph_tXXXX edge table should be hydrated at startup. Tenant 0 is always
 // included first (it is implicit and never appears in the tenants registry
@@ -1783,7 +2486,7 @@ func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]uint16, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GraphTenantIDs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var id int
@@ -1804,15 +2507,15 @@ func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]uint16, error) {
 func (s *SQLiteStore) ScanGraphEdges(ctx context.Context, tenantID uint16, fn func(GraphEdge) error) error {
 	table := tenant.GraphEdgesTableName(tenantID)
 	rows, err := s.readDB.QueryContext(ctx,
-		"SELECT source_entity, source_id, target_entity, target_id, relationship_name FROM "+table)
+		"SELECT source_entity, source_id, target_entity, target_id, relationship_name, COALESCE(edge_id, 0) FROM "+table)
 	if err != nil {
 		return fmt.Errorf("ScanGraphEdges: query %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var e GraphEdge
-		if err := rows.Scan(&e.SourceEntity, &e.SourceID, &e.TargetEntity, &e.TargetID, &e.Relationship); err != nil {
+		if err := rows.Scan(&e.SourceEntity, &e.SourceID, &e.TargetEntity, &e.TargetID, &e.Relationship, &e.EdgeID); err != nil {
 			return fmt.Errorf("ScanGraphEdges: scan: %w", err)
 		}
 		if err := fn(e); err != nil {
@@ -1862,7 +2565,7 @@ func (s *SQLiteStore) RebuildGraph(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("RebuildGraph: prepare insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	flushEdges := func(batch []rebuildEdge) error {
 		for _, e := range batch {
@@ -1874,12 +2577,11 @@ func (s *SQLiteStore) RebuildGraph(ctx context.Context) error {
 	}
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT entity_type, id, data FROM entities WHERE "+s.tenantWhere()+"1=1",
-		s.tenantArgs()...)
+		"SELECT entity_type, id, data FROM "+s.nodesTable()+" WHERE 1=1")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var batch []rebuildEdge
 
@@ -1941,7 +2643,6 @@ func (s *SQLiteStore) RebuildGraph(ctx context.Context) error {
 	return tx.Commit()
 }
 
-
 // indexForFTS extracts text content from entity and indexes it for full-text search
 func (s *SQLiteStore) indexForFTS(ctx context.Context, tx *sql.Tx, entity string, id int, data map[string]interface{}) error {
 	// Skip if FTS is not enabled
@@ -1954,16 +2655,11 @@ func (s *SQLiteStore) indexForFTS(ctx context.Context, tx *sql.Tx, entity string
 
 	// First, delete any existing FTS entry for this entity
 	var ftsDeleteErr error
-	if s.config.PerFileTenants {
-		_, ftsDeleteErr = tx.ExecContext(ctx, `
-			DELETE FROM entities_fts WHERE entity_type = ? AND entity_id = ?
+
+	_, ftsDeleteErr = tx.ExecContext(ctx, `
+			DELETE FROM `+s.nodeFTSTable()+` WHERE entity_type = ? AND entity_id = ?
 		`, entity, idStr)
-	} else {
-		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-		_, ftsDeleteErr = tx.ExecContext(ctx, `
-			DELETE FROM entities_fts WHERE tenant_id = ? AND entity_type = ? AND entity_id = ?
-		`, tidStr, entity, idStr)
-	}
+
 	if ftsDeleteErr != nil {
 		return ftsDeleteErr
 	}
@@ -1976,44 +2672,39 @@ func (s *SQLiteStore) indexForFTS(ctx context.Context, tx *sql.Tx, entity string
 
 	// Insert into FTS index
 	var ftsInsertErr error
-	if s.config.PerFileTenants {
-		_, ftsInsertErr = tx.ExecContext(ctx, `
-			INSERT INTO entities_fts (entity_type, entity_id, content)
+
+	_, ftsInsertErr = tx.ExecContext(ctx, `
+			INSERT INTO `+s.nodeFTSTable()+` (entity_type, entity_id, content)
 			VALUES (?, ?, ?)
 		`, entity, idStr, content)
-	} else {
-		tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-		_, ftsInsertErr = tx.ExecContext(ctx, `
-			INSERT INTO entities_fts (tenant_id, entity_type, entity_id, content)
-			VALUES (?, ?, ?, ?)
-		`, tidStr, entity, idStr, content)
-	}
+
 	err := ftsInsertErr
-	
+
 	return err
 }
 
 // extractTextContent recursively extracts all string values from a map
 func extractTextContent(data map[string]interface{}) string {
 	var parts []string
-	
+
 	for key, value := range data {
 		// Skip internal fields
 		if key == "id" || key == "created_at" || key == "updated_at" {
 			continue
 		}
-		
+
 		switch v := value.(type) {
 		case string:
 			if v != "" {
 				parts = append(parts, v)
 			}
 		case map[string]interface{}:
-			// Check if it is a REF (skip references)
-			if _, isRef := v["type"]; !isRef || v["type"] != "REF" {
-				if nested := extractTextContent(v); nested != "" {
-					parts = append(parts, nested)
-				}
+			// Skip REF objects — they are structural links, not text content.
+			if _, isRef := models.IsReference(v); isRef {
+				continue
+			}
+			if nested := extractTextContent(v); nested != "" {
+				parts = append(parts, nested)
 			}
 		case []interface{}:
 			for _, item := range v {
@@ -2027,17 +2718,17 @@ func extractTextContent(data map[string]interface{}) string {
 			}
 		}
 	}
-	
+
 	return strings.Join(parts, " ")
 }
 
-// FullTextSearch performs a full-text search across entities
+// FullTextSearch performs a full-text search across " + s.nodesTable() + "
 func (s *SQLiteStore) FullTextSearch(ctx context.Context, query string, entity string) ([]map[string]interface{}, error) {
-	
+
 	if query == "" {
 		return []map[string]interface{}{}, nil
 	}
-	
+
 	// Sanitise query for FTS5 MATCH syntax.
 	// FTS5 treats quotes, dashes, semicolons, and other punctuation as
 	// syntax operators. Unescaped, they cause parse errors that surface
@@ -2048,84 +2739,66 @@ func (s *SQLiteStore) FullTextSearch(ctx context.Context, query string, entity s
 		// Query was entirely special characters — return empty results
 		return []map[string]interface{}{}, nil
 	}
-	
+
 	// Add prefix matching with * for partial word matches
 	ftsQuery := sanitised + "*"
-	
+
 	var rows *sql.Rows
 	var err error
-	
+
 	if entity != "" {
 		// Search within specific entity type
-		if s.config.PerFileTenants {
-			rows, err = s.readDB.QueryContext(ctx, `
+
+		rows, err = s.readDB.QueryContext(ctx, `
 				SELECT e.entity_type, e.id, e.data
-				FROM entities_fts
-				JOIN entities e ON entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-				WHERE entities_fts.entity_type = ? AND entities_fts MATCH ?
+				FROM `+s.nodeFTSTable()+` fts
+				JOIN `+s.nodesTable()+` e ON fts.entity_type = e.entity_type AND CAST(fts.entity_id AS INTEGER) = e.id
+				WHERE fts.entity_type = ? AND `+s.nodeFTSTable()+` MATCH ?
 				ORDER BY rank LIMIT 100
 			`, entity, ftsQuery)
-		} else {
-			tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-			rows, err = s.readDB.QueryContext(ctx, `
-				SELECT e.entity_type, e.id, e.data
-				FROM entities_fts
-				JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-				WHERE entities_fts.tenant_id = ? AND entities_fts.entity_type = ? AND entities_fts MATCH ?
-				ORDER BY rank LIMIT 100
-			`, int(s.config.TenantID), tidStr, entity, ftsQuery)
-		}
+
 	} else {
-		// Search across all entities
-		if s.config.PerFileTenants {
-			rows, err = s.readDB.QueryContext(ctx, `
+		// Search across all `+s.nodesTable()+`
+
+		rows, err = s.readDB.QueryContext(ctx, `
 				SELECT e.entity_type, e.id, e.data
-				FROM entities_fts
-				JOIN entities e ON entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-				WHERE entities_fts MATCH ?
+				FROM `+s.nodeFTSTable()+` fts
+				JOIN `+s.nodesTable()+` e ON fts.entity_type = e.entity_type AND CAST(fts.entity_id AS INTEGER) = e.id
+				WHERE `+s.nodeFTSTable()+` MATCH ?
 				ORDER BY rank LIMIT 100
 			`, ftsQuery)
-		} else {
-			tidStr := fmt.Sprintf("%d", int(s.config.TenantID))
-			rows, err = s.readDB.QueryContext(ctx, `
-				SELECT e.entity_type, e.id, e.data
-				FROM entities_fts
-				JOIN entities e ON e.tenant_id = ? AND entities_fts.entity_type = e.entity_type AND CAST(entities_fts.entity_id AS INTEGER) = e.id
-				WHERE entities_fts.tenant_id = ? AND entities_fts MATCH ?
-				ORDER BY rank LIMIT 100
-			`, int(s.config.TenantID), tidStr, ftsQuery)
-		}
+
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("full-text search failed: %w", err)
 	}
-	defer rows.Close()
-	
+	defer func() { _ = rows.Close() }()
+
 	var results []map[string]interface{}
 	for rows.Next() {
 		var entityType string
 		var id int
 		var jsonData string
-		
+
 		if err := rows.Scan(&entityType, &id, &jsonData); err != nil {
 			return nil, err
 		}
-		
+
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
 			continue
 		}
-		
+
 		// Add metadata
 		data["_entity"] = entityType
 		results = append(results, data)
 	}
-	
+
 	if results == nil {
 		results = []map[string]interface{}{}
 	}
-	
+
 	return results, rows.Err()
 }
 
@@ -2174,37 +2847,31 @@ func (s *SQLiteStore) CountEntities(ctx context.Context, entity string) (int, er
 
 	// Adapted table path
 	if spec := s.adapted.Get(entity); spec != nil {
-		var cntSQL string
-		if s.config.PerFileTenants {
-			cntSQL = fmt.Sprintf(`SELECT COUNT(*) FROM %s`, spec.TableName())
-		} else {
-			cntSQL = fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE tenant_id = ?`, spec.TableName())
-		}
+		cntSQL := fmt.Sprintf(`SELECT COUNT(*) FROM %s`, spec.TableName())
+
 		stmt, err := s.stmtCache.Get(cntSQL)
 		if err != nil {
 			return 0, fmt.Errorf("count adapted prepare: %w", err)
 		}
 		var count int
-		if s.config.PerFileTenants {
-			err = stmt.QueryRowContext(ctx).Scan(&count)
-		} else {
-			err = stmt.QueryRowContext(ctx, int(s.config.TenantID)).Scan(&count)
-		}
+
+		err = stmt.QueryRowContext(ctx).Scan(&count)
+
 		if err != nil {
-			return 0, fmt.Errorf("count adapted entities: %w", err)
+			return 0, fmt.Errorf("count adapted "+s.nodesTable()+": %w", err)
 		}
 		return count, nil
 	}
 
-	cntSQL := `SELECT COUNT(*) FROM entities WHERE ` + s.tenantWhere() + `entity_type = ?`
+	cntSQL := `SELECT COUNT(*) FROM ` + s.nodesTable() + ` WHERE ` + `entity_type = ?`
 	stmt, err := s.stmtCache.Get(cntSQL)
 	if err != nil {
 		return 0, fmt.Errorf("count prepare: %w", err)
 	}
 	var count int
-	err = stmt.QueryRowContext(ctx, s.tenantArgs(entity)...).Scan(&count)
+	err = stmt.QueryRowContext(ctx, entity).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("count entities: %w", err)
+		return 0, fmt.Errorf("count "+s.nodesTable()+": %w", err)
 	}
 	return count, nil
 }
@@ -2222,7 +2889,7 @@ func (s *SQLiteStore) QueryWithPlan(ctx context.Context, sqlQuery string, args [
 	if err != nil {
 		return nil, fmt.Errorf("push-down query failed: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []map[string]interface{}
 	for rows.Next() {
@@ -2255,10 +2922,10 @@ var _ PagedLister = (*SQLiteStore)(nil)
 func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offset int) (*PagedResult, error) {
 
 	// Adapted table path: delegate to adaptedList and paginate in Go.
-	// The adapted table doesn't store data in the entities table, so the
+	// The adapted table doesn't store data in the `+s.nodesTable()+` table, so the
 	// blob-based SQL below would return zero rows.
 	if spec := s.adapted.Get(entity); spec != nil {
-		all, err := adaptedList(ctx, s.readDB, spec, s.dialect, int(s.config.TenantID))
+		all, err := adaptedList(ctx, s.readDB, spec, s.dialect)
 		if err != nil {
 			return nil, err
 		}
@@ -2276,11 +2943,11 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 	// Count total
 	var total int
 	err := s.readDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entities WHERE `+s.tenantWhere()+`entity_type = ?`,
-		s.tenantArgs(entity)...,
+		`SELECT COUNT(*) FROM `+s.nodesTable()+` WHERE `+`entity_type = ?`,
+		entity,
 	).Scan(&total)
 	if err != nil {
-		return nil, fmt.Errorf("count entities: %w", err)
+		return nil, fmt.Errorf("count "+s.nodesTable()+": %w", err)
 	}
 
 	if total == 0 {
@@ -2289,13 +2956,13 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 
 	// Fetch page
 	rows, err := s.readDB.QueryContext(ctx,
-		`SELECT data, _version FROM entities WHERE `+s.tenantWhere()+`entity_type = ? ORDER BY id LIMIT ? OFFSET ?`,
-		s.tenantArgs(entity, limit, offset)...,
+		`SELECT data, _version FROM `+s.nodesTable()+` WHERE `+`entity_type = ? ORDER BY id LIMIT ? OFFSET ?`,
+		entity, limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list paged: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []map[string]interface{}
 	for rows.Next() {
@@ -2319,17 +2986,16 @@ func (s *SQLiteStore) ListPaged(ctx context.Context, entity string, limit, offse
 }
 
 // ListEntities returns all distinct entity types in the database.
-// It unions blob entities (from the entities table) with adapted entities
+// It unions blob entities (from the entities table) with adapted " + s.nodesTable() + "
 // (from the in-memory registry), so that adapted entity types are visible
 // to the OQL validator even when they have no blob rows.
 func (s *SQLiteStore) ListEntities(ctx context.Context) ([]string, error) {
 	rows, err := s.readDB.QueryContext(ctx,
-		"SELECT DISTINCT entity_type FROM entities WHERE "+s.tenantWhere()+"1=1 ORDER BY entity_type",
-		s.tenantArgs()...)
+		"SELECT DISTINCT entity_type FROM "+s.nodesTable()+" WHERE 1=1 ORDER BY entity_type")
 	if err != nil {
 		return nil, fmt.Errorf("query entity types: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	seen := map[string]bool{}
 	var entities []string

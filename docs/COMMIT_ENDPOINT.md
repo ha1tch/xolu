@@ -1,7 +1,7 @@
-# olu `/commit` Endpoint Reference
+# xolu `/commit` Endpoint Reference
 
 **Version:** 0.3  
-**Author:** haitch <h@ual.fi>  
+**Author:** haitch <h@ual.li>  
 **Date:** May 2026  
 **Status:** Implemented (v0.9.7-patched78)  
 **Supersedes:** v0.2 (patched59) — adds Pebble timeseries write path
@@ -10,7 +10,7 @@
 
 ## 1. Problem
 
-olu's write API provides three independent paths:
+xolu's write API provides three independent paths:
 
 - `POST /api/v1/tenant/{t}/objects/{id}` — create an entity
 - `POST /api/v1/tenant/{t}/save/{id}` — upsert an entity
@@ -146,7 +146,7 @@ the other.
 | `data`    | object  | yes      | Full document to write. Replaces the existing document if the entity exists. |
 | `version` | integer | no       | CAS check. Write proceeds only if stored `_version` equals this value. Omitting `version` is an unconditional upsert. |
 
-`id` is a positive integer, not a string. olu's entity ID space is `int64`;
+`id` is a positive integer, not a string. xolu's entity ID space is `int64`;
 14-digit numeric strings fit without loss.
 
 ### 5.2 `append` array (optional)
@@ -154,14 +154,14 @@ the other.
 | Field    | Type    | Required | Description |
 |----------|---------|----------|-------------|
 | `entity` | string  | yes      | Entity type. Any type valid for `POST /{entity}`. |
-| `id`     | integer | no       | Record ID. Must be positive if supplied. If omitted, olu assigns the next sequence ID. |
+| `id`     | integer | no       | Record ID. Must be positive if supplied. If omitted, xolu assigns the next sequence ID. |
 | `data`   | object  | yes      | The document to insert. |
 
-Maximum 25 entries. Requests exceeding this are rejected with OLU-CM004.
+Maximum 25 entries. Requests exceeding this are rejected with XOLU-CM004.
 
 ### 5.3 `timeseries` array (optional)
 
-The timeline must be pre-defined for the tenant via `POST /ts/timelines`.
+The timeline must be pre-defined for the tenant via `POST /ts/tl/def`.
 `/commit` does not define timelines.
 
 | Field      | Type             | Required | Description |
@@ -172,14 +172,20 @@ The timeline must be pre-defined for the tenant via `POST /ts/timelines`.
 | `nums`     | []float64        | no       | Up to 16 numeric fields. NaN rejected. |
 | `payload`  | bytes (base64)   | no       | Raw bytes up to 64 KiB. Format is caller's choice. |
 
-Maximum `OLU_TS_MAX_BATCH_SIZE` entries (default 5000). Requests exceeding
-this are rejected with OLU-CM014.
+Maximum `XOLU_TS_MAX_BATCH_SIZE` entries (default 5000). Requests exceeding
+this are rejected with XOLU-CM014.
 
 ### 5.4 Empty-array rule
 
-At least one of `append` or `timeseries` must be non-empty. A request with
-both absent or empty is rejected with OLU-CM003. Callers that need only a
-conditional upsert with no history should use `save/{id}` directly.
+At least one of `append`, `timeseries`, or `fsm_walk` must carry work. A
+request with all three absent or empty is rejected with XOLU-CM003. Callers
+that need only a conditional upsert with no history should use `save/{id}`
+directly.
+
+`fsm_walk` is a v2 field and is only acted upon when `XOLU_API_V2_ENABLED=true`.
+When v2 is disabled, a non-nil `fsm_walk` is rejected with XOLU-CM009 rather
+than silently ignored, so that callers receive a clear error rather than
+appearing to succeed while the walk is discarded.
 
 ---
 
@@ -220,14 +226,14 @@ Execution sequence when `timeseries` is non-empty:
    Pre-encode Pebble keys (needed for rollback).
 
 2. AppendBatch -> write TS events to Pebble.
-   On failure -> 500 OLU-CM015. SQLite untouched. Caller retries safely.
+   On failure -> 500 XOLU-CM015. SQLite untouched. Caller retries safely.
 
 3. BEGIN IMMEDIATE / execute SQLite transaction.
    On success -> 200.
    On failure -> DeleteKeys(pre-encoded keys) synchronously.
      DeleteKeys success -> 409/500 as appropriate.
                            Entity unchanged. Pebble tombstoned.
-     DeleteKeys failure -> 500 OLU-CM016. Manual remediation required.
+     DeleteKeys failure -> 500 XOLU-CM016. Manual remediation required.
 ```
 
 **Why Pebble first?** A Pebble failure before SQLite is touched is a clean
@@ -241,7 +247,7 @@ the same byte-level keys that were written. Pre-encoding before the first
 write ensures the mapping is unambiguous and avoids re-encoding under error
 conditions.
 
-### 6.3 The OLU-CM016 double-failure case
+### 6.3 The XOLU-CM016 double-failure case
 
 If Pebble write succeeds (step 2), SQLite fails (step 3), and `DeleteKeys`
 also fails:
@@ -260,9 +266,9 @@ surface through other monitoring channels first.
 | Failure point | Entity state | Pebble state | Recovery |
 |---|---|---|---|
 | Validation fails | Unchanged | Unchanged | Clean — 400, no writes |
-| Pebble write fails | Unchanged | Unchanged | Clean — 500 OLU-CM015, retry |
+| Pebble write fails | Unchanged | Unchanged | Clean — 500 XOLU-CM015, retry |
 | SQLite fails, tombstone succeeds | Unchanged | Tombstoned | Clean — 409/500, retry |
-| SQLite fails, tombstone fails | Unchanged | Orphaned | OLU-CM016 alert, manual DeleteKeys |
+| SQLite fails, tombstone fails | Unchanged | Orphaned | XOLU-CM016 alert, manual DeleteKeys |
 | Both succeed | Advanced | Written | Happy path |
 
 ---
@@ -296,7 +302,7 @@ surface through other monitoring channels first.
 ```json
 {
   "error": {
-    "code":    "OLU-CM001",
+    "code":    "XOLU-CM001",
     "message": "Version conflict: order id 42 has been modified",
     "status":  409
   },
@@ -341,7 +347,7 @@ POST /tenant/{t}/commit
     }
 <-  200  { "update": { "version": 8 }, "ts_accepted": 1 }
 <-  409  { "current_version": 9 }  ->  re-read and retry
-<-  500  OLU-CM015                 ->  retry whole request (SQLite untouched)
+<-  500  XOLU-CM015                 ->  retry whole request (SQLite untouched)
 ```
 
 Migration from 8.1 to 8.2 does not require a flag day. shelf-compose can
@@ -399,22 +405,22 @@ the audit trail.
 
 ## 12. Backend Availability
 
-`/commit` is **only available on the SQLite backend**. The jsonfile backend
-returns `501 OLU-CM009`. Per-test SQLite databases (temp directory) are the
+`/commit` is available on the SQLite backend. Any other backend
+returns `501 XOLU-CM009`. Per-test SQLite databases (temp directory) are the
 correct substitute for integration tests.
 
 The Pebble timeseries path additionally requires:
 
-- `OLU_TIMESERIES_ENABLED=true`
+- `XOLU_TIMESERIES_ENABLED=true`
 - Tenant provisioned via `POST /ts/provision`
-- Timelines pre-defined via `POST /ts/timelines`
+- Timelines pre-defined via `POST /ts/tl/def`
 
 A request carrying `timeseries` events where any of these conditions are
 not met is rejected before any writes begin.
 
 ---
 
-## 13. Strict Mode (`OLU_STRICT_COMMIT`)
+## 13. Strict Mode (`XOLU_STRICT_COMMIT`)
 
 | Setting | Default | Behaviour |
 |---------|---------|-----------|
@@ -432,35 +438,35 @@ regardless of this setting.
 
 | Code      | HTTP | Meaning |
 |-----------|------|---------|
-| OLU-CM001 | 409  | Version conflict. `current_version` present in response. |
-| OLU-CM002 | 400  | `update` object missing. |
-| OLU-CM003 | 400  | Both `append` and `timeseries` absent or empty. |
-| OLU-CM004 | 400  | `append` array exceeds 25 entries. |
-| OLU-CM005 | 400  | `update.entity` is not a valid entity type. |
-| OLU-CM006 | 400  | One or more `append` entries reference an invalid entity type. |
-| OLU-CM007 | 409  | An `append` entry specifies an explicit `id` that already exists. |
-| OLU-CM008 | 500  | SQLite transaction failed. All changes rolled back. |
-| OLU-CM009 | 501  | `/commit` not available on current backend. |
+| XOLU-CM001 | 409  | Version conflict. `current_version` present in response. |
+| XOLU-CM002 | 400  | `update` object missing. |
+| XOLU-CM003 | 400  | Both `append` and `timeseries` absent or empty. |
+| XOLU-CM004 | 400  | `append` array exceeds 25 entries. |
+| XOLU-CM005 | 400  | `update.entity` is not a valid entity type. |
+| XOLU-CM006 | 400  | One or more `append` entries reference an invalid entity type. |
+| XOLU-CM007 | 409  | An `append` entry specifies an explicit `id` that already exists. |
+| XOLU-CM008 | 500  | SQLite transaction failed. All changes rolled back. |
+| XOLU-CM009 | 501  | `/commit` not available on current backend. |
 
 ### Timeseries path
 
 | Code      | HTTP | Meaning |
 |-----------|------|---------|
-| OLU-CM010 | 400  | `timeseries` present but `OLU_TIMESERIES_ENABLED` is false. |
-| OLU-CM011 | 400  | Tenant not provisioned for timeseries. |
-| OLU-CM012 | 400  | Unknown timeline, reserved timeline 0, or zero event time. |
-| OLU-CM013 | 400  | Wrong number of dimension values for the timeline. |
-| OLU-CM014 | 400  | `timeseries` array exceeds `OLU_TS_MAX_BATCH_SIZE`. |
-| OLU-CM015 | 500  | Pebble write failed. SQLite untouched. Caller may retry the whole request. |
-| OLU-CM016 | 500  | Pebble write succeeded, SQLite failed, AND tombstone (DeleteKeys) failed. Orphaned TS entry possible. Manual remediation required. |
+| XOLU-CM010 | 400  | `timeseries` present but `XOLU_TIMESERIES_ENABLED` is false. |
+| XOLU-CM011 | 400  | Tenant not provisioned for timeseries. |
+| XOLU-CM012 | 400  | Unknown timeline, reserved timeline 0, or zero event time. |
+| XOLU-CM013 | 400  | Wrong number of dimension values for the timeline. |
+| XOLU-CM014 | 400  | `timeseries` array exceeds `XOLU_TS_MAX_BATCH_SIZE`. |
+| XOLU-CM015 | 500  | Pebble write failed. SQLite untouched. Caller may retry the whole request. |
+| XOLU-CM016 | 500  | Pebble write succeeded, SQLite failed, AND tombstone (DeleteKeys) failed. Orphaned TS entry possible. Manual remediation required. |
 
-OLU-CM007: `append` entries are inserts, not upserts. Use olu-generated
+XOLU-CM007: `append` entries are inserts, not upserts. Use xolu-generated
 IDs (omit `id`) unless the ID is guaranteed unique by construction.
 
-OLU-CM015 is safe to retry without any state cleanup: Pebble written before
+XOLU-CM015 is safe to retry without any state cleanup: Pebble written before
 SQLite means a Pebble failure leaves both stores untouched.
 
-OLU-CM016 is a monitoring alert. The structured log at `error` level
+XOLU-CM016 is a monitoring alert. The structured log at `error` level
 identifies the orphaned Pebble keys by `(timeline, dims, time)`.
 
 ---
@@ -469,9 +475,9 @@ identifies the orphaned Pebble keys by `(timeline, dims, time)`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLU_STRICT_COMMIT` | `true` | Enable schema validation and graph prechecks. |
-| `OLU_TIMESERIES_ENABLED` | `false` | Required for the `timeseries` array path. |
-| `OLU_TS_MAX_BATCH_SIZE` | `5000` | Maximum `timeseries` entries per commit. |
+| `XOLU_STRICT_COMMIT` | `true` | Enable schema validation and graph prechecks. |
+| `XOLU_TIMESERIES_ENABLED` | `false` | Required for the `timeseries` array path. |
+| `XOLU_TS_MAX_BATCH_SIZE` | `5000` | Maximum `timeseries` entries per commit. |
 
 All other Pebble tuning variables are documented in `TIMESERIES_DESIGN_V3.md`.
 

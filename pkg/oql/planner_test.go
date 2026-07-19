@@ -57,7 +57,9 @@ func (m *mockQueryableStore) Patch(_ context.Context, _ string, _ int, _ map[str
 	return nil
 }
 func (m *mockQueryableStore) Delete(_ context.Context, _ string, _ int) error { return nil }
-func (m *mockQueryableStore) Save(_ context.Context, _ string, _ int, _ map[string]interface{}) (bool, error) { return false, nil }
+func (m *mockQueryableStore) Save(_ context.Context, _ string, _ int, _ map[string]interface{}) (bool, error) {
+	return false, nil
+}
 func (m *mockQueryableStore) List(_ context.Context, _ string) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -92,7 +94,9 @@ func (m *mockPlainStore) Patch(_ context.Context, _ string, _ int, _ map[string]
 	return nil
 }
 func (m *mockPlainStore) Delete(_ context.Context, _ string, _ int) error { return nil }
-func (m *mockPlainStore) Save(_ context.Context, _ string, _ int, _ map[string]interface{}) (bool, error) { return false, nil }
+func (m *mockPlainStore) Save(_ context.Context, _ string, _ int, _ map[string]interface{}) (bool, error) {
+	return false, nil
+}
 func (m *mockPlainStore) List(_ context.Context, _ string) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -426,10 +430,10 @@ func TestPlanner_WhereOnly_UnpushableOrderBy(t *testing.T) {
 
 func TestPlanner_CapabilityRestrictions(t *testing.T) {
 	tests := []struct {
-		name        string
-		caps        storage.QueryCapabilities
-		sql         string
-		expectPush  bool
+		name       string
+		caps       storage.QueryCapabilities
+		sql        string
+		expectPush bool
 	}{
 		{
 			"where_disabled",

@@ -5,9 +5,9 @@
 package models
 
 import (
-	"fmt"
-	"errors"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -24,7 +24,7 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	
+
 	if id, ok := raw["id"].(float64); ok {
 		e.ID = int(id)
 	}
@@ -47,6 +47,20 @@ type Reference struct {
 	ID     int64  `json:"id"`
 }
 
+// REF type and schema constants.
+// These are the single source of truth for REF field naming across the codebase.
+// All packages that need to identify, construct, or format a REF value must
+// use these constants rather than embedding the string literals directly.
+const (
+	// RefTypeValue is the "type" field value that marks a map as a REF object.
+	RefTypeValue = "REF"
+
+	// SchemaFormatREF is the JSON Schema "format" value that marks a field as
+	// a REF reference in xolu schemas. Used by DeriveAdaptedTableSpecFrom and
+	// the validation layer.
+	SchemaFormatREF = "ref"
+)
+
 // NewReference constructs a Reference from an entity name and integer ID.
 // Use ToMap to obtain the map[string]interface{} form required for JSON storage.
 func NewReference(entity string, id int64) *Reference {
@@ -59,7 +73,7 @@ func NewReference(entity string, id int64) *Reference {
 // should use this rather than constructing raw maps by hand.
 func (r *Reference) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"type":   "REF",
+		"type":   RefTypeValue,
 		"entity": r.Entity,
 		"id":     r.ID,
 	}
@@ -165,12 +179,12 @@ func IsReference(v interface{}) (*Reference, bool) {
 	if !ok {
 		return nil, false
 	}
-	
+
 	typeVal, hasType := m["type"].(string)
 	entityVal, hasEntity := m["entity"].(string)
 	idVal, hasID := m["id"]
-	
-	if hasType && typeVal == "REF" && hasEntity && hasID {
+
+	if hasType && typeVal == RefTypeValue && hasEntity && hasID {
 		var id int64
 		switch v := idVal.(type) {
 		case float64:
@@ -201,13 +215,13 @@ type QueryStats struct {
 
 // Query represents a stored query with its execution state
 type Query struct {
-	ID           string                   `json:"id"`
-	QueryString  string                   `json:"query"`
-	Status       string                   `json:"status"` // pending, running, completed, failed
-	Result       interface{}              `json:"result,omitempty"`
-	Error        string                   `json:"error,omitempty"`
-	Stats        QueryStats               `json:"stats"`
-	ParsedQuery  map[string]interface{}   `json:"parsed_query,omitempty"`
+	ID          string                 `json:"id"`
+	QueryString string                 `json:"query"`
+	Status      string                 `json:"status"` // pending, running, completed, failed
+	Result      interface{}            `json:"result,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	Stats       QueryStats             `json:"stats"`
+	ParsedQuery map[string]interface{} `json:"parsed_query,omitempty"`
 }
 
 // PaginationParams represents pagination parameters
@@ -274,7 +288,7 @@ type GraphEdge struct {
 
 // ErrDuplicateEdgeTarget is returned by ExtractEntityEdges when two or more
 // fields in the same entity document reference the same target (entity, id)
-// pair. In olu's graph model each ordered node pair may carry at most one
+// pair. In xolu's graph model each ordered node pair may carry at most one
 // labelled edge. A document that produces two edges to the same target is
 // malformed and must be rejected at write time.
 var ErrDuplicateEdgeTarget = errors.New("entity has two REF fields pointing to the same target")
@@ -311,7 +325,7 @@ type EntityEdge struct {
 // two pipelines are structurally guaranteed to agree.
 //
 // Returns ErrDuplicateEdgeTarget if two fields in data reference the same
-// (entity, id) target. In olu's graph model each ordered node pair carries
+// (entity, id) target. In xolu's graph model each ordered node pair carries
 // at most one labelled edge; a document violating this is malformed.
 func ExtractEntityEdges(data map[string]interface{}) ([]EntityEdge, error) {
 	var edges []EntityEdge
@@ -323,7 +337,7 @@ func ExtractEntityEdges(data map[string]interface{}) ([]EntityEdge, error) {
 		for _, ref := range ExtractRefs(value) {
 			// Guard only on empty entity — an empty entity string produces a
 			// malformed node ID (":N") and must be rejected. ID 0 is a valid
-			// entity ID in olu (auto-increment starts at 1 by convention but
+			// entity ID in xolu (auto-increment starts at 1 by convention but
 			// nothing prevents explicit use of 0) and must not be filtered.
 			if ref.Entity == "" {
 				continue

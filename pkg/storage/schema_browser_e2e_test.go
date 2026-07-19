@@ -53,7 +53,7 @@ func TestSchemaBrowser_EndToEnd_DeriveSpec(t *testing.T) {
 	}
 
 	dialect := &SQLiteStorageDialect{}
-	spec, err := DeriveAdaptedTableSpecFrom("products", browser, dialect, "test-hash")
+	spec, err := DeriveAdaptedTableSpecFrom("products", browser, dialect, "test-hash", 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpecFrom failed: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSchemaBrowser_EndToEnd_DeriveSpec(t *testing.T) {
 		{"age", "INTEGER", true},
 		{"score", "REAL", false},
 		{"active", "INTEGER", false}, // SQLite: boolean → INTEGER
-		{"tags", "TEXT", false},       // array → TEXT (JSON)
+		{"tags", "TEXT", false},      // array → TEXT (JSON)
 		{"status", "TEXT", false},
 	}
 
@@ -149,7 +149,7 @@ func TestSchemaBrowser_EndToEnd_DecimalWithMeta(t *testing.T) {
 	browser := NewSchemaBrowser(obj)
 	dialect := &SQLiteStorageDialect{}
 
-	spec, err := DeriveAdaptedTableSpecFrom("transactions", browser, dialect, "test-hash")
+	spec, err := DeriveAdaptedTableSpecFrom("transactions", browser, dialect, "test-hash", 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpecFrom failed: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSchemaBrowser_EndToEnd_NoAdditionalProperties(t *testing.T) {
 	browser := NewSchemaBrowser(obj)
 	dialect := &SQLiteStorageDialect{}
 
-	spec, err := DeriveAdaptedTableSpecFrom("strict", browser, dialect, "test-hash")
+	spec, err := DeriveAdaptedTableSpecFrom("strict", browser, dialect, "test-hash", 0)
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestSchemaBrowser_EndToEnd_MatchesRawAdapter(t *testing.T) {
 	dialect := &SQLiteStorageDialect{}
 
 	// Path 1: raw map adapter
-	specRaw, err := DeriveAdaptedTableSpec("items", rawSchema, dialect)
+	specRaw, err := DeriveAdaptedTableSpec("items", rawSchema, dialect, 0)
 	if err != nil {
 		t.Fatalf("raw path failed: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestSchemaBrowser_EndToEnd_MatchesRawAdapter(t *testing.T) {
 	obj := schema.(*builders.ObjectSchema)
 	browser := NewSchemaBrowser(obj)
 
-	specBrowser, err := DeriveAdaptedTableSpecFrom("items", browser, dialect, specRaw.SchemaHash)
+	specBrowser, err := DeriveAdaptedTableSpecFrom("items", browser, dialect, specRaw.SchemaHash, 0)
 	if err != nil {
 		t.Fatalf("browser path failed: %v", err)
 	}

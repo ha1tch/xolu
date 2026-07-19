@@ -19,8 +19,8 @@ import (
 // SchemaDiff describes the differences between an old and new
 // AdaptedTableSpec. It is the migration plan for schema evolution.
 type SchemaDiff struct {
-	Added   []ColumnDef // Columns in new but not in old
-	Dropped []ColumnDef // Columns in old but not in new
+	Added   []ColumnDef    // Columns in new but not in old
+	Dropped []ColumnDef    // Columns in old but not in new
 	Changed []ColumnChange // Columns present in both but with incompatible type changes
 
 	IndexesAdded   []IndexDef // Indexes in new but not in old
@@ -141,7 +141,7 @@ func DiffAdaptedSpecs(old, new *AdaptedTableSpec) *SchemaDiff {
 //  3. Drops removed columns via ALTER TABLE DROP COLUMN (SQLite 3.35+),
 //     after migrating any existing data to the _extra overflow column
 //  4. Updates indexes (drop old, create new)
-//  5. Updates the metadata row in adapted_table_schemas
+//  5. Updates the metadata row in the per-tenant t<X>_n_sch registry
 //  6. Updates the in-memory registry
 //
 // The entire migration runs in a single transaction.
@@ -153,16 +153,26 @@ func MigrateAdaptedTable(
 	newSchema map[string]interface{},
 	dialect StorageDialect,
 ) error {
-	// Derive the new spec from the updated schema.
-	newSpec, err := DeriveAdaptedTableSpec(entity, newSchema, dialect)
-	if err != nil {
-		return fmt.Errorf("failed to derive new spec for %q: %w", entity, err)
-	}
-
-	// Load the old spec from the registry (populated at startup).
+	// Load the old spec from the registry first — we need the TenantID to derive the new spec.
 	oldSpec := registry.Get(entity)
 	if oldSpec == nil {
 		return fmt.Errorf("entity %q is not registered as adapted", entity)
+	}
+
+	// D-009 residual (defence in depth): the migration builds DROP COLUMN /
+	// DROP INDEX / data-migration SELECT statements from oldSpec's identifiers,
+	// which originate from persisted column_spec metadata. LoadAdaptedRegistry
+	// already rejects poisoned specs, but re-validate here so no future path that
+	// populates the registry by other means can reach unparameterisable DDL.
+	if err := validatePersistedSpec(oldSpec); err != nil {
+		return fmt.Errorf("refusing to migrate %q: existing schema contains an "+
+			"invalid SQL identifier: %w", entity, err)
+	}
+
+	// Derive the new spec from the updated schema, preserving the tenant.
+	newSpec, err := DeriveAdaptedTableSpec(entity, newSchema, dialect, oldSpec.TenantID)
+	if err != nil {
+		return fmt.Errorf("failed to derive new spec for %q: %w", entity, err)
 	}
 
 	// Compute the diff.
@@ -255,7 +265,7 @@ func MigrateAdaptedTable(
 		}
 	}
 
-	// 5. Update metadata.
+	// 5. Update metadata in the per-tenant schema registry.
 	columnSpecJSON, err := json.Marshal(newSpec.Columns)
 	if err != nil {
 		return fmt.Errorf("failed to marshal new column spec: %w", err)
@@ -264,13 +274,12 @@ func MigrateAdaptedTable(
 	if newSpec.HasExtra {
 		hasExtraInt = 1
 	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE adapted_table_schemas
-		SET schema_hash = ?, column_spec = ?, has_extra = ?
-		WHERE entity_type = ?
-	`, newSpec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)
+	nsch := fmt.Sprintf("t%04X_n_sch", newSpec.TenantID)
+	_, err = tx.ExecContext(ctx,
+		"UPDATE "+nsch+" SET schema_hash = ?, column_spec = ?, has_extra = ? WHERE entity_type = ?",
+		newSpec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)
 	if err != nil {
-		return fmt.Errorf("failed to update adapted_table_schemas: %w", err)
+		return fmt.Errorf("failed to update %s: %w", nsch, err)
 	}
 
 	// Commit.
@@ -284,7 +293,7 @@ func MigrateAdaptedTable(
 	return nil
 }
 
-// updateSchemaMetadata updates just the hash in the metadata table
+// updateSchemaMetadata updates just the hash in the per-tenant schema registry
 // (for non-layout changes like description updates).
 func updateSchemaMetadata(ctx context.Context, db *sql.DB, entity string, spec *AdaptedTableSpec) error {
 	columnSpecJSON, err := json.Marshal(spec.Columns)
@@ -295,11 +304,10 @@ func updateSchemaMetadata(ctx context.Context, db *sql.DB, entity string, spec *
 	if spec.HasExtra {
 		hasExtraInt = 1
 	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE adapted_table_schemas
-		SET schema_hash = ?, column_spec = ?, has_extra = ?
-		WHERE entity_type = ?
-	`, spec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)
+	nsch := fmt.Sprintf("t%04X_n_sch", spec.TenantID)
+	_, err = db.ExecContext(ctx,
+		"UPDATE "+nsch+" SET schema_hash = ?, column_spec = ?, has_extra = ? WHERE entity_type = ?",
+		spec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)
 	return err
 }
 
@@ -325,7 +333,7 @@ func migrateDroppedToExtra(ctx context.Context, tx *sql.Tx, table string, droppe
 	if err != nil {
 		return fmt.Errorf("failed to read dropped columns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	updateSQL := fmt.Sprintf("UPDATE %s SET _extra = ? WHERE id = ?", table)
 

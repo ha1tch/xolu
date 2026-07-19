@@ -1,0 +1,2 @@
+go test fuzz v1
+string("ROUND(1,01E7*1)=0000")

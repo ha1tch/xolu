@@ -18,7 +18,7 @@ package server_test
 //   7. MaxEntitySize enforcement
 //   8. Legacy graph endpoints (POST /graph/path, POST /graph/neighbors)
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 
 import (
 	"encoding/json"
@@ -56,7 +56,7 @@ type gapTestOpts struct {
 func newGapEnv(t *testing.T, opts gapTestOpts) *e2eEnv {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "olu-gap-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-gap-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,45 +81,37 @@ func newGapEnv(t *testing.T, opts gapTestOpts) *e2eEnv {
 		opts.MaxEntitySize = 1048576
 	}
 
+	dbPath := filepath.Join(tmpDir, "test.db")
 	cfg := &config.Config{
-		Host:                "localhost",
-		Port:                0,
-		StorageType:        "jsonfile",
-		BaseDir:             tmpDir,
-		Schema:              "test_schema",
-		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
-		CacheType:           "memory",
-		CacheTTL:            300,
-		GraphEnabled:        true,
-		GraphMode:           "flat",
-		FullTextEnabled:     opts.FullTextEnabled,
-		CascadingDelete:     opts.CascadingDelete,
-		RefEmbedDepth:       opts.RefEmbedDepth,
-		MaxEmbedDepth:       opts.MaxEmbedDepth,
-		MaxEntitySize:       opts.MaxEntitySize,
-		PatchNullBehavior:   opts.PatchNullBehavior,
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
-		MaxCascadeDeletions: 100,
-		GraphQueryTTL:       86400,
-		MaxQueryDepth:       10,
-	}
-
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
+		Host:                 "localhost",
+		Port:                 0,
+		StorageType:          "sqlite",
+		BaseDir:              tmpDir,
+		Schema:               "test_schema",
+		SchemaDir:            filepath.Join(tmpDir, "test_schema"),
+		CacheType:            "memory",
+		CacheTTL:             300,
+		GraphEnabled:         true,
+		GraphMode:            "flat",
+		FullTextEnabled:      opts.FullTextEnabled,
+		CascadingDelete:      opts.CascadingDelete,
+		RefEmbedDepth:        opts.RefEmbedDepth,
+		MaxEmbedDepth:        opts.MaxEmbedDepth,
+		MaxEntitySize:        opts.MaxEntitySize,
+		PatchNullBehavior:    opts.PatchNullBehavior,
+		MaxCascadeDeletions:  100,
+		AsyncJobRetentionTTL: 86400,
+		MaxQueryDepth:        10,
 	}
 
 	var store storage.Store
 	if opts.FullTextEnabled {
-		// FTS requires SQLite backend
-		storeConfig = map[string]interface{}{
-			"path":              filepath.Join(tmpDir, "test.db"),
+		store, err = storage.NewStore("sqlite", map[string]interface{}{
+			"db_path":           dbPath,
 			"full_text_enabled": true,
-		}
-		store, err = storage.NewStore("sqlite", storeConfig)
+		})
 	} else {
-		store, err = storage.NewStore("jsonfile", storeConfig)
+		store, err = storage.NewStore("sqlite", map[string]interface{}{"db_path": dbPath})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +123,7 @@ func newGapEnv(t *testing.T, opts gapTestOpts) *e2eEnv {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &e2eEnv{ts: ts, tmpDir: tmpDir, t: t}
@@ -189,7 +181,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("search across all entities", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=water", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldExists(t, r, "query")
 		assertFieldExists(t, r, "count")
 		assertFieldExists(t, r, "results")
@@ -205,7 +197,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("search with entity filter", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=water&entity=assets", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		count := int(toF64(r["count"]))
 		// Only the pump asset mentions water (not the sensor)
 		if count < 1 {
@@ -215,7 +207,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("search with no matches", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=nonexistenttermxyz", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		count := int(toF64(r["count"]))
 		if count != 0 {
 			t.Errorf("expected 0 results, got %d", count)
@@ -231,7 +223,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("search prefix matching", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=pump", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		count := int(toF64(r["count"]))
 		if count < 1 {
 			t.Errorf("expected at least 1 result for 'pump', got %d", count)
@@ -240,7 +232,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("result shape contains entity and id", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=pump", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		results, ok := r["results"].([]interface{})
 		if !ok || len(results) == 0 {
 			t.Fatal("expected at least 1 result")
@@ -261,9 +253,9 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("case insensitive search", func(t *testing.T) {
 		status1, r1 := env.doJSON("GET", "/api/v1/search?q=WATER", nil)
-		assertStatus(t, status1, 200)
+		assertStatusCode(t, status1, 200)
 		status2, r2 := env.doJSON("GET", "/api/v1/search?q=water", nil)
-		assertStatus(t, status2, 200)
+		assertStatusCode(t, status2, 200)
 
 		count1 := int(toF64(r1["count"]))
 		count2 := int(toF64(r2["count"]))
@@ -275,7 +267,7 @@ func TestGap_FTS_Enabled(t *testing.T) {
 
 	t.Run("multi-word search", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/search?q=flow+control", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		count := int(toF64(r["count"]))
 		// The valve has "flow control" in its description
 		if count < 1 {
@@ -343,7 +335,7 @@ func TestGap_RefEmbed(t *testing.T) {
 
 	t.Run("default embed depth resolves REFs", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		// With RefEmbedDepth=2, "asset" REF should be resolved
 		asset, ok := r["asset"].(map[string]interface{})
@@ -367,7 +359,7 @@ func TestGap_RefEmbed(t *testing.T) {
 
 	t.Run("embed=false disables embedding", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d?embed=false", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		// "asset" should be raw REF, not resolved
 		asset, ok := r["asset"].(map[string]interface{})
@@ -381,7 +373,7 @@ func TestGap_RefEmbed(t *testing.T) {
 
 	t.Run("embed_depth=0 disables embedding", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d?embed_depth=0", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		asset, ok := r["asset"].(map[string]interface{})
 		if !ok {
@@ -394,7 +386,7 @@ func TestGap_RefEmbed(t *testing.T) {
 
 	t.Run("embed_depth=1 limits resolution depth", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d?embed_depth=1", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		// First level should be embedded
 		asset, ok := r["asset"].(map[string]interface{})
@@ -426,7 +418,7 @@ func TestGap_RefEmbed(t *testing.T) {
 		// shorter than 10, so everything resolves. The key assertion is that
 		// the server applies the cap without error and the response is valid.
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d?embed_depth=999", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		// Verify that the response did resolve (cap is 10, chain is 3, so
 		// everything should be embedded despite the absurd request).
@@ -447,7 +439,7 @@ func TestGap_RefEmbed(t *testing.T) {
 		// With a clean RefEmbedDepth=2 env: sensor -> asset (level 1) -> asset_type (level 2)
 		// Both should be resolved.
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/sensors/%d?embed_depth=2", sID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		asset, ok := r["asset"].(map[string]interface{})
 		if !ok || asset["type"] == "REF" {
@@ -485,7 +477,7 @@ func TestGap_CascadingDelete(t *testing.T) {
 
 	t.Run("cascading delete returns deleted refs", func(t *testing.T) {
 		status, r := env.doJSON("DELETE", fmt.Sprintf("/api/v1/assets/%d", aID), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		// Should include cascaded_deletes in response
 		assertFieldExists(t, r, "cascaded_deletes")
@@ -577,7 +569,7 @@ func TestGap_CascadingDelete(t *testing.T) {
 
 		// Delete the asset — currently only deletes the root
 		status, r := env.doJSON("DELETE", fmt.Sprintf("/api/v1/assets/%d", a3), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 
 		deletes := r["cascaded_deletes"].([]interface{})
 		// Current behaviour: only the root entity is in the list
@@ -614,7 +606,7 @@ func TestGap_CascadingDelete(t *testing.T) {
 		}
 		for _, id := range ids {
 			status, r := env.doJSON("DELETE", fmt.Sprintf("/api/v1/assets/%d", id), nil)
-			assertStatus(t, status, 200)
+			assertStatusCode(t, status, 200)
 			deletes := r["cascaded_deletes"].([]interface{})
 			if len(deletes) > 100 {
 				t.Errorf("cascaded_deletes exceeded MaxCascadeDeletions cap: got %d", len(deletes))
@@ -643,11 +635,11 @@ func TestGap_PatchNullDelete(t *testing.T) {
 	status, _ := env.doJSON("PATCH", fmt.Sprintf("/api/v1/assets/%d", aID), map[string]interface{}{
 		"description": nil,
 	})
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 
 	// GET and verify description is gone
 	status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/assets/%d?embed=false", aID), nil)
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 	if _, exists := r["description"]; exists {
 		t.Errorf("description should be deleted when PatchNullBehavior=delete, but it's still present: %v", r["description"])
 	}
@@ -675,11 +667,11 @@ func TestGap_PatchNullStore(t *testing.T) {
 	status, _ := env.doJSON("PATCH", fmt.Sprintf("/api/v1/assets/%d", aID), map[string]interface{}{
 		"description": nil,
 	})
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 
 	// GET and verify description is present but null
 	status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/assets/%d?embed=false", aID), nil)
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 	// The field should exist (key present) but be nil
 	if _, exists := r["description"]; !exists {
 		t.Error("description should still exist as key when PatchNullBehavior=store")
@@ -717,7 +709,7 @@ func TestGap_SchemaCRUD(t *testing.T) {
 
 	t.Run("GET schema", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/schema/test_entity", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		// Should return the schema we posted
 		if r == nil {
 			t.Fatal("expected schema body in response")
@@ -793,7 +785,7 @@ func TestGap_OQLAsyncLifecycle(t *testing.T) {
 		// Fetch full result
 		resStatus, resR := env.doJSON("GET",
 			fmt.Sprintf("/api/v1/oql/query/%s/result", queryID), nil)
-		assertStatus(t, resStatus, 200)
+		assertStatusCode(t, resStatus, 200)
 		assertFieldExists(t, resR, "status")
 
 		// Verify the result has data with correct count
@@ -887,11 +879,12 @@ func TestGap_OQLAsyncLifecycle(t *testing.T) {
 				}
 				_, pollR := env.doJSON("GET", fmt.Sprintf("/api/v1/oql/query/%s", qid), nil)
 				st, _ := pollR["status"].(string)
-				if st == "completed" {
+				switch st {
+				case "completed":
 					completed[i] = true
-				} else if st == "failed" {
+				case "failed":
 					t.Fatalf("query %d failed unexpectedly", i)
-				} else {
+				default:
 					allDone = false
 				}
 			}
@@ -941,7 +934,7 @@ func TestGap_OQLAsyncLifecycle(t *testing.T) {
 		// Immediate poll
 		pollStatus, pollR := env.doJSON("GET",
 			fmt.Sprintf("/api/v1/oql/query/%s", queryID), nil)
-		assertStatus(t, pollStatus, 200)
+		assertStatusCode(t, pollStatus, 200)
 		st, _ := pollR["status"].(string)
 		validStates := map[string]bool{"pending": true, "running": true, "completed": true}
 		if !validStates[st] {
@@ -1033,7 +1026,7 @@ func TestGap_LegacyGraphPath(t *testing.T) {
 			"from": sensorNode,
 			"to":   atNode,
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldExists(t, r, "path")
 		assertFieldExists(t, r, "length")
 		path := r["path"].([]interface{})
@@ -1118,7 +1111,7 @@ func TestGap_LegacyGraphNeighbors(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/neighbors", map[string]interface{}{
 			"node_id": assetNode,
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		neighbors := r["neighbors"].(map[string]interface{})
 		outgoing, ok := neighbors["outgoing"].(map[string]interface{})
 		if !ok {
@@ -1135,7 +1128,7 @@ func TestGap_LegacyGraphNeighbors(t *testing.T) {
 			"node_id":   assetNode,
 			"direction": "in",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		neighbors := r["neighbors"].(map[string]interface{})
 		incoming, ok := neighbors["incoming"].(map[string]interface{})
 		if !ok {
@@ -1152,7 +1145,7 @@ func TestGap_LegacyGraphNeighbors(t *testing.T) {
 			"node_id":   assetNode,
 			"direction": "both",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		neighbors := r["neighbors"].(map[string]interface{})
 		if _, ok := neighbors["outgoing"]; !ok {
 			t.Error("expected outgoing in both mode")
@@ -1175,13 +1168,14 @@ func TestGap_MetricsEndpoint(t *testing.T) {
 	t.Run("default format is text", func(t *testing.T) {
 		resp, body := env.do("GET", "/metrics", nil)
 		// Metrics may return 200 or 503 depending on whether metrics are enabled
-		if resp == 200 {
+		switch resp {
+		case 200:
 			if len(body) == 0 {
 				t.Error("expected non-empty metrics body")
 			}
-		} else if resp == 503 {
+		case 503:
 			// Metrics not enabled — acceptable
-		} else {
+		default:
 			t.Errorf("expected 200 or 503, got %d", resp)
 		}
 	})
@@ -1207,11 +1201,11 @@ func TestGap_PatchProtectedFields(t *testing.T) {
 		"id":     999,
 		"status": "maintenance",
 	})
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 
 	// Verify id didn't change
 	status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/assets/%d?embed=false", aID), nil)
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 	gotID := int(toF64(r["id"]))
 	if gotID != aID {
 		t.Errorf("id should not have changed: expected %d, got %d", aID, gotID)
@@ -1222,7 +1216,7 @@ func TestGap_PatchProtectedFields(t *testing.T) {
 }
 
 // ============================================================================
-// Helpers (assertStatus, assertFieldExists, assertFieldType already in
+// Helpers (assertStatusCode, assertFieldExists, assertFieldType already in
 // e2e_graph_intensive_test.go — these are available package-wide)
 // ============================================================================
 

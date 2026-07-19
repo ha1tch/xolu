@@ -288,8 +288,8 @@ type MetricsSnapshot struct {
 	RequestErrors  uint64
 	ActiveRequests int64
 	LatencyAvgMs   float64
-	LatencySumSec  float64           // total latency in seconds (for Prometheus _sum)
-	LatencyCount   uint64            // total observations (for Prometheus _count)
+	LatencySumSec  float64 // total latency in seconds (for Prometheus _sum)
+	LatencyCount   uint64  // total observations (for Prometheus _count)
 	LatencyBuckets map[string]uint64
 	EntityCreates  uint64
 	EntityReads    uint64
@@ -301,81 +301,113 @@ type MetricsSnapshot struct {
 	SearchQueries  uint64
 	OQLQueries     uint64
 	GraphQueries   uint64
+
+	// Blob store usage — populated by the server from the UsageSampler cache.
+	// All zero when the blob store is disabled or the sampler has not yet run.
+	BlobEnabled   bool
+	BlobBlobCount int64
+	BlobKeyCount  int64
+	BlobBytes     int64
+	BlobTenants   int64
 }
 
-// PrometheusFormat returns metrics in Prometheus exposition format
+// PrometheusFormat returns metrics in Prometheus exposition format.
 func (m *Metrics) PrometheusFormat() string {
-	snapshot := m.GetSnapshot()
+	return m.PrometheusFormatSnapshot(m.GetSnapshot())
+}
 
+// PrometheusFormatSnapshot renders an already-built snapshot. Use this when
+// the caller has augmented the snapshot (e.g. with blob usage figures) before
+// rendering, to avoid a second GetSnapshot call.
+func (m *Metrics) PrometheusFormatSnapshot(snapshot MetricsSnapshot) string {
 	var result string
 
 	// Uptime
-	result += "# HELP olu_uptime_seconds Server uptime in seconds\n"
-	result += "# TYPE olu_uptime_seconds gauge\n"
-	result += "olu_uptime_seconds " + strconv.FormatFloat(snapshot.Uptime.Seconds(), 'f', 2, 64) + "\n\n"
+	result += "# HELP xolu_uptime_seconds Server uptime in seconds\n"
+	result += "# TYPE xolu_uptime_seconds gauge\n"
+	result += "xolu_uptime_seconds " + strconv.FormatFloat(snapshot.Uptime.Seconds(), 'f', 2, 64) + "\n\n"
 
 	// Request totals
-	result += "# HELP olu_requests_total Total number of HTTP requests\n"
-	result += "# TYPE olu_requests_total counter\n"
-	result += "olu_requests_total " + strconv.FormatUint(snapshot.RequestsTotal, 10) + "\n\n"
+	result += "# HELP xolu_requests_total Total number of HTTP requests\n"
+	result += "# TYPE xolu_requests_total counter\n"
+	result += "xolu_requests_total " + strconv.FormatUint(snapshot.RequestsTotal, 10) + "\n\n"
 
 	// Requests by status code
-	result += "# HELP olu_requests_by_status_total HTTP requests by status code\n"
-	result += "# TYPE olu_requests_by_status_total counter\n"
+	result += "# HELP xolu_requests_by_status_total HTTP requests by status code\n"
+	result += "# TYPE xolu_requests_by_status_total counter\n"
 	for code, count := range snapshot.RequestsByCode {
-		result += "olu_requests_by_status_total{code=\"" + strconv.Itoa(code) + "\"} " + strconv.FormatUint(count, 10) + "\n"
+		result += "xolu_requests_by_status_total{code=\"" + strconv.Itoa(code) + "\"} " + strconv.FormatUint(count, 10) + "\n"
 	}
 	result += "\n"
 
 	// Request errors
-	result += "# HELP olu_request_errors_total Total number of request errors (4xx/5xx)\n"
-	result += "# TYPE olu_request_errors_total counter\n"
-	result += "olu_request_errors_total " + strconv.FormatUint(snapshot.RequestErrors, 10) + "\n\n"
+	result += "# HELP xolu_request_errors_total Total number of request errors (4xx/5xx)\n"
+	result += "# TYPE xolu_request_errors_total counter\n"
+	result += "xolu_request_errors_total " + strconv.FormatUint(snapshot.RequestErrors, 10) + "\n\n"
 
 	// Active requests
-	result += "# HELP olu_active_requests Current number of active requests\n"
-	result += "# TYPE olu_active_requests gauge\n"
-	result += "olu_active_requests " + strconv.FormatInt(snapshot.ActiveRequests, 10) + "\n\n"
+	result += "# HELP xolu_active_requests Current number of active requests\n"
+	result += "# TYPE xolu_active_requests gauge\n"
+	result += "xolu_active_requests " + strconv.FormatInt(snapshot.ActiveRequests, 10) + "\n\n"
 
 	// Latency histogram
-	result += "# HELP olu_request_duration_seconds Request duration histogram\n"
-	result += "# TYPE olu_request_duration_seconds histogram\n"
+	result += "# HELP xolu_request_duration_seconds Request duration histogram\n"
+	result += "# TYPE xolu_request_duration_seconds histogram\n"
 	cumulative := uint64(0)
 	bucketOrder := []string{"0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf"}
 	for _, bucket := range bucketOrder {
 		cumulative += snapshot.LatencyBuckets[bucket]
-		result += "olu_request_duration_seconds_bucket{le=\"" + bucket + "\"} " + strconv.FormatUint(cumulative, 10) + "\n"
+		result += "xolu_request_duration_seconds_bucket{le=\"" + bucket + "\"} " + strconv.FormatUint(cumulative, 10) + "\n"
 	}
-	result += "olu_request_duration_seconds_sum " + strconv.FormatFloat(snapshot.LatencySumSec, 'f', 6, 64) + "\n"
-	result += "olu_request_duration_seconds_count " + strconv.FormatUint(snapshot.LatencyCount, 10) + "\n"
+	result += "xolu_request_duration_seconds_sum " + strconv.FormatFloat(snapshot.LatencySumSec, 'f', 6, 64) + "\n"
+	result += "xolu_request_duration_seconds_count " + strconv.FormatUint(snapshot.LatencyCount, 10) + "\n"
 	result += "\n"
 
 	// Average latency
-	result += "# HELP olu_request_latency_avg_ms Average request latency in milliseconds\n"
-	result += "# TYPE olu_request_latency_avg_ms gauge\n"
-	result += "olu_request_latency_avg_ms " + strconv.FormatFloat(snapshot.LatencyAvgMs, 'f', 3, 64) + "\n\n"
+	result += "# HELP xolu_request_latency_avg_ms Average request latency in milliseconds\n"
+	result += "# TYPE xolu_request_latency_avg_ms gauge\n"
+	result += "xolu_request_latency_avg_ms " + strconv.FormatFloat(snapshot.LatencyAvgMs, 'f', 3, 64) + "\n\n"
 
 	// Entity operations
-	result += "# HELP olu_entity_operations_total Entity operations by type\n"
-	result += "# TYPE olu_entity_operations_total counter\n"
-	result += "olu_entity_operations_total{operation=\"create\"} " + strconv.FormatUint(snapshot.EntityCreates, 10) + "\n"
-	result += "olu_entity_operations_total{operation=\"read\"} " + strconv.FormatUint(snapshot.EntityReads, 10) + "\n"
-	result += "olu_entity_operations_total{operation=\"update\"} " + strconv.FormatUint(snapshot.EntityUpdates, 10) + "\n"
-	result += "olu_entity_operations_total{operation=\"delete\"} " + strconv.FormatUint(snapshot.EntityDeletes, 10) + "\n"
-	result += "olu_entity_operations_total{operation=\"list\"} " + strconv.FormatUint(snapshot.EntityLists, 10) + "\n\n"
+	result += "# HELP xolu_entity_operations_total Entity operations by type\n"
+	result += "# TYPE xolu_entity_operations_total counter\n"
+	result += "xolu_entity_operations_total{operation=\"create\"} " + strconv.FormatUint(snapshot.EntityCreates, 10) + "\n"
+	result += "xolu_entity_operations_total{operation=\"read\"} " + strconv.FormatUint(snapshot.EntityReads, 10) + "\n"
+	result += "xolu_entity_operations_total{operation=\"update\"} " + strconv.FormatUint(snapshot.EntityUpdates, 10) + "\n"
+	result += "xolu_entity_operations_total{operation=\"delete\"} " + strconv.FormatUint(snapshot.EntityDeletes, 10) + "\n"
+	result += "xolu_entity_operations_total{operation=\"list\"} " + strconv.FormatUint(snapshot.EntityLists, 10) + "\n\n"
 
 	// Cache stats
-	result += "# HELP olu_cache_total Cache hits and misses\n"
-	result += "# TYPE olu_cache_total counter\n"
-	result += "olu_cache_total{result=\"hit\"} " + strconv.FormatUint(snapshot.CacheHits, 10) + "\n"
-	result += "olu_cache_total{result=\"miss\"} " + strconv.FormatUint(snapshot.CacheMisses, 10) + "\n\n"
+	result += "# HELP xolu_cache_total Cache hits and misses\n"
+	result += "# TYPE xolu_cache_total counter\n"
+	result += "xolu_cache_total{result=\"hit\"} " + strconv.FormatUint(snapshot.CacheHits, 10) + "\n"
+	result += "xolu_cache_total{result=\"miss\"} " + strconv.FormatUint(snapshot.CacheMisses, 10) + "\n\n"
 
 	// Query stats
-	result += "# HELP olu_queries_total Query operations by type\n"
-	result += "# TYPE olu_queries_total counter\n"
-	result += "olu_queries_total{type=\"search\"} " + strconv.FormatUint(snapshot.SearchQueries, 10) + "\n"
-	result += "olu_queries_total{type=\"oql\"} " + strconv.FormatUint(snapshot.OQLQueries, 10) + "\n"
-	result += "olu_queries_total{type=\"graph\"} " + strconv.FormatUint(snapshot.GraphQueries, 10) + "\n"
+	result += "# HELP xolu_queries_total Query operations by type\n"
+	result += "# TYPE xolu_queries_total counter\n"
+	result += "xolu_queries_total{type=\"search\"} " + strconv.FormatUint(snapshot.SearchQueries, 10) + "\n"
+	result += "xolu_queries_total{type=\"oql\"} " + strconv.FormatUint(snapshot.OQLQueries, 10) + "\n"
+	result += "xolu_queries_total{type=\"graph\"} " + strconv.FormatUint(snapshot.GraphQueries, 10) + "\n"
+
+	// Blob store usage (only emitted when the blob store is enabled)
+	if snapshot.BlobEnabled {
+		result += "\n# HELP xolu_blob_blobs Total number of distinct blob files on disk across all tenants\n"
+		result += "# TYPE xolu_blob_blobs gauge\n"
+		result += "xolu_blob_blobs " + strconv.FormatInt(snapshot.BlobBlobCount, 10) + "\n"
+
+		result += "\n# HELP xolu_blob_keys Total number of key aliases across all tenants\n"
+		result += "# TYPE xolu_blob_keys gauge\n"
+		result += "xolu_blob_keys " + strconv.FormatInt(snapshot.BlobKeyCount, 10) + "\n"
+
+		result += "\n# HELP xolu_blob_bytes Total bytes used by blob files across all tenants\n"
+		result += "# TYPE xolu_blob_bytes gauge\n"
+		result += "xolu_blob_bytes " + strconv.FormatInt(snapshot.BlobBytes, 10) + "\n"
+
+		result += "\n# HELP xolu_blob_tenants Number of tenants with at least one blob\n"
+		result += "# TYPE xolu_blob_tenants gauge\n"
+		result += "xolu_blob_tenants " + strconv.FormatInt(snapshot.BlobTenants, 10) + "\n"
+	}
 
 	return result
 }

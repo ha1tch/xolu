@@ -27,7 +27,7 @@ type AggregateSQL struct {
 // GenerateAggregateSQL builds a GROUP BY + aggregate query for an adapted table.
 // Instead of SELECT data, _version FROM entities WHERE ... it generates:
 //
-//	SELECT category, SUM(price), COUNT(*) FROM olu_products
+//	SELECT category, SUM(price), COUNT(*) FROM xolu_products
 //	WHERE tenant_id = $1 AND (status = $2) GROUP BY category
 //
 // The dialect parameter controls placeholder syntax and type coercion.
@@ -83,6 +83,9 @@ func GenerateAggregateSQL(
 				}
 
 				sqlExpr := fmt.Sprintf("%s(%s)", funcName, colName)
+				if fc.Distinct {
+					sqlExpr = fmt.Sprintf("%s(DISTINCT %s)", funcName, colName)
+				}
 				selectExprs = append(selectExprs, sqlExpr)
 				aliases = append(aliases, alias)
 
@@ -149,20 +152,16 @@ func GenerateAggregateSQL(
 	if len(stmt.OrderBy) > 0 {
 		var orderExprs []string
 		for _, ob := range stmt.OrderBy {
-			fieldName := exprToString(ob.Expression)
 			dir := "ASC"
 			if ob.Descending {
 				dir = "DESC"
 			}
 
-			// Check if it's a column in the adapted table
-			colName, _, _, colOk := store.AdaptedColumnInfo(entity, fieldName)
-			if colOk {
-				orderExprs = append(orderExprs, colName+" "+dir)
-			} else {
-				// Might be an alias -- use it directly
-				orderExprs = append(orderExprs, fieldName+" "+dir)
+			orderSQL, err := renderAggregateOrderByTerm(ob.Expression, entity, store)
+			if err != nil {
+				return nil, err
 			}
+			orderExprs = append(orderExprs, orderSQL+" "+dir)
 		}
 		if len(orderExprs) > 0 {
 			sql += " ORDER BY " + strings.Join(orderExprs, ", ")
@@ -508,4 +507,56 @@ func filterRecordsByExpr(records []map[string]interface{}, expr ast.Expression) 
 		}
 	}
 	return result
+}
+
+// renderAggregateOrderByTerm produces safe SQL for a single ORDER BY term in an
+// aggregate query. It works from the AST node type rather than a stringified
+// form, so no caller-controlled text reaches SQL unvalidated (D-013):
+//
+//   - An aggregate FunctionCall (e.g. SUM(amount), COUNT(*)) is re-rendered
+//     through the same Aggregates allowlist and AdaptedColumnInfo resolution the
+//     SELECT clause uses. A delimited identifier in the argument is rejected by
+//     AdaptedColumnInfo (unknown column) rather than interpolated.
+//   - A bare column resolves via AdaptedColumnInfo to its native column name.
+//   - Anything else is treated as an output alias and must satisfy
+//     validateFieldName; otherwise it is rejected.
+func renderAggregateOrderByTerm(expr ast.Expression, entity string, store storage.AggregateQueryable) (string, error) {
+	if isAggregate(expr) {
+		fc := expr.(*ast.FunctionCall)
+		funcName := strings.ToUpper(exprToString(fc.Function))
+		if _, ok := Aggregates[funcName]; !ok {
+			return "", fmt.Errorf("invalid ORDER BY aggregate %q", funcName)
+		}
+		if funcName == "COUNT" && isCountStar(fc) {
+			return "COUNT(*)", nil
+		}
+		if len(fc.Arguments) == 0 {
+			return "", fmt.Errorf("ORDER BY aggregate %q requires an argument", funcName)
+		}
+		argName := exprToString(fc.Arguments[0])
+		colName, _, _, ok := store.AdaptedColumnInfo(entity, argName)
+		if !ok {
+			return "", fmt.Errorf("ORDER BY aggregate field %q not found in adapted table %q", argName, entity)
+		}
+		if fc.Distinct {
+			return fmt.Sprintf("%s(DISTINCT %s)", funcName, colName), nil
+		}
+		return fmt.Sprintf("%s(%s)", funcName, colName), nil
+	}
+
+	fieldName := exprToString(expr)
+
+	// Known adapted column → native column name.
+	if colName, _, _, ok := store.AdaptedColumnInfo(entity, fieldName); ok {
+		return colName, nil
+	}
+
+	// Otherwise it must be a bare output-alias identifier. The term is
+	// interpolated unquoted into ORDER BY, so a tsqlparser delimited identifier
+	// (ORDER BY [x) UNION SELECT ...--]) that stringifies to raw inner text must
+	// be rejected here rather than reach SQL.
+	if err := validateFieldName(fieldName); err != nil {
+		return "", fmt.Errorf("invalid ORDER BY term %q: not a known column, aggregate, or valid alias: %w", fieldName, err)
+	}
+	return fieldName, nil
 }

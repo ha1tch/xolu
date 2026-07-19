@@ -7,7 +7,6 @@ package storage_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,18 +16,13 @@ import (
 
 func setupTestStore(t *testing.T) (storage.Store, string) {
 	t.Helper()
-	
-	tmpDir, err := os.MkdirTemp("", "olu-storage-test-*")
+
+	tmpDir, err := os.MkdirTemp("", "xolu-storage-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": tmpDir,
-		"schema":   "test",
-	}
-
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatal(err)
@@ -509,7 +503,7 @@ func TestStoreSearch(t *testing.T) {
 	})
 
 	t.Run("Search exact", func(t *testing.T) {
-		results, err := searcher.Search(ctx, "users", "name", "alice smith", "exact")
+		results, err := searcher.Search(ctx, "users", "name", "Alice Smith", "exact")
 		if err != nil {
 			t.Fatalf("Search failed: %v", err)
 		}
@@ -589,7 +583,7 @@ func TestStoreInfo(t *testing.T) {
 }
 
 func TestStoreFilePersistence(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "olu-storage-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-storage-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,12 +593,8 @@ func TestStoreFilePersistence(t *testing.T) {
 
 	t.Run("Data persists across store instances", func(t *testing.T) {
 		// Create first store instance
-		storeConfig := map[string]interface{}{
-			"base_dir": tmpDir,
-			"schema":   "test",
-		}
-
-		store1, err := storage.NewStore("jsonfile", storeConfig)
+		dbPath := filepath.Join(tmpDir, "persist.db")
+		store1, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": dbPath})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -621,7 +611,7 @@ func TestStoreFilePersistence(t *testing.T) {
 		store1.Close()
 
 		// Create second store instance
-		store2, err := storage.NewStore("jsonfile", storeConfig)
+		store2, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": dbPath})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -635,36 +625,6 @@ func TestStoreFilePersistence(t *testing.T) {
 
 		if retrieved["name"] != "Persistent User" {
 			t.Errorf("Expected persisted data, got %v", retrieved["name"])
-		}
-	})
-}
-
-func TestStoreFileStructure(t *testing.T) {
-	store, tmpDir := setupTestStore(t)
-	defer os.RemoveAll(tmpDir)
-	defer store.Close()
-
-	ctx := context.Background()
-
-	t.Run("Files created in correct structure", func(t *testing.T) {
-		data := map[string]interface{}{
-			"name": "Test User",
-		}
-		id, err := store.Create(ctx, "users", data)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Check file exists
-		expectedPath := filepath.Join(tmpDir, "test", "users", fmt.Sprintf("%d.json", id))
-		if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
-			t.Errorf("Expected file at %s", expectedPath)
-		}
-
-		// Check next_id file exists
-		nextIDPath := filepath.Join(tmpDir, "test", "users", "_next_id.json")
-		if _, err := os.Stat(nextIDPath); os.IsNotExist(err) {
-			t.Errorf("Expected next_id file at %s", nextIDPath)
 		}
 	})
 }

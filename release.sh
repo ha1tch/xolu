@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.sh - olu release hygiene automation
+# release.sh - xolu release hygiene automation
 #
 # Single-pass release preparation:
 #   1. Validates version string and CHANGELOG entry
@@ -15,6 +15,9 @@
 #   ./release.sh <version>            e.g. ./release.sh 0.9.4
 #   ./release.sh <version> --short    skip stress tests (faster)
 #   ./release.sh <version> --no-zip   dry run, no checkpoint
+#   ./release.sh <version> --no-lint  skip golangci-lint (defer known lint issues)
+#   ./release.sh <version> --with-integration  also run the in-process client
+#                                     integration suite (-tags integration)
 #
 # Copyright (c) 2026 haitch
 # Licensed under the Apache License, Version 2.0
@@ -26,12 +29,16 @@ cd "$SCRIPT_DIR"
 # Defaults
 SHORT_FLAG=""
 CUT_ZIP=true
+RUN_LINT=true
+RUN_INTEGRATION=false
 VERSION=""
 
 for arg in "$@"; do
     case "$arg" in
         --short)   SHORT_FLAG="-short" ;;
         --no-zip)  CUT_ZIP=false ;;
+        --no-lint) RUN_LINT=false ;;
+        --with-integration) RUN_INTEGRATION=true ;;
         --help|-h) sed -n '3,15p' "$0" | sed 's/^# \?//'; exit 0 ;;
         --*)       echo "Unknown option: $arg" >&2; exit 1 ;;
         *)
@@ -40,7 +47,7 @@ for arg in "$@"; do
     esac
 done
 
-[ -z "$VERSION" ] && { echo "Usage: $0 <version> [--short] [--no-zip]" >&2; exit 1; }
+[ -z "$VERSION" ] && { echo "Usage: $0 <version> [--short] [--no-zip] [--no-lint] [--with-integration]" >&2; exit 1; }
 
 step() { echo ""; echo "-- $1"; }
 ok()   { echo "   OK $1"; }
@@ -80,7 +87,7 @@ ok "VERSION and version.go = $VERSION"
 
 # 4. Build
 step "Building"
-make build 2>&1 | tail -3
+make build-xolu build-iolu build-otogen 2>&1 | tail -3
 ok "Build clean"
 
 # 5. Single test pass
@@ -90,25 +97,26 @@ COVER_OUT="cover.out"
 COVER_SUMMARY="cover-summary.txt"
 [ -n "$SHORT_FLAG" ] && warn "Short mode: stress tests skipped"
 
+# Binaries in scope for this report. A full release builds all three, so all
+# three partial totals are shown plus the general total. A caller building a
+# single binary can set RELEASE_BINARIES (e.g. "xolu") for one set of stats.
+RELEASE_BINARIES="${RELEASE_BINARIES:-xolu iolu otogen}"
+
 set +e
-# Scope: ./pkg/... only -- cmd/ has no unit-testable entry points
-go test -json $SHORT_FLAG -count=1 -coverprofile="$COVER_OUT" ./pkg/... \
-    2>test-errors.txt | tee "$TEST_JSON" | python3 -c "
-import sys, json
-counts = {'pass': 0, 'fail': 0, 'skip': 0}
-pkg_fail = []
-for line in sys.stdin:
-    try: ev = json.loads(line)
-    except: continue
-    a = ev.get('Action',''); t = ev.get('Test','')
-    p = ev.get('Package','').replace('github.com/ha1tch/olu/','')
-    if t and '/' not in t and a in counts: counts[a] += 1
-    if a == 'fail' and not t: pkg_fail.append(p)
-print(f'  top-level: pass={counts[\"pass\"]} skip={counts[\"skip\"]} fail={counts[\"fail\"]}')
-[print(f'  FAIL {p}') for p in pkg_fail]
-"
+# Scope: ./... so the cmd/ binaries' own tests are part of the gate and the
+# reported totals, not just ./pkg/...
+go test -json $SHORT_FLAG -count=1 -coverprofile="$COVER_OUT" ./... \
+    2>test-errors.txt | tee "$TEST_JSON" >/dev/null
+
+if $RUN_INTEGRATION; then
+    echo "==> Integration suite (in-process server, -tags integration)"
+    go test -tags integration -count=1 ./pkg/client/ -run TestIntegration
+fi
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
+
+# Report partial totals per binary plus a general total from the single run.
+python3 scripts/test_report.py --json "$TEST_JSON" --binaries "$RELEASE_BINARIES"
 
 [ -f "$COVER_OUT" ] && go tool cover -func="$COVER_OUT" > "$COVER_SUMMARY" 2>/dev/null || true
 
@@ -128,7 +136,9 @@ ok "All tests passed"
 
 # 5a. Lint
 step "Running linter"
-if command -v golangci-lint >/dev/null 2>&1; then
+if [ "$RUN_LINT" = false ]; then
+    warn "Lint skipped (--no-lint); known issues tracked for a future lint pass"
+elif command -v golangci-lint >/dev/null 2>&1; then
     golangci-lint run --timeout=5m
     ok "Lint clean"
 else
@@ -173,13 +183,19 @@ if [ "$CHANGELOG_TOP" != "$VERSION" ]; then
 fi
 ok "All version strings consistent: $VERSION"
 
-# 9. Clean test artifacts from pkg/ before zipping.
-# Some tests write SQLite databases and other artifacts relative to
-# their package directory rather than a temp dir. Clean all known
-# patterns from every subdirectory of pkg/ so the working tree stays
-# tidy after a release run.
-step "Cleaning test artifacts"
-find pkg/ -type f \( \
+# 9. Clean stale artifacts from the working tree before zipping.
+#
+# Scope: the entire project tree (not just pkg/).  Tests write SQLite
+# databases and WAL files relative to their package directory; the macOS
+# Finder scatters .DS_Store and AppleDouble (._*) files anywhere the user
+# has browsed; go.sum.bak and coverage artefacts accumulate at the root.
+# All of these must be removed before the zip is cut so the checkpoint is
+# clean and the working tree stays tidy.
+step "Cleaning stale artifacts"
+find . \( \
+    -path "./.git" -prune \
+\) -o -type f \( \
+    -name "*.bak"         -o \
     -name "*.db"          -o \
     -name "*.db-wal"      -o \
     -name "*.db-shm"      -o \
@@ -193,14 +209,25 @@ find pkg/ -type f \( \
     -name "*.golden"      -o \
     -name "*.pprof"       -o \
     -name "*.prof"        -o \
-    -name "*.test"        \
-\) -delete 2>/dev/null || true
-ok "Test artifacts removed"
+    -name "*.test"        -o \
+    -name "coverage.out"  -o \
+    -name "cover.out"     -o \
+    -name "cover-summary.txt" -o \
+    -name "test-output.json"  -o \
+    -name "test-errors.txt"   -o \
+    -name ".DS_Store"     -o \
+    -name "._*"           -o \
+    -name "Thumbs.db"     -o \
+    -name "ehthumbs.db"   \
+\) -print -delete 2>/dev/null || true
+# Remove empty __MACOSX directories left by macOS zip tools
+find . -name "__MACOSX" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+ok "Stale artifacts removed"
 
 # 9. Cut zip
 if $CUT_ZIP; then
     step "Cutting checkpoint"
-    ZIPNAME="olu-v${VERSION}-checkpoint.zip"
+    ZIPNAME="xolu-v${VERSION}-checkpoint.zip"
     rm -f "$ZIPNAME"
 
     # Explicit source list — never zip '.' or a parent directory.
@@ -212,25 +239,28 @@ if $CUT_ZIP; then
         Makefile Dockerfile docker-compose.yml .golangci.yml
         run_tests.sh syncver.sh release.sh
         go.mod go.sum
-        cmd/ pkg/ docs/ scripts/ .github/
+        cmd/ pkg/ docs/ scripts/ tests/ .github/
     )
     # TS_PROGRESS.md is optional — include only if present.
     [ -f TS_PROGRESS.md ] && ZIP_SOURCES+=(TS_PROGRESS.md)
 
     zip -X -r "$ZIPNAME" "${ZIP_SOURCES[@]}" \
+        -x "*.bak"        \
         -x "*.db"         -x "*.db-wal"     -x "*.db-shm"    -x "*.db-journal" -x "*.db-tmp" \
         -x "*-wal"        -x "*-shm"        -x "*-journal"   \
         -x "graph.data"   -x "graph.index"  \
         -x "*.golden"     -x "*.pprof"      -x "*.prof"      -x "*.test" \
         -x "*.tmp"        -x "test-output.json" -x "test-errors.txt" \
-        -x "cover.out"    -x "cover-summary.txt" \
+        -x "cover.out"    -x "cover-summary.txt" -x "coverage.out" \
+        -x ".DS_Store"    -x "._*"          -x "__MACOSX" \
+        -x "Thumbs.db"    -x "ehthumbs.db"  \
         -x "*.so"         -x "*.dylib"      -x "*.dll"       -x "*.exe" -x "*.a" -x "*.o" \
         > /dev/null 2>&1
 
     # Post-zip sanity checks.
 
-    # 1. No database or test artifact files.
-    DB_COUNT=$(unzip -l "$ZIPNAME" | grep -cE '\.db$|\.db-wal$|\.db-shm$|\.db-journal$|\.db-tmp$|-wal$|-shm$|-journal$|graph\.data$|graph\.index$|\.golden$|\.pprof$|\.prof$|\.test$' || true)
+    # 1. No database, bak, or Mac metadata files.
+    DB_COUNT=$(unzip -l "$ZIPNAME" | grep -cE '\.bak$|\.db$|\.db-wal$|\.db-shm$|\.db-journal$|\.db-tmp$|-wal$|-shm$|-journal$|graph\.data$|graph\.index$|\.golden$|\.pprof$|\.prof$|\.test$|\.DS_Store$|/\._|__MACOSX|Thumbs\.db$' || true)
     [ "$DB_COUNT" -gt 0 ] && fail "Checkpoint contains $DB_COUNT test artifact file(s)"
 
     # 2. No ELF/Mach-O/PE binaries (sniff magic bytes via xxd + unzip -p).
@@ -273,6 +303,6 @@ echo ""
 echo "======================================"
 echo "  Release v${VERSION} prepared"
 echo "  Tests run: ${TOTAL_RUN}"
-$CUT_ZIP && echo "  Zip: olu-v${VERSION}-checkpoint.zip"
+$CUT_ZIP && echo "  Zip: xolu-v${VERSION}-checkpoint.zip"
 echo "======================================"
 echo ""

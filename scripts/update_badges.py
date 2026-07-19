@@ -20,8 +20,8 @@ with open(path, 'w') as f: f.write(updated)
 # MANUAL header
 path = 'MANUAL.md'
 with open(path) as f: content = f.read()
-content = re.sub(r'Complete reference documentation for Olu v[^(]+\([^)]+\)\.',
-                 f'Complete reference documentation for Olu v{ver} ({count} tests).', content)
+content = re.sub(r'Complete reference documentation for Xolu v[^(]+\([^)]+\)\.',
+                 f'Complete reference documentation for Xolu v{ver} ({count} tests).', content)
 content = re.sub(r'The current version is `[^`]+`\.',
                  f'The current version is `{ver}`.', content)
 with open(path, 'w') as f: f.write(content)

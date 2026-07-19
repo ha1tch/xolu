@@ -133,7 +133,7 @@ func TestRedisCache_DeletePattern_Mini(t *testing.T) {
 		_ = rc.Set(ctx, k, k, time.Minute)
 	}
 
-	if err := rc.DeletePattern(ctx, "ns:"); err != nil {
+	if err := rc.DeletePattern(ctx, "ns:*"); err != nil {
 		t.Fatalf("DeletePattern: %v", err)
 	}
 

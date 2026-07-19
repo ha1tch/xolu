@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/storage"
 )
 
 // goldenCopy copies the golden database file into t.TempDir and returns
@@ -32,7 +32,7 @@ func goldenCopy(t testing.TB) string {
 	}
 	defer src.Close()
 
-	dst := filepath.Join(t.TempDir(), "olu.golden")
+	dst := filepath.Join(t.TempDir(), "xolu.golden")
 	out, err := os.Create(dst)
 	if err != nil {
 		t.Fatalf("create golden copy: %v", err)

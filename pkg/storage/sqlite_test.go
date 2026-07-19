@@ -19,7 +19,7 @@ func setupSQLiteTest(t *testing.T) (storage.Store, func()) {
 	t.Helper()
 
 	// Create temp database file
-	tmpFile, err := os.CreateTemp("", "olu-test-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-test-*.db")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -52,12 +52,12 @@ func setupSQLiteTest(t *testing.T) (storage.Store, func()) {
 }
 
 // setupSQLiteGraphTest creates a test SQLiteStore with GraphEnabled=true,
-// so that graph_t0000 is created and syncGraphEdges runs for tenant 0.
+// so that t0000_graph is created and syncGraphEdges runs for tenant 0.
 // Use this helper for any test that queries graph_tXXXX tables directly.
 func setupSQLiteGraphTest(t *testing.T) (storage.Store, func()) {
 	t.Helper()
 
-	tmpFile, err := os.CreateTemp("", "olu-graph-test-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-graph-test-*.db")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -964,9 +964,9 @@ func TestSQLiteStore_RebuildGraph_REFS(t *testing.T) {
 	countEdges := func(sourceID int) int {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM graph_t0000 WHERE source_entity = ? AND source_id = ?`,
+			`SELECT COUNT(*) FROM t0000_graph WHERE source_entity = ? AND source_id = ?`,
 			"post", sourceID).Scan(&n); err != nil {
-			t.Fatalf("COUNT graph_t0000 for source_id=%d: %v", sourceID, err)
+			t.Fatalf("COUNT t0000_graph for source_id=%d: %v", sourceID, err)
 		}
 		return n
 	}
@@ -1135,7 +1135,7 @@ func TestSQLiteStore_Info(t *testing.T) {
 // =============================================================================
 
 func BenchmarkSQLiteStore_Create(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -1155,7 +1155,7 @@ func BenchmarkSQLiteStore_Create(b *testing.B) {
 }
 
 func BenchmarkSQLiteStore_Get(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -1177,7 +1177,7 @@ func BenchmarkSQLiteStore_Get(b *testing.B) {
 }
 
 func BenchmarkSQLiteStore_Update(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -1201,7 +1201,7 @@ func BenchmarkSQLiteStore_Update(b *testing.B) {
 }
 
 func BenchmarkSQLiteStore_Search(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -1227,7 +1227,7 @@ func BenchmarkSQLiteStore_Search(b *testing.B) {
 }
 
 func BenchmarkSQLiteStore_List(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -1257,7 +1257,7 @@ func BenchmarkSQLiteStore_List(b *testing.B) {
 func setupSQLiteTestWithFTS(t *testing.T) (storage.Store, func()) {
 	t.Helper()
 
-	tmpFile, err := os.CreateTemp("", "olu-fts-test-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-fts-test-*.db")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -1516,7 +1516,7 @@ func TestSQLiteStore_FullTextSearch_PatchReindex(t *testing.T) {
 }
 
 // TestSQLiteStore_REFSGraphEdges verifies that storing an entity with a
-// @REFS-style field ([]interface{} of REF maps) causes one graph_t0000 row to
+// @REFS-style field ([]interface{} of REF maps) causes one t0000_graph row to
 // be created per element, and that the stored field round-trips correctly.
 func TestSQLiteStore_REFSGraphEdges(t *testing.T) {
 	store, cleanup := setupSQLiteGraphTest(t)
@@ -1578,14 +1578,14 @@ func TestSQLiteStore_REFSGraphEdges(t *testing.T) {
 		}
 	}
 
-	// --- Verify graph_t0000 has exactly 3 rows for this source ---
+	// --- Verify t0000_graph has exactly 3 rows for this source ---
 	db := sqls.DB()
 	var edgeCount int
 	row := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM graph_t0000 WHERE source_entity = ? AND source_id = ?`,
+		`SELECT COUNT(*) FROM t0000_graph WHERE source_entity = ? AND source_id = ?`,
 		"post", id)
 	if err := row.Scan(&edgeCount); err != nil {
-		t.Fatalf("COUNT graph_t0000 failed: %v", err)
+		t.Fatalf("COUNT t0000_graph failed: %v", err)
 	}
 	if edgeCount != 3 {
 		t.Errorf("expected 3 graph edges, got %d", edgeCount)
@@ -1594,12 +1594,12 @@ func TestSQLiteStore_REFSGraphEdges(t *testing.T) {
 	// --- Verify edge targets and relationship name ---
 	rows, err := db.QueryContext(ctx,
 		`SELECT target_entity, target_id, relationship_name
-		 FROM graph_t0000
+		 FROM t0000_graph
 		 WHERE source_entity = ? AND source_id = ?
 		 ORDER BY target_id`,
 		"post", id)
 	if err != nil {
-		t.Fatalf("SELECT graph_t0000 failed: %v", err)
+		t.Fatalf("SELECT t0000_graph failed: %v", err)
 	}
 	defer rows.Close()
 
@@ -1693,7 +1693,7 @@ func TestSQLiteStore_ScanGraphEdges(t *testing.T) {
 }
 
 // TestSQLiteStore_ScanGraphEdges_MatchesRebuild verifies that ScanGraphEdges
-// returns the same edge set as the graph_t0000 table after a full RebuildGraph.
+// returns the same edge set as the t0000_graph table after a full RebuildGraph.
 // This guards against the fast hydration path producing a different result than
 // what RebuildGraph (the authoritative reconstruction) would produce.
 func TestSQLiteStore_ScanGraphEdges_MatchesRebuild(t *testing.T) {
@@ -1709,8 +1709,8 @@ func TestSQLiteStore_ScanGraphEdges_MatchesRebuild(t *testing.T) {
 		"author": map[string]interface{}{"type": "REF", "entity": "users", "id": a1},
 	})
 	store.Create(ctx, "posts", map[string]interface{}{
-		"title":  "Post B",
-		"author": map[string]interface{}{"type": "REF", "entity": "users", "id": a2},
+		"title":    "Post B",
+		"author":   map[string]interface{}{"type": "REF", "entity": "users", "id": a2},
 		"coauthor": map[string]interface{}{"type": "REF", "entity": "users", "id": a1},
 	})
 
@@ -1730,7 +1730,7 @@ func TestSQLiteStore_ScanGraphEdges_MatchesRebuild(t *testing.T) {
 		t.Fatalf("ScanGraphEdges: %v", err)
 	}
 
-	// Rebuild and re-scan (rebuild rewrites graph_t0000 from entity JSON).
+	// Rebuild and re-scan (rebuild rewrites t0000_graph from entity JSON).
 	integ := store.(storage.GraphIntegrity)
 	if err := integ.RebuildGraph(ctx); err != nil {
 		t.Fatalf("RebuildGraph: %v", err)
@@ -1830,7 +1830,7 @@ func TestSQLiteStore_MultiTenantHydration(t *testing.T) {
 	sqlBase := baseStore.(*storage.SQLiteStore)
 
 	// Create a tenant-1 scoped store sharing the same DB, with GraphEnabled
-	// so the graph_t0001 table is created and syncGraphEdges routes correctly.
+	// so the t0001_graph table is created and syncGraphEdges routes correctly.
 	t1Store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:         "sqlite",
 		DBPath:       sqlBase.Config().DBPath,

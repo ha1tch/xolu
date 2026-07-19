@@ -13,7 +13,7 @@ package server_test
 //   2. GROUP BY with aggregates through the HTTP API (tenant-scoped)
 //   3. List endpoint pagination, filtering, and sorting
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 // Repository: https://github.com/ha1tch/xolu/
 
 import (

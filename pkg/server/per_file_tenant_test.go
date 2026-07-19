@@ -21,6 +21,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/server"
 	"github.com/ha1tch/xolu/pkg/storage"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/validation"
 	"github.com/rs/zerolog"
 )
@@ -39,7 +40,7 @@ func newPFEnv(t *testing.T, perFile bool) *pfEnv {
 	t.Helper()
 
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "olu.db")
+	dbPath := filepath.Join(tmpDir, "xolu.db")
 	schemaDir := filepath.Join(tmpDir, "schema")
 
 	// Schema directory for "product" entity
@@ -51,7 +52,7 @@ func newPFEnv(t *testing.T, perFile bool) *pfEnv {
 		Host:                 "localhost",
 		Port:                 0,
 		StorageType:          "sqlite",
-		DBPath:               dbPath,
+		BaseDir:              tmpDir,
 		SchemaDir:            schemaDir,
 		CacheType:            "memory",
 		CacheTTL:             300,
@@ -87,7 +88,7 @@ func newPFEnv(t *testing.T, perFile bool) *pfEnv {
 	validator := validation.NewJSONSchemaValidator(filepath.Join(schemaDir, "_schemas"))
 	logger := zerolog.New(io.Discard)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	t.Cleanup(func() {
@@ -190,9 +191,10 @@ func TestPerFileTenant_IsolationViaHTTP(t *testing.T) {
 		t.Errorf("beta GET: name = %q, want Widget-B", name)
 	}
 
-	// Verify per-file layout: each tenant has its own file under sql/
-	alphaFile := filepath.Join(env.tmpDir, "sql", "t0001", "olu.db")
-	betaFile := filepath.Join(env.tmpDir, "sql", "t0002", "olu.db")
+	// Verify per-file layout: each tenant has its own store file at the
+	// invariant location <BaseDir>/tXXXX/store/xolu.db.
+	alphaFile := sl.TenantStorePath(env.tmpDir, 1)
+	betaFile := sl.TenantStorePath(env.tmpDir, 2)
 	if _, err := os.Stat(alphaFile); os.IsNotExist(err) {
 		t.Errorf("per-file layout: alpha db not found at %s", alphaFile)
 	}
@@ -292,7 +294,7 @@ func TestSharedTenant_DefaultBehaviourUnbroken(t *testing.T) {
 	}
 
 	// Verify single shared db file exists, no sql/ subdirectory
-	sharedDB := filepath.Join(env.tmpDir, "olu.db")
+	sharedDB := filepath.Join(env.tmpDir, "xolu.db")
 	if _, err := os.Stat(sharedDB); os.IsNotExist(err) {
 		t.Errorf("shared mode: expected base db at %s", sharedDB)
 	}

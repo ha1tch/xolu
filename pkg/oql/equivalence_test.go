@@ -27,8 +27,8 @@ import (
 // one that always uses the Go path, one that always uses push-down.
 type equivEnv struct {
 	store  *storage.SQLiteStore
-	goExec *Executor     // planner with threshold=MaxInt (always Go path)
-	pdExec *Executor     // planner with threshold=1 (always push-down)
+	goExec *Executor // planner with threshold=MaxInt (always Go path)
+	pdExec *Executor // planner with threshold=1 (always push-down)
 	ctx    context.Context
 }
 
@@ -255,17 +255,17 @@ func TestEquivalence(t *testing.T) {
 }
 
 func TestEquivalence_WhereWithTenant(t *testing.T) {
-env := newEquivEnv(t)
+	env := newEquivEnv(t)
 	env.assertEquivWithTenant(t, "SELECT * FROM sensors WHERE status = 'active'", "t0", false)
 }
 
 func TestEquivalence_WhereWithTenantAndOrderBy(t *testing.T) {
-env := newEquivEnv(t)
+	env := newEquivEnv(t)
 	env.assertEquivWithTenant(t, "SELECT * FROM sensors WHERE value > 200.0 ORDER BY code", "t1", true)
 }
 
 func TestEquivalence_WhereWithGroupBy(t *testing.T) {
-// GROUP BY stays on Go path regardless. The WHERE push narrows the input,
+	// GROUP BY stays on Go path regardless. The WHERE push narrows the input,
 	// then Go-side aggregation runs on the filtered results.
 	env := newEquivEnv(t)
 	env.assertEquiv(t,
@@ -273,7 +273,7 @@ func TestEquivalence_WhereWithGroupBy(t *testing.T) {
 }
 
 func TestEquivalence_CompoundDeep(t *testing.T) {
-env := newEquivEnv(t)
+	env := newEquivEnv(t)
 	env.assertEquiv(t,
 		"SELECT * FROM sensors WHERE (status = 'active' AND value > 100.0) OR (status = 'maintenance' AND floor <= 3)",
 		false)

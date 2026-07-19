@@ -50,7 +50,7 @@ func newGraphTenantServer(t *testing.T) *Server {
 
 	cfg := config.Default()
 	cfg.StorageType = "sqlite"
-	cfg.DBPath = dbPath
+	cfg.BaseDir = filepath.Dir(dbPath)
 	cfg.GraphEnabled = true
 	cfg.TenantMode = "strict"
 	cfg.TenantAutoRegister = false
@@ -60,13 +60,13 @@ func newGraphTenantServer(t *testing.T) *Server {
 	cfg.MaxEmbedDepth = 0
 	cfg.RefEmbedDepth = 0
 	cfg.MaxQueryDepth = 10
-	cfg.GraphQueryTTL = 30
+	cfg.AsyncJobRetentionTTL = 30
 	cfg.GraphMaxVisitedNodes = 10000
 	cfg.QueryTimeout = 30
 
 	logger := zerolog.Nop()
 	g := graph.NewFlatGraph()
-	s := New(cfg, baseStore, &noopCache{}, g, nil, &noopValidator{}, logger)
+	s := New(cfg, baseStore, &noopCache{}, g, &noopValidator{}, logger)
 
 	ctx := context.Background()
 	if err := s.tenantRegistry.Register(ctx, "alpha", 1); err != nil {
@@ -148,10 +148,9 @@ func containsPrefix(body string) bool {
 func TestTenantGraph_StrictModeDoesNotForceGraphOff(t *testing.T) {
 	cfg := config.Default()
 	cfg.StorageType = "sqlite"
-	cfg.DBPath = ":memory:"
 	cfg.TenantMode = "strict"
 	cfg.GraphEnabled = true
-	cfg.GraphQueryTTL = 30
+	cfg.AsyncJobRetentionTTL = 30
 
 	_, err := cfg.Validate()
 	if err != nil {
@@ -210,7 +209,7 @@ func TestTenantGraph_EdgeTraversal(t *testing.T) {
 
 	seedGraphEntity(t, s, "alpha", "author", 1, map[string]interface{}{"name": "Alice"})
 	seedGraphEntity(t, s, "alpha", "post", 1, map[string]interface{}{
-		"title":      "olu intro",
+		"title":      "xolu intro",
 		"author_ref": map[string]interface{}{"type": "REF", "entity": "author", "id": 1},
 	})
 	// Beta seed — must not bleed through.
@@ -317,7 +316,7 @@ func TestTenantGraph_SulpherIsolation(t *testing.T) {
 
 	seedGraphEntity(t, s, "alpha", "author", 1, map[string]interface{}{"name": "Alice"})
 	seedGraphEntity(t, s, "alpha", "post", 1, map[string]interface{}{
-		"title":      "olu intro",
+		"title":      "xolu intro",
 		"author_ref": map[string]interface{}{"type": "REF", "entity": "author", "id": 1},
 	})
 	// Beta: two posts — must not appear in alpha's results.

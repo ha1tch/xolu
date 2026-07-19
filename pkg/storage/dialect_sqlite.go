@@ -34,11 +34,9 @@ var pow10 = [19]int64{
 }
 
 // SQLiteStorageDialect implements StorageDialect for SQLite.
-// When PerFileTenants is true, tenant_id column and WHERE clauses are omitted
-// from adapted table DDL and queries — the database file itself is the isolation boundary.
-type SQLiteStorageDialect struct {
-	PerFileTenants bool
-}
+// Table names encode the tenant (t<XXXX>_*) so no tenant_id column is needed
+// in any data or schema table.
+type SQLiteStorageDialect struct{}
 
 func (d *SQLiteStorageDialect) Name() string { return "sqlite" }
 
@@ -67,11 +65,9 @@ func (d *SQLiteStorageDialect) ColumnType(jsonType, format string, precision, sc
 func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", spec.TableName()))
+	// Table name encodes the tenant (t<XXXX>_ndata_<entity>) — no tenant_id column needed.
+	fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s (\n", spec.TableName())
 	b.WriteString("    id INTEGER NOT NULL,\n")
-	if !d.PerFileTenants {
-		b.WriteString("    tenant_id INTEGER NOT NULL DEFAULT 0,\n")
-	}
 
 	for _, col := range spec.Columns {
 		nullable := "NOT NULL"
@@ -79,9 +75,9 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 			nullable = ""
 		}
 		if nullable != "" {
-			b.WriteString(fmt.Sprintf("    %s %s %s,\n", col.Name, col.SQLType, nullable))
+			fmt.Fprintf(&b, "    %s %s %s,\n", col.Name, col.SQLType, nullable)
 		} else {
-			b.WriteString(fmt.Sprintf("    %s %s,\n", col.Name, col.SQLType))
+			fmt.Fprintf(&b, "    %s %s,\n", col.Name, col.SQLType)
 		}
 	}
 
@@ -92,11 +88,7 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 	b.WriteString("    _version INTEGER NOT NULL DEFAULT 1,\n")
 	b.WriteString("    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n")
 	b.WriteString("    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n")
-	if d.PerFileTenants {
-		b.WriteString("    PRIMARY KEY (id)\n")
-	} else {
-		b.WriteString("    PRIMARY KEY (tenant_id, id)\n")
-	}
+	b.WriteString("    PRIMARY KEY (id)\n")
 	b.WriteString(");\n")
 
 	return b.String()
@@ -104,13 +96,6 @@ func (d *SQLiteStorageDialect) CreateTableSQL(spec *AdaptedTableSpec) string {
 
 func (d *SQLiteStorageDialect) CreateIndexSQL(spec *AdaptedTableSpec) []string {
 	var stmts []string
-
-	if !d.PerFileTenants {
-		stmts = append(stmts, fmt.Sprintf(
-			"CREATE INDEX IF NOT EXISTS idx_%s_tenant ON %s(tenant_id);",
-			spec.TableName(), spec.TableName()))
-	}
-
 	for _, idx := range spec.Indexes {
 		cols := strings.Join(idx.Columns, ", ")
 		unique := ""
@@ -121,20 +106,13 @@ func (d *SQLiteStorageDialect) CreateIndexSQL(spec *AdaptedTableSpec) []string {
 			"CREATE %sINDEX IF NOT EXISTS %s ON %s(%s);",
 			unique, idx.Name, spec.TableName(), cols))
 	}
-
 	return stmts
 }
 
 func (d *SQLiteStorageDialect) InsertSQL(spec *AdaptedTableSpec, hasExtra bool) (string, []string) {
-	var cols []string
-	var placeholders []string
-	if d.PerFileTenants {
-		cols = []string{"id"}
-		placeholders = []string{"?"}
-	} else {
-		cols = []string{"id", "tenant_id"}
-		placeholders = []string{"?", "?"}
-	}
+	// Table name encodes the tenant — no tenant_id column.
+	cols := []string{"id"}
+	placeholders := []string{"?"}
 
 	for _, col := range spec.Columns {
 		cols = append(cols, col.Name)
@@ -163,12 +141,7 @@ func (d *SQLiteStorageDialect) SelectSQL(spec *AdaptedTableSpec) string {
 		cols = append(cols, "_extra")
 	}
 	cols = append(cols, "_version")
-
-	if d.PerFileTenants {
-		return fmt.Sprintf("SELECT %s FROM %s WHERE id = ?",
-			strings.Join(cols, ", "), spec.TableName())
-	}
-	return fmt.Sprintf("SELECT %s FROM %s WHERE tenant_id = ? AND id = ?",
+	return fmt.Sprintf("SELECT %s FROM %s WHERE id = ?",
 		strings.Join(cols, ", "), spec.TableName())
 }
 
@@ -181,12 +154,7 @@ func (d *SQLiteStorageDialect) SelectAllSQL(spec *AdaptedTableSpec) string {
 		cols = append(cols, "_extra")
 	}
 	cols = append(cols, "_version")
-
-	if d.PerFileTenants {
-		return fmt.Sprintf("SELECT %s FROM %s ORDER BY id",
-			strings.Join(cols, ", "), spec.TableName())
-	}
-	return fmt.Sprintf("SELECT %s FROM %s WHERE tenant_id = ? ORDER BY id",
+	return fmt.Sprintf("SELECT %s FROM %s ORDER BY id",
 		strings.Join(cols, ", "), spec.TableName())
 }
 
@@ -196,20 +164,13 @@ func (d *SQLiteStorageDialect) UpdateSQL(spec *AdaptedTableSpec, versionCheck bo
 	for _, col := range spec.Columns {
 		setClauses = append(setClauses, col.Name+" = ?")
 	}
-
 	if spec.HasExtra {
 		setClauses = append(setClauses, "_extra = ?")
 	}
-
 	setClauses = append(setClauses, "_version = _version + 1")
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 
-	var where string
-	if d.PerFileTenants {
-		where = "WHERE id = ?"
-	} else {
-		where = "WHERE tenant_id = ? AND id = ?"
-	}
+	where := "WHERE id = ?"
 	if versionCheck {
 		where += " AND _version = ?"
 	}
@@ -221,32 +182,23 @@ func (d *SQLiteStorageDialect) UpdateSQL(spec *AdaptedTableSpec, versionCheck bo
 }
 
 func (d *SQLiteStorageDialect) DeleteSQL(spec *AdaptedTableSpec) string {
-	if d.PerFileTenants {
-		return fmt.Sprintf("DELETE FROM %s WHERE id = ?", spec.TableName())
-	}
-	return fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND id = ?", spec.TableName())
+	return fmt.Sprintf("DELETE FROM %s WHERE id = ?", spec.TableName())
 }
 
 func (d *SQLiteStorageDialect) ExistsSQL(spec *AdaptedTableSpec) string {
-	if d.PerFileTenants {
-		return fmt.Sprintf(
-			"SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)",
-			spec.TableName())
-	}
-	return fmt.Sprintf(
-		"SELECT EXISTS(SELECT 1 FROM %s WHERE tenant_id = ? AND id = ?)",
-		spec.TableName())
+	return fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)", spec.TableName())
 }
 
-func (d *SQLiteStorageDialect) MetadataTableSQL() string {
-	return `CREATE TABLE IF NOT EXISTS adapted_table_schemas (
+func (d *SQLiteStorageDialect) NodeSchemaTableSQL(tenantID uint16) string {
+	table := fmt.Sprintf("t%04X_n_sch", tenantID)
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     entity_type TEXT PRIMARY KEY,
     schema_hash TEXT NOT NULL,
     column_spec TEXT NOT NULL,
     has_extra   INTEGER NOT NULL DEFAULT 1,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);`
+);`, table)
 }
 
 // NormaliseDecimal converts a decimal string to a scaled int64 string

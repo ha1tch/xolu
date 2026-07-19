@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 )
 
 const registryFile = "registry.json"
@@ -27,8 +29,8 @@ type registryEntry struct {
 
 // registryFile on-disk structure.
 type registryDisk struct {
-	DefaultRetentionDays int              `json:"default_retention_days"`
-	Timelines            []registryEntry  `json:"timelines"`
+	DefaultRetentionDays int             `json:"default_retention_days"`
+	Timelines            []registryEntry `json:"timelines"`
 }
 
 // registry holds the in-memory timeline registry for a store.
@@ -37,6 +39,16 @@ type registry struct {
 	dir                  string
 	defaultRetentionDays int
 	timelines            map[TimelineID]*TimelineConfig
+
+	// deleting marks timelines whose deletion is in progress. It is
+	// in-memory only and never persisted: a crash mid-delete leaves the
+	// timeline on disk as a normal (if partially emptied) timeline rather
+	// than a stuck "deleting" one, which a later delete can retry. While a
+	// timeline is marked, get() reports it as not-found so concurrent readers
+	// and writers fail fast (a clean 404) instead of racing the data teardown
+	// and observing a defined-but-empty timeline. The delete path itself uses
+	// getForDelete() to read past the marker.
+	deleting map[TimelineID]bool
 }
 
 // loadRegistry reads registry.json from dir, creating it if absent.
@@ -47,6 +59,7 @@ func loadRegistry(dir string) (*registry, bool, error) {
 	r := &registry{
 		dir:       dir,
 		timelines: make(map[TimelineID]*TimelineConfig),
+		deleting:  make(map[TimelineID]bool),
 	}
 	path := filepath.Join(dir, registryFile)
 	data, err := os.ReadFile(path)
@@ -106,7 +119,7 @@ func (r *registry) save() error {
 // first write.
 func (r *registry) define(id TimelineID, cfg TimelineConfig) error {
 	if id == 0 {
-		return fmt.Errorf("timeseries: timeline ID 0x0000 is reserved (OLU-TS018)")
+		return fmt.Errorf("timeseries: timeline ID 0x0000 is reserved (%s)", xoluerr.ErrTSReservedID)
 	}
 	if cfg.Dims < MinDims || cfg.Dims > MaxDims {
 		return fmt.Errorf("timeseries: dims must be %d–%d, got %d", MinDims, MaxDims, cfg.Dims)
@@ -118,7 +131,7 @@ func (r *registry) define(id TimelineID, cfg TimelineConfig) error {
 	if existing, ok := r.timelines[id]; ok {
 		// Idempotent if dims match or first write not yet set.
 		if !existing.FirstWriteAt.IsZero() && existing.Dims != cfg.Dims {
-			return fmt.Errorf("timeseries: timeline %d: dims are immutable after first write (OLU-TS016)", id)
+			return fmt.Errorf("timeseries: timeline %d: dims are immutable after first write (%s)", id, xoluerr.ErrTSDimsImmutable)
 		}
 		// Allow re-definition to update name/retention before first write.
 		existing.Name = cfg.Name
@@ -141,15 +154,36 @@ func (r *registry) update(id TimelineID, cfg TimelineConfig) error {
 
 	existing, ok := r.timelines[id]
 	if !ok {
-		return fmt.Errorf("timeseries: timeline %d not defined (OLU-TS004)", id)
+		return fmt.Errorf("timeseries: timeline %d not defined (XOLU-TS004)", id)
 	}
 	existing.Name = cfg.Name
 	existing.RetentionDays = cfg.RetentionDays
 	return r.save()
 }
 
-// get returns a copy of the TimelineConfig for id.
+// get returns a copy of the TimelineConfig for id. A timeline whose deletion
+// is in progress (see markDeleting) is reported as not-found, so every reader
+// and writer that goes through get treats a mid-delete timeline as already
+// gone — a clean not-found rather than a race against the data teardown. The
+// delete path itself must use getForDelete to read past the marker.
 func (r *registry) get(id TimelineID) (TimelineConfig, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.deleting[id] {
+		return TimelineConfig{}, false
+	}
+	cfg, ok := r.timelines[id]
+	if !ok {
+		return TimelineConfig{}, false
+	}
+	return *cfg, true
+}
+
+// getForDelete is get without the deleting-marker check: it returns the config
+// of a timeline even while it is marked deleting. Only the delete path uses it,
+// to read the dims it needs to compute the data key range after the marker is
+// already set.
+func (r *registry) getForDelete(id TimelineID) (TimelineConfig, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	cfg, ok := r.timelines[id]
@@ -157,6 +191,34 @@ func (r *registry) get(id TimelineID) (TimelineConfig, bool) {
 		return TimelineConfig{}, false
 	}
 	return *cfg, true
+}
+
+// markDeleting flags a timeline as having its deletion in progress. After this
+// returns, get reports the timeline as not-found. It fails if the timeline is
+// undefined or already being deleted. The marker is in-memory only.
+func (r *registry) markDeleting(id TimelineID) error {
+	if id == 0 {
+		return fmt.Errorf("timeseries: timeline ID 0x0000 is reserved (%s)", xoluerr.ErrTSReservedID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.timelines[id]; !ok {
+		return fmt.Errorf("timeseries: timeline %d not defined (XOLU-TS004)", id)
+	}
+	if r.deleting[id] {
+		return fmt.Errorf("timeseries: timeline %d is already being deleted (XOLU-TS004)", id)
+	}
+	r.deleting[id] = true
+	return nil
+}
+
+// unmarkDeleting clears the deleting marker for id, making the timeline visible
+// to get again. It is the rollback for markDeleting when a delete fails partway
+// and the timeline must remain usable.
+func (r *registry) unmarkDeleting(id TimelineID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.deleting, id)
 }
 
 // list returns all defined timeline IDs.
@@ -168,6 +230,25 @@ func (r *registry) list() []TimelineID {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// delete removes a timeline definition from the registry. It reverses define():
+// the timeline's config entry is dropped and the registry is persisted. It does
+// not touch event data or rollups — the caller (the store's DeleteTimeline) is
+// responsible for ordering those removals around this call. Deleting an
+// undefined timeline returns an error so the handler can surface a 404.
+func (r *registry) delete(id TimelineID) error {
+	if id == 0 {
+		return fmt.Errorf("timeseries: timeline ID 0x0000 is reserved (%s)", xoluerr.ErrTSReservedID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.timelines[id]; !ok {
+		return fmt.Errorf("timeseries: timeline %d not defined (XOLU-TS004)", id)
+	}
+	delete(r.timelines, id)
+	delete(r.deleting, id)
+	return r.save()
 }
 
 // recordFirstWrite marks the timeline's FirstWriteAt if not already set,
@@ -190,7 +271,7 @@ func (r *registry) recordFirstWrite(id TimelineID) error {
 	defer r.mu.Unlock()
 	cfg, ok = r.timelines[id]
 	if !ok {
-		return fmt.Errorf("timeseries: timeline %d not defined (OLU-TS004)", id)
+		return fmt.Errorf("timeseries: timeline %d not defined (XOLU-TS004)", id)
 	}
 	if cfg.FirstWriteAt.IsZero() {
 		cfg.FirstWriteAt = time.Now().UTC()

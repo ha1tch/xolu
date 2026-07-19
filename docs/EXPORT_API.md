@@ -1,6 +1,8 @@
 # Export API
 
-The export endpoint provides a complete data snapshot for offline analysis, backup, or migration.
+The export endpoint creates a point-in-time snapshot of the server's data as a
+zip archive. The archive contains the raw SQLite database file plus any graph
+data files that were written to disk.
 
 ## Endpoint
 
@@ -8,86 +10,114 @@ The export endpoint provides a complete data snapshot for offline analysis, back
 GET /api/v1/export
 ```
 
+No query parameters. No request body. Authentication headers apply if auth is
+enabled.
+
 ## Response
 
-Returns a zip archive containing:
+Returns a zip archive with `Content-Type: application/zip` and a timestamped
+filename:
 
 ```
-olu-export-2025-01-06T150405Z.zip
-├── manifest.json      # Export metadata
-├── entities.db        # SQLite database (if using sqlite storage)
-├── data/              # JSON files (if using jsonfile storage)
-├── graph.data         # Binary graph data (if graph enabled)
-├── graph.index        # Binary graph index (if graph enabled)
-└── graph.json         # Human-readable graph export
+Content-Disposition: attachment; filename="xolu-export-2026-06-14T120000Z.zip"
 ```
 
-### Headers
+The archive always contains:
 
 ```
-Content-Type: application/zip
-Content-Disposition: attachment; filename="olu-export-2025-01-06T150405Z.zip"
+manifest.json     Export metadata (see below)
+entities.db       SQLite database — the primary data file
 ```
 
-## Manifest Format
+When the graph is enabled, a human-readable JSON representation of the graph is
+included (the graph itself lives in the per-tenant edge tables inside the main
+database, which is exported as part of the database file):
+
+```
+graph.json        Human-readable graph export
+```
+
+## Manifest
 
 ```json
 {
-  "version": "0.8.0",
-  "exported_at": "2025-01-06T15:04:05Z",
+  "version":      "0.9.9",
+  "exported_at":  "2026-06-14T12:00:00Z",
   "storage_type": "sqlite",
   "graph_enabled": true,
   "entities_file": "entities.db",
-  "graph_files": ["graph.data", "graph.index"],
-  "graph_json": "graph.json"
+  "graph_json":   "graph.json"
 }
 ```
 
-## Usage Examples
+| Field | Description |
+|---|---|
+| `version` | xolu server version at export time |
+| `exported_at` | RFC 3339 timestamp |
+| `storage_type` | Always `"sqlite"` |
+| `graph_enabled` | Whether the graph subsystem was active |
+| `entities_file` | Always `"entities.db"` for SQLite deployments |
+| `graph_files` | Array of binary graph filenames (if present) |
+| `graph_json` | `"graph.json"` if a JSON graph export was included |
 
-### Download with curl
+## The `entities.db` file
+
+For SQLite deployments (the only production-supported backend), `entities.db`
+is a copy of the live SQLite database file. The server issues
+`PRAGMA wal_checkpoint(TRUNCATE)` immediately before copying to ensure all
+recent writes are flushed from the WAL into the main file.
+
+**Schema note:** The internal table structure has changed across xolu versions.
+As of v0.9.9 (rc11), entity data is stored in per-tenant tables named
+`t0000_nodes`, `t0001_nodes`, etc., not a global `entities` table. Do not
+rely on specific table names when querying the exported file directly; the
+schema may change between minor versions.
+
+### Recommended uses of the exported database
+
+**Reimport into a fresh xolu instance:**
 
 ```bash
-curl -o backup.zip http://localhost:9090/api/v1/export
+# Stop the new instance, replace its database, restart
+cp entities.db /path/to/new/xolu.db
 ```
 
-### Scheduled backup
+**Offline read-only queries:**
+
+Use `sqlite3` or any SQLite-aware tool and inspect `sqlite_master` first to
+discover the current table names:
 
 ```bash
-#!/bin/bash
+sqlite3 entities.db ".tables"
+# t0000_nodes  t0000_nseq  t0001_nodes  ...
+
+sqlite3 entities.db "SELECT entity_type, COUNT(*) FROM t0000_nodes GROUP BY entity_type"
+```
+
+**Backup and disaster recovery:**
+
+The export is safe to call during normal operation (WAL checkpoint is
+non-blocking). Schedule it via cron or a monitoring job:
+
+```bash
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-curl -o "olu-backup-${TIMESTAMP}.zip" http://localhost:9090/api/v1/export
+curl -sf -o "xolu-backup-${TIMESTAMP}.zip" http://localhost:8080/api/v1/export
 ```
 
-### Analyse with DuckDB
+## Limitations
 
-```bash
-unzip backup.zip
-duckdb -c "ATTACH 'entities.db' AS olu; SELECT * FROM olu.items LIMIT 10;"
-```
+- The export streams directly to the response; no temporary file is created on
+  the server. For large databases this means the client must maintain the
+  connection for the full download duration.
+- Blob storage (`XOLU_BLOB_ENABLED`) and timeseries data
+  (`XOLU_TIMESERIES_ENABLED`) are not included in the export. Back these up
+  separately from the filesystem (`XOLU_BLOB_DIR` and the timeseries directory).
+- There is no import endpoint. Restore by stopping the server and replacing the
+  SQLite file.
+- The export does not include schema files from `XOLU_SCHEMA_DIR`. These should
+  be version-controlled separately.
 
-### Analyse with Python
+## Tenant-scoped variant
 
-```python
-import sqlite3
-import json
-from zipfile import ZipFile
-
-with ZipFile('backup.zip') as z:
-    # Read manifest
-    manifest = json.loads(z.read('manifest.json'))
-    print(f"Exported: {manifest['exported_at']}")
-    
-    # Extract and query SQLite
-    z.extract('entities.db')
-    conn = sqlite3.connect('entities.db')
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    print("Tables:", [row[0] for row in cursor])
-```
-
-## Notes
-
-- Export streams directly to response; no temporary files on server
-- Safe to call during normal operation (uses SQLite WAL mode)
-- Graph JSON provides human-readable format for analysis tools
-- Large databases may take time to download; use appropriate timeouts
+There is no per-tenant export endpoint. The export always covers the entire
+database file including all tenants.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 	"github.com/rs/zerolog/log"
 )
 
@@ -68,4 +69,23 @@ func (w *RetentionWorker) sweep() {
 		}
 		return true
 	})
+}
+
+// Sweep implements gc.Sweeper. It runs one retention sweep cycle across all
+// provisioned tenant stores, collecting the examined/error counts into the
+// shared gc.Report type. The sweep logic is unchanged from sweep().
+func (w *RetentionWorker) Sweep(ctx context.Context) (gcpkg.Report, error) {
+	var r gcpkg.Report
+	w.manager.stores.Range(func(key, value any) bool {
+		r.Examined++
+		store := value.(Store)
+		if err := store.Purge(ctx); err != nil {
+			log.Warn().Err(err).Uint16("tenant", key.(uint16)).Msg("ts retention purge failed")
+			r.Errors++
+		} else {
+			r.Collected++
+		}
+		return true
+	})
+	return r, nil
 }

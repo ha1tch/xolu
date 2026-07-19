@@ -50,10 +50,10 @@ func (pd PushDecision) String() string {
 // QueryPlan describes which operations the planner decided to push down
 // to the storage engine and which remain in the Go execution path.
 type QueryPlan struct {
-	Push        []PushDecision           // Which operations to push
-	EstimatedN  int                      // Estimated input cardinality
+	Push        []PushDecision            // Which operations to push
+	EstimatedN  int                       // Estimated input cardinality
 	BackendCaps storage.QueryCapabilities // What the backend can do
-	Reason      string                   // Human-readable explanation for debug log
+	Reason      string                    // Human-readable explanation for debug log
 
 	// Join is non-nil when Push contains PushJoin.
 	Join         *joinSpec
@@ -556,11 +556,11 @@ func isOrderByPushable(orderBy []*ast.OrderByItem) bool {
 
 // joinSpec holds the parsed components of a two-table JOIN FROM clause.
 type joinSpec struct {
-	LeftEntity  string              // e.g. "post"
-	LeftAlias   string              // e.g. "a" (falls back to entity name)
-	RightEntity string              // e.g. "author"
-	RightAlias  string              // e.g. "b"
-	JoinType    string              // "INNER", "LEFT", "RIGHT", "FULL"
+	LeftEntity  string               // e.g. "post"
+	LeftAlias   string               // e.g. "a" (falls back to entity name)
+	RightEntity string               // e.g. "author"
+	RightAlias  string               // e.g. "b"
+	JoinType    string               // "INNER", "LEFT", "RIGHT", "FULL"
 	Condition   *ast.InfixExpression // the ON a.x = b.y expression
 }
 

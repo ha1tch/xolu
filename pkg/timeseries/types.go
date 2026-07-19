@@ -31,9 +31,9 @@ const (
 // TimelineConfig describes a timeline's declaration. Dims is immutable after
 // the first write; Name and RetentionDays may be updated freely.
 type TimelineConfig struct {
-	Name          string    // optional, human-readable label
-	Dims          uint8     // 1–5, immutable after FirstWriteAt is set
-	RetentionDays int       // 0 = use store-level default
+	Name          string // optional, human-readable label
+	Dims          uint8  // 1–5, immutable after FirstWriteAt is set
+	RetentionDays int    // 0 = use store-level default
 	CreatedAt     time.Time
 	FirstWriteAt  time.Time // zero until first event written; Dims locks here
 }
@@ -41,7 +41,7 @@ type TimelineConfig struct {
 // Event is a single timeseries record written to or read from a timeline.
 type Event struct {
 	Timeline TimelineID
-	Dims     []uint64  // len must equal timeline's Dims
+	Dims     []uint64 // len must equal timeline's Dims
 	Time     time.Time
 	Nums     []float64 // optional, up to 7; nil means no numeric fields
 	Payload  []byte    // optional, caller-defined opaque bytes
@@ -88,7 +88,7 @@ type AggregateQuery struct {
 	Function      string        // "avg", "min", "max", "sum", "count"
 	Interval      time.Duration // 0 = scalar result; > 0 = time-bucketed
 	MaxScanEvents int           // 0 = no scan limit
-	MaxBuckets    int           // 0 = no bucket limit; > 0 aborts when exceeded (OLU-TS019)
+	MaxBuckets    int           // 0 = no bucket limit; > 0 aborts when exceeded (XOLU-TS019)
 }
 
 // Bucket holds one time bucket of an aggregation result.
@@ -126,7 +126,6 @@ type RangeAggregateResult struct {
 	Maxs   [7]float64
 	Fields [7]bool // true if field i appeared in at least one event
 }
-
 
 // RangeFullQuery is the query shape for RangeFullAggregate, which computes
 // sum, avg, min, max, count (via RangeAggregateResult) AND approximate
@@ -176,10 +175,10 @@ type StoreStats struct {
 // counter may be stale; TotalEventsApproximate is always true for the
 // current PebbleStore implementation.
 type TimelineStats struct {
-	TotalEvents             int64
-	TotalEventsApproximate  bool // always true; counter is eventually consistent
-	OldestEvent             time.Time
-	NewestEvent             time.Time
+	TotalEvents            int64
+	TotalEventsApproximate bool // always true; counter is eventually consistent
+	OldestEvent            time.Time
+	NewestEvent            time.Time
 }
 
 // StoreConfig holds configuration that is meaningful to any timeseries store
@@ -187,6 +186,12 @@ type TimelineStats struct {
 // engine-specific knobs.
 type StoreConfig struct {
 	DefaultRetentionDays int // store-level fallback; 0 = no expiry
+
+	// RollupCascadeDelete controls whether DeleteRollup automatically removes
+	// all descendant definitions. When true (default), deleting a parent
+	// removes its entire subtree. When false, deleting a definition that has
+	// descendants returns an error; the caller must delete bottom-up.
+	RollupCascadeDelete bool
 }
 
 // PebbleConfig holds LSM-tree tuning parameters specific to the Pebble
@@ -201,6 +206,12 @@ type PebbleConfig struct {
 	Compression           string // "snappy", "zstd", or "none"; default "zstd"
 	L0CompactionThreshold int    // L0 files before compaction; default 4
 	MaxOpenFiles          int    // per-store file descriptor limit; default 500
+
+	// Write coalescer tuning. Zero values fall back to package-level defaults
+	// (10ms flush interval, 2000 max events). Only relevant when the coalescer
+	// is enabled via dynconfig key ts.writecoal for the tenant or globally.
+	CoalFlushIntervalMs int // flush window in milliseconds; default 10
+	CoalMaxEvents       int // early-flush threshold in events; default 2000
 }
 
 // Store is the interface for a single tenant's timeseries backend.
@@ -241,7 +252,7 @@ type Store interface {
 	// is not safe — it will cause /commit to silently succeed the rollback path
 	// while leaving orphaned Pebble entries in place. Return ErrDeleteNotSupported
 	// if your backend cannot delete by raw key; the /commit handler will log
-	// OLU-CM016 and alert operators rather than silently corrupting the store.
+	// XOLU-CM016 and alert operators rather than silently corrupting the store.
 	DeleteKeys(ctx context.Context, keys [][]byte) error
 
 	// Read
@@ -308,21 +319,155 @@ type Store interface {
 	DefaultRetentionDays() int
 	SetDefaultRetentionDays(days int) error
 
+	// WriteConfig returns the write performance configuration for a timeline.
+	// Returns the zero value (both flags false) if the timeline has no explicit
+	// config set or if id is not defined.
+	WriteConfig(id TimelineID) TimelineWriteConfig
+
+	// SetWriteConfig updates the write performance configuration for a timeline.
+	// The timeline must already exist. The config is persisted to disk so it
+	// survives store restarts.
+	SetWriteConfig(id TimelineID, cfg TimelineWriteConfig) error
+
 	// Diagnostics
 	Stats(ctx context.Context) (*StoreStats, error)
 	TimelineStats(ctx context.Context, id TimelineID) (*TimelineStats, error)
+
+	// Rollup management
+	//
+	// DefineRollup creates or updates a rollup definition on sourceTID.
+	// Timeline 0 is rejected (XOLU-TS022). The destination must not already
+	// be the target of another definition (XOLU-TS026). Adding a definition
+	// that would create a cycle (XOLU-TS023) or exceed the depth limit
+	// (XOLU-TS024) is rejected. Returns the assigned RollupID.
+	DefineRollup(sourceTID TimelineID, def RollupDef) (RollupID, error)
+
+	// GetRollup returns a specific rollup definition by its ID on sourceTID.
+	GetRollup(sourceTID TimelineID, id RollupID) (RollupDef, error)
+
+	// ListRollups returns all rollup definitions where sourceTID is the source.
+	ListRollups(sourceTID TimelineID) ([]RollupDef, error)
+
+	// DeleteRollup removes a rollup definition and stops its worker.
+	// Data already written to the destination timeline is not affected.
+	DeleteRollup(sourceTID TimelineID, id RollupID) error
+
+	// RollupParent returns the rollup definition for which sourceTID is the
+	// destination — i.e. the definition that feeds into this timeline.
+	// Returns (RollupDef{}, false) if this timeline has no parent rollup.
+	RollupParent(sourceTID TimelineID) (RollupDef, bool)
+
+	// RollupTree returns the full rollup tree for this store, rooted at
+	// timeline 0. Each node carries its definition and its children.
+	RollupTree() *RollupTreeNode
+
+	// RunRollup executes a rollup definition immediately for the given time
+	// range, writing the results into the destination timeline. If from and
+	// to are both zero, runs for the most recently closed bucket.
+	// If cascade is true, after completing the specified bucket RunRollup
+	// also runs all descendant definitions for the corresponding time windows,
+	// walking down the tree in source→destination order. The worker goroutine
+	// is started for this definition and all cascaded descendants if not
+	// already running.
+	RunRollup(ctx context.Context, sourceTID TimelineID, id RollupID, from, to time.Time, cascade bool) error
+
+	// RollupStatus returns the operational status of a rollup definition.
+	RollupStatus(sourceTID TimelineID, id RollupID) (RollupStatusReport, error)
+
+	// Data deletion
+	//
+	// DeleteTimelineData removes all events from a timeline's Pebble key
+	// range. The timeline definition is preserved. Timeline 0 is rejected.
+	DeleteTimelineData(ctx context.Context, id TimelineID) error
+
+	// DeleteTimeline removes a timeline's definition together with its event
+	// data and its rollups. It is the inverse of DefineTimeline and is distinct
+	// from DeleteTimelineData (which keeps the definition). Rollup cascade
+	// follows RollupCascadeDelete: when off and the timeline still has rollups,
+	// the call returns an error and changes nothing. Timeline 0 is rejected.
+	DeleteTimeline(ctx context.Context, id TimelineID) error
+
+	// PurgeTimelineRange removes events in [from, to] from a timeline.
+	// Timeline 0 is rejected.
+	PurgeTimelineRange(ctx context.Context, id TimelineID, from, to time.Time) error
 
 	// Lifecycle
 	Close() error
 }
 
-// StoreFactory creates a Store for a given data directory.
-type StoreFactory func(dir string, cfg StoreConfig) (Store, error)
+// RollupID uniquely identifies a rollup definition within a source timeline.
+type RollupID string
+
+// MaxRollupDepth is the maximum allowed depth of the rollup tree (not counting
+// timeline 0 as the root). Controlled at runtime by dynconfig key
+// ts.rollup_max_depth; this is the compiled-in default.
+const MaxRollupDepth = 4
+
+// RollupDef describes one rollup definition: read from SourceTID every
+// BucketDuration, aggregate, and write into DestTID.
+type RollupDef struct {
+	ID             RollupID      `json:"id"`
+	SourceTID      TimelineID    `json:"source_tid"`
+	DestTID        TimelineID    `json:"dest_tid"`
+	BucketDuration time.Duration `json:"bucket_duration"`
+	// LateWindow is how long after a bucket closes to wait before computing
+	// the rollup, to absorb late-arriving events. Default 0.
+	LateWindow time.Duration `json:"late_window,omitempty"`
+	// Running records whether the worker was active when last persisted.
+	// Workers are not started automatically at DefineRollup time; they are
+	// started explicitly via RunRollup (which starts the worker and cascades
+	// to all descendants). On store reopen, only definitions with Running=true
+	// restart their workers.
+	Running   bool      `json:"running"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RollupStatusReport carries the last-known operational state of a rollup worker.
+type RollupStatusReport struct {
+	ID            RollupID   `json:"id"`
+	SourceTID     TimelineID `json:"source_tid"`
+	DestTID       TimelineID `json:"dest_tid"`
+	LastRunAt     time.Time  `json:"last_run_at,omitempty"`
+	LastBucketEnd time.Time  `json:"last_bucket_end,omitempty"`
+	EventsWritten int64      `json:"events_written"`
+	LastError     string     `json:"last_error,omitempty"`
+	Running       bool       `json:"running"`
+}
+
+// RollupTreeNode is one node in the tenant rollup tree as returned by RollupTree.
+type RollupTreeNode struct {
+	TID      TimelineID        `json:"tid"`
+	Def      *RollupDef        `json:"def,omitempty"` // nil for the root (tid=0) and raw timelines
+	Children []*RollupTreeNode `json:"children,omitempty"`
+}
+
+// TimelineWriteConfig holds the per-timeline performance configuration.
+// The only remaining per-timeline flag is NoSync; write coalescing is
+// controlled process-wide (or per-tenant) via dynconfig keys:
+//
+//	ts.writecoal           bool   — enable the write coalescer (default false)
+//	ts.coal_flush_interval_ms  int — flush window in ms (default 10)
+//	ts.coal_max_events     int    — early-flush threshold (default 2000)
+//
+// These keys are read from the tenant's dynconfig namespace first
+// ("tenant.{name}"), falling back to "global" if absent.
+type TimelineWriteConfig struct {
+	// NoSync — when true, AppendBatch commits this timeline's events with
+	// pebble.NoSync instead of pebble.Sync. The OS page cache is not flushed
+	// to durable storage before the call returns. Data loss is possible if
+	// the process crashes before the OS writes the WAL to disk.
+	NoSync bool `json:"nosync"`
+}
+
+// StoreFactory creates a Store for a given data directory and tenant name.
+// The tenantName is used to scope dynconfig lookups to the tenant's namespace.
+type StoreFactory func(dir string, cfg StoreConfig, tenantName string) (Store, error)
 
 // Manager manages per-tenant Store lifecycle.
 type Manager interface {
 	// Provision creates a timeseries store for a tenant.
-	Provision(ctx context.Context, tenantID uint16) error
+	// tenantName is used to scope dynconfig lookups.
+	Provision(ctx context.Context, tenantID uint16, tenantName string) error
 
 	// StoreFor returns the Store for a tenant, or an error if not provisioned.
 	StoreFor(tenantID uint16) (Store, error)

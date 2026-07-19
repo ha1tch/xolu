@@ -149,7 +149,7 @@ func setupBenchDB(b *testing.B, path string, n int) *sql.DB {
 		b.Fatal(err)
 	}
 
-	// Blob table (current olu layout)
+	// Blob table (current xolu layout)
 	_, err = db.Exec(`
 		CREATE TABLE blob_entities (
 			tenant_id INTEGER NOT NULL DEFAULT 0,
@@ -249,7 +249,7 @@ func boolToInt(v bool) int {
 	return 0
 }
 
-// drain reads all rows from a blob query (simulates current olu read path)
+// drain reads all rows from a blob query (simulates current xolu read path)
 func drain(rows *sql.Rows) int {
 	count := 0
 	for rows.Next() {

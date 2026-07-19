@@ -27,7 +27,7 @@ func TestDeriveAdaptedTableSpec_BasicTypes(t *testing.T) {
 		"required": []interface{}{"name", "age"},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("users", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("users", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -35,8 +35,8 @@ func TestDeriveAdaptedTableSpec_BasicTypes(t *testing.T) {
 	if spec.Entity != "users" {
 		t.Errorf("Entity = %q, want %q", spec.Entity, "users")
 	}
-	if spec.TableName() != "olu_users" {
-		t.Errorf("TableName = %q, want %q", spec.TableName(), "olu_users")
+	if spec.TableName() != "t0000_ndata_users" {
+		t.Errorf("TableName = %q, want %q", spec.TableName(), "t0000_ndata_users")
 	}
 	if !spec.HasExtra {
 		t.Error("HasExtra = false, want true (additionalProperties not set)")
@@ -93,7 +93,7 @@ func TestDeriveAdaptedTableSpec_BasicTypes(t *testing.T) {
 	if spec.SchemaHash == "" {
 		t.Error("SchemaHash is empty")
 	}
-	spec2, _ := DeriveAdaptedTableSpec("users", schema, &SQLiteStorageDialect{})
+	spec2, _ := DeriveAdaptedTableSpec("users", schema, &SQLiteStorageDialect{}, 0)
 	if spec.SchemaHash != spec2.SchemaHash {
 		t.Error("SchemaHash not deterministic")
 	}
@@ -111,7 +111,7 @@ func TestDeriveAdaptedTableSpec_DecimalType(t *testing.T) {
 		},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("transactions", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("transactions", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestDeriveAdaptedTableSpec_DecimalDefaults(t *testing.T) {
 		},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("products", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("products", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDeriveAdaptedTableSpec_REFFields(t *testing.T) {
 		"required": []interface{}{"author"},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("articles", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("articles", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestDeriveAdaptedTableSpec_NoAdditionalProperties(t *testing.T) {
 		"additionalProperties": false,
 	}
 
-	spec, err := DeriveAdaptedTableSpec("strict_entity", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("strict_entity", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestDeriveAdaptedTableSpec_IDFieldExcluded(t *testing.T) {
 		},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("things", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("things", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestDeriveAdaptedTableSpec_IDFieldExcluded(t *testing.T) {
 func TestDeriveAdaptedTableSpec_NoProperties(t *testing.T) {
 	schema := map[string]interface{}{}
 
-	_, err := DeriveAdaptedTableSpec("empty", schema, &SQLiteStorageDialect{})
+	_, err := DeriveAdaptedTableSpec("empty", schema, &SQLiteStorageDialect{}, 0)
 	if err == nil {
 		t.Error("expected error for schema with no properties")
 	}
@@ -300,7 +300,7 @@ func TestDeriveAdaptedTableSpec_AutoIndexEnum(t *testing.T) {
 		},
 	}
 
-	spec, err := DeriveAdaptedTableSpec("items", schema, &SQLiteStorageDialect{})
+	spec, err := DeriveAdaptedTableSpec("items", schema, &SQLiteStorageDialect{}, 0)
 	if err != nil {
 		t.Fatalf("DeriveAdaptedTableSpec failed: %v", err)
 	}
@@ -322,7 +322,8 @@ func TestDeriveAdaptedTableSpec_AutoIndexEnum(t *testing.T) {
 
 func TestGenerateCreateTableSQL(t *testing.T) {
 	spec := &AdaptedTableSpec{
-		Entity: "users",
+		Entity:   "users",
+		TenantID: 0,
 		Columns: []ColumnDef{
 			{Name: "age", SQLType: "INTEGER", Required: true},
 			{Name: "email", SQLType: "TEXT", Required: true},
@@ -335,12 +336,12 @@ func TestGenerateCreateTableSQL(t *testing.T) {
 	ddl := GenerateCreateTableSQL(spec, &SQLiteStorageDialect{})
 
 	// Verify table name
-	if !strings.Contains(ddl, "CREATE TABLE IF NOT EXISTS olu_users") {
+	if !strings.Contains(ddl, "CREATE TABLE IF NOT EXISTS t0000_ndata_users") {
 		t.Error("DDL missing correct table name")
 	}
 
 	// Verify system columns
-	for _, sysCol := range []string{"id INTEGER", "tenant_id INTEGER", "_extra TEXT", "_version INTEGER"} {
+	for _, sysCol := range []string{"id INTEGER", "_extra TEXT", "_version INTEGER"} {
 		if !strings.Contains(ddl, sysCol) {
 			t.Errorf("DDL missing system column %q", sysCol)
 		}
@@ -367,7 +368,7 @@ func TestGenerateCreateTableSQL(t *testing.T) {
 	}
 
 	// Verify primary key
-	if !strings.Contains(ddl, "PRIMARY KEY (tenant_id, id)") {
+	if !strings.Contains(ddl, "PRIMARY KEY (id)") {
 		t.Error("DDL missing primary key")
 	}
 }
@@ -392,21 +393,16 @@ func TestGenerateIndexSQL(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Entity: "users",
 		Indexes: []IndexDef{
-			{Name: "idx_olu_users_email", Columns: []string{"email"}},
-			{Name: "idx_olu_users_status", Columns: []string{"status"}, Unique: true},
+			{Name: "idx_t0000_ndata_users_email", Columns: []string{"email"}},
+			{Name: "idx_t0000_ndata_users_status", Columns: []string{"status"}, Unique: true},
 		},
 	}
 
 	stmts := GenerateIndexSQL(spec, &SQLiteStorageDialect{})
 
-	// Should have tenant index + 2 custom indexes
-	if len(stmts) != 3 {
-		t.Fatalf("got %d index statements, want 3", len(stmts))
-	}
-
-	// Check tenant index
-	if !strings.Contains(stmts[0], "idx_olu_users_tenant") {
-		t.Error("first index should be tenant index")
+	// Should have 2 custom indexes (no tenant index — table name is the tenant boundary)
+	if len(stmts) != 2 {
+		t.Fatalf("got %d index statements, want 2", len(stmts))
 	}
 
 	// Check unique index
@@ -427,7 +423,8 @@ func TestGenerateIndexSQL(t *testing.T) {
 
 func TestPartitionData_BasicFields(t *testing.T) {
 	spec := &AdaptedTableSpec{
-		Entity: "users",
+		Entity:   "users",
+		TenantID: 0,
 		Columns: []ColumnDef{
 			{Name: "age", JSONField: "age", Type: "integer"},
 			{Name: "email", JSONField: "email", Type: "string"},
@@ -477,8 +474,8 @@ func TestPartitionData_REFField(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Entity: "articles",
 		Columns: []ColumnDef{
-			{Name: "REF_author_entity", JSONField: "author", Type: "string", Format: "ref", IsREF: true},
-			{Name: "REF_author_id", JSONField: "author", Type: "integer", Format: "ref", IsREF: true},
+			{Name: "REF_author_entity", JSONField: "author", Type: "string", Format: "ref", IsREF: true, IsREFEntity: true},
+			{Name: "REF_author_id", JSONField: "author", Type: "integer", Format: "ref", IsREF: true, IsREFID: true},
 			{Name: "title", JSONField: "title", Type: "string"},
 		},
 		HasExtra: false,
@@ -512,7 +509,8 @@ func TestPartitionData_REFField(t *testing.T) {
 
 func TestReassembleData_BasicFields(t *testing.T) {
 	spec := &AdaptedTableSpec{
-		Entity: "users",
+		Entity:   "users",
+		TenantID: 0,
 		Columns: []ColumnDef{
 			{Name: "age", JSONField: "age", Type: "integer"},
 			{Name: "email", JSONField: "email", Type: "string"},
@@ -549,8 +547,8 @@ func TestReassembleData_REFField(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Entity: "articles",
 		Columns: []ColumnDef{
-			{Name: "REF_author_entity", JSONField: "author", Type: "string", Format: "ref", IsREF: true},
-			{Name: "REF_author_id", JSONField: "author", Type: "integer", Format: "ref", IsREF: true},
+			{Name: "REF_author_entity", JSONField: "author", Type: "string", Format: "ref", IsREF: true, IsREFEntity: true},
+			{Name: "REF_author_id", JSONField: "author", Type: "integer", Format: "ref", IsREF: true, IsREFID: true},
 			{Name: "title", JSONField: "title", Type: "string"},
 		},
 	}
@@ -617,8 +615,8 @@ func TestPartitionReassembleRoundTrip(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Entity: "full",
 		Columns: []ColumnDef{
-			{Name: "REF_owner_entity", JSONField: "owner", Type: "string", Format: "ref", IsREF: true},
-			{Name: "REF_owner_id", JSONField: "owner", Type: "integer", Format: "ref", IsREF: true},
+			{Name: "REF_owner_entity", JSONField: "owner", Type: "string", Format: "ref", IsREF: true, IsREFEntity: true},
+			{Name: "REF_owner_id", JSONField: "owner", Type: "integer", Format: "ref", IsREF: true, IsREFID: true},
 			{Name: "active", JSONField: "active", Type: "boolean"},
 			{Name: "name", JSONField: "name", Type: "string"},
 			{Name: "score", JSONField: "score", Type: "number"},
@@ -627,9 +625,9 @@ func TestPartitionReassembleRoundTrip(t *testing.T) {
 	}
 
 	original := map[string]interface{}{
-		"id":    1,
-		"name":  "Test",
-		"score": float64(99.5),
+		"id":     1,
+		"name":   "Test",
+		"score":  float64(99.5),
 		"active": true,
 		"owner": map[string]interface{}{
 			"type":   "REF",
@@ -695,8 +693,8 @@ func TestPartitionReassembleRoundTrip(t *testing.T) {
 func TestFieldToColumn(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Columns: []ColumnDef{
-			{Name: "REF_author_entity", JSONField: "author", IsREF: true},
-			{Name: "REF_author_id", JSONField: "author", IsREF: true},
+			{Name: "REF_author_entity", JSONField: "author", IsREF: true, IsREFEntity: true},
+			{Name: "REF_author_id", JSONField: "author", IsREF: true, IsREFID: true},
 			{Name: "name", JSONField: "name"},
 		},
 	}
@@ -721,7 +719,7 @@ func TestIsSchemaField(t *testing.T) {
 	spec := &AdaptedTableSpec{
 		Columns: []ColumnDef{
 			{Name: "name", JSONField: "name"},
-			{Name: "REF_author_entity", JSONField: "author", IsREF: true},
+			{Name: "REF_author_entity", JSONField: "author", IsREF: true, IsREFEntity: true},
 		},
 	}
 
@@ -774,10 +772,11 @@ func TestCanonicalSchemaHash_Deterministic(t *testing.T) {
 // Metadata table DDL test
 // ---------------------------------------------------------------------------
 
-func TestGenerateAdaptedSchemasTableSQL(t *testing.T) {
-	ddl := GenerateAdaptedSchemasTableSQL(&SQLiteStorageDialect{})
-	if !strings.Contains(ddl, "adapted_table_schemas") {
-		t.Error("DDL missing table name 'adapted_table_schemas'")
+func TestNodeSchemaTableSQL(t *testing.T) {
+	dialect := &SQLiteStorageDialect{}
+	ddl := dialect.NodeSchemaTableSQL(1)
+	if !strings.Contains(ddl, "t0001_n_sch") {
+		t.Errorf("DDL missing table name 't0001_n_sch': %s", ddl)
 	}
 	if !strings.Contains(ddl, "entity_type TEXT PRIMARY KEY") {
 		t.Error("DDL missing primary key on entity_type")
@@ -787,6 +786,12 @@ func TestGenerateAdaptedSchemasTableSQL(t *testing.T) {
 	}
 	if !strings.Contains(ddl, "column_spec") {
 		t.Error("DDL missing column_spec column")
+	}
+
+	// Different tenants produce different table names.
+	ddl2 := dialect.NodeSchemaTableSQL(0)
+	if !strings.Contains(ddl2, "t0000_n_sch") {
+		t.Errorf("DDL for tenant 0 missing 't0000_n_sch': %s", ddl2)
 	}
 }
 

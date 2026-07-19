@@ -6,10 +6,10 @@ package oql
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/qs"
 )
 
 // ---------------------------------------------------------------------------
@@ -20,24 +20,62 @@ import (
 // The generator calls dialect methods to produce the correct syntax
 // for the target database. T-SQL arrives via tsqlparser's AST; the
 // dialect translates it to the backend's native SQL.
+//
+// # OQL field types
+//
+// Several methods accept an oqlType string that controls how a JSON field
+// is extracted and cast. The following tokens are defined:
+//
+//	"text"    — extract as text; no numeric coercion.
+//	           SQLite:     json_extract(data, '$.f')  (returns TEXT/NULL)
+//	           PostgreSQL: (data->>'f')::text
+//
+//	"numeric" — extract as a number; enables numeric comparison and ordering.
+//	           SQLite:     CAST(json_extract(data, '$.f') AS REAL)
+//	           PostgreSQL: (data->>'f')::numeric
+//
+//	"boolean" — extract as a boolean.
+//	           SQLite:     json_extract(data, '$.f')  (SQLite has no BOOL type;
+//	                       JSON true/false are stored as 1/0)
+//	           PostgreSQL: (data->>'f')::boolean
+//
+//	"auto"    — extract without an explicit cast; use the backend's native
+//	           return type from the JSON accessor. This is safe for SQLite
+//	           equality comparisons (json_extract returns typed values) but
+//	           must NOT be used for ordering or inequality comparisons on
+//	           PostgreSQL (where all JSON accessors return text). Prefer an
+//	           explicit type whenever the stored type is known.
 type SQLDialect interface {
-	// JSONField emits a field extraction from the JSON data column.
-	// For SQLite: json_extract(data, '$.field')
-	// For Postgres: data->>'field' (text) or data->'field' (json)
+	// JSONFieldAs extracts a field from the JSON data column and casts it
+	// to the requested OQL type. This is the canonical extraction method;
+	// all comparison and ordering sites should use it rather than the
+	// deprecated JSONField / JSONFieldNumeric shortcuts.
+	//
+	// oqlType must be one of: "text", "numeric", "boolean", "auto".
+	JSONFieldAs(fieldPath, oqlType string) string
+
+	// JSONFieldAliasedAs is JSONFieldAs for JOIN queries where the data
+	// column is qualified by a table alias.
+	JSONFieldAliasedAs(alias, fieldPath, oqlType string) string
+
+	// JSONField extracts a field from the JSON data column without an
+	// explicit type cast. Equivalent to JSONFieldAs(fieldPath, "auto").
+	//
+	// Deprecated: use JSONFieldAs with an explicit oqlType. JSONField is
+	// retained for backward compatibility with existing dialect implementations
+	// and will be removed when a PostgreSQL dialect is added.
 	JSONField(fieldPath string) string
 
-	// JSONFieldNumeric emits a numeric-typed field extraction.
-	// For SQLite: CAST(json_extract(data, '$.field') AS REAL)
-	// For Postgres: CAST(data->>'field' AS NUMERIC)
+	// JSONFieldNumeric extracts a field and casts it to a numeric type.
+	// Equivalent to JSONFieldAs(fieldPath, "numeric").
+	//
+	// Deprecated: use JSONFieldAs(fieldPath, "numeric").
 	JSONFieldNumeric(fieldPath string) string
 
-	// JSONFieldAliased emits a field extraction from the JSON data column
-	// where the data column is qualified by a table alias. Used in JOIN
-	// queries where both sides reference the same physical table (entities)
-	// under different aliases. The alias qualifies the data column, not the
-	// whole expression.
-	// For SQLite: json_extract(alias.data, '$.field')
-	// For Postgres: alias.data->>'field'
+	// JSONFieldAliased extracts a field from a JOIN-aliased data column
+	// without a type cast. Equivalent to JSONFieldAliasedAs(alias, fieldPath, "auto").
+	//
+	// Deprecated: use JSONFieldAliasedAs with an explicit oqlType.
 	JSONFieldAliased(alias, fieldPath string) string
 
 	// Placeholder emits a parameter placeholder for the n-th argument (1-based).
@@ -82,18 +120,58 @@ type SQLDialect interface {
 // ---------------------------------------------------------------------------
 
 // SQLiteDialect generates SQLite-compatible SQL using json_extract().
-type SQLiteDialect struct{}
+type SQLiteDialect struct {
+	// NodesTable is the tenant-scoped blob node store table name (e.g. t0000_nodes).
+	// Set by the OQL executor from store.NodesTable() when the store implements
+	// storage.TableNamer. Defaults to "t0000_nodes" if unset.
+	NodesTable string
+}
 
-func (d *SQLiteDialect) JSONField(fieldPath string) string {
+func (d *SQLiteDialect) nodesTable() string {
+	if d.NodesTable != "" {
+		return d.NodesTable
+	}
+	return "t0000_nodes" // safe default for zero-value dialect in tests
+}
+
+// JSONFieldAs extracts a field from the JSON data column with an explicit
+// type cast appropriate for the requested OQL type.
+//
+// SQLite mapping:
+//   - "numeric"  → CAST(json_extract(data, '$.f') AS REAL)
+//   - "boolean"  → json_extract(data, '$.f')  (SQLite stores JSON booleans
+//     as integer 1/0; no separate BOOL type needed)
+//   - "text"     → json_extract(data, '$.f')  (returns TEXT when stored as string)
+//   - "auto"     → json_extract(data, '$.f')  (return type mirrors stored JSON type)
+func (d *SQLiteDialect) JSONFieldAs(fieldPath, oqlType string) string {
+	if oqlType == "numeric" {
+		return fmt.Sprintf("CAST(json_extract(data, '$.%s') AS REAL)", fieldPath)
+	}
 	return fmt.Sprintf("json_extract(data, '$.%s')", fieldPath)
 }
 
-func (d *SQLiteDialect) JSONFieldNumeric(fieldPath string) string {
-	return fmt.Sprintf("CAST(json_extract(data, '$.%s') AS REAL)", fieldPath)
+// JSONFieldAliasedAs is JSONFieldAs for JOIN queries where the data column
+// is qualified by a table alias.
+func (d *SQLiteDialect) JSONFieldAliasedAs(alias, fieldPath, oqlType string) string {
+	if oqlType == "numeric" {
+		return fmt.Sprintf("CAST(json_extract(%s.data, '$.%s') AS REAL)", alias, fieldPath)
+	}
+	return fmt.Sprintf("json_extract(%s.data, '$.%s')", alias, fieldPath)
 }
 
+// JSONField is a deprecated shortcut. Use JSONFieldAs(fieldPath, "auto").
+func (d *SQLiteDialect) JSONField(fieldPath string) string {
+	return d.JSONFieldAs(fieldPath, "auto")
+}
+
+// JSONFieldNumeric is a deprecated shortcut. Use JSONFieldAs(fieldPath, "numeric").
+func (d *SQLiteDialect) JSONFieldNumeric(fieldPath string) string {
+	return d.JSONFieldAs(fieldPath, "numeric")
+}
+
+// JSONFieldAliased is a deprecated shortcut. Use JSONFieldAliasedAs(alias, fieldPath, "auto").
 func (d *SQLiteDialect) JSONFieldAliased(alias, fieldPath string) string {
-	return fmt.Sprintf("json_extract(%s.data, '$.%s')", alias, fieldPath)
+	return d.JSONFieldAliasedAs(alias, fieldPath, "auto")
 }
 
 func (d *SQLiteDialect) Placeholder(_ int) string {
@@ -105,7 +183,7 @@ func (d *SQLiteDialect) LimitClause(placeholder string) string {
 }
 
 func (d *SQLiteDialect) BaseQuery(entity string) (string, interface{}) {
-	return "SELECT data, _version FROM entities WHERE entity_type = ?", entity
+	return "SELECT data, _version FROM " + d.nodesTable() + " WHERE entity_type = ?", entity
 }
 
 func (d *SQLiteDialect) Name() string { return "sqlite" }
@@ -159,16 +237,16 @@ func (d *SQLiteDialect) CastExpression(expr, targetType string) string {
 // Field name validation
 // ---------------------------------------------------------------------------
 
-// validFieldName matches alphanumeric, underscores, and dots (for nested paths).
-// Rejects anything that could be used for SQL injection in json_extract paths.
-var validFieldName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
-
 // dangerousFieldChars are characters that must never appear in field names
-// embedded in SQL, even if the regex above were loosened.
+// embedded in SQL. Retained as an explicit backstop even though
+// qs.ValidateFieldPath already excludes them via its ASCII allowlist.
 var dangerousFieldChars = []string{"'", "\"", ")", "--", ";", "/*"}
 
 func validateFieldName(name string) error {
-	if !validFieldName.MatchString(name) {
+	// Canonical identifier policy lives in pkg/qs (ASCII bare identifiers, dotted
+	// paths permitted). This is the single source of truth shared across OQL,
+	// Sulpher, storage, and the server handlers.
+	if err := qs.ValidateFieldPath(name); err != nil {
 		return fmt.Errorf("invalid field name %q: must be alphanumeric with underscores/dots", name)
 	}
 	for _, ch := range dangerousFieldChars {
@@ -245,7 +323,7 @@ func GenerateSQL(
 				gen.addArg(tenantID)))
 		} else {
 			clauses = append(clauses, fmt.Sprintf("AND %s = %s",
-				dialect.JSONField("tenant_id"), gen.addArg(tenantID)))
+				dialect.JSONFieldAs("tenant_id", "text"), gen.addArg(tenantID)))
 		}
 	}
 
@@ -307,7 +385,8 @@ func (g *SQLGenerator) translateExpr(expr ast.Expression) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		jsonField := g.dialect.JSONField(field)
+		// IS NULL checks existence, not value ordering — "auto" is safe on all backends.
+		jsonField := g.dialect.JSONFieldAs(field, "auto")
 		if ex.Not {
 			return jsonField + " IS NOT NULL", nil
 		}
@@ -326,19 +405,17 @@ func (g *SQLGenerator) translateExpr(expr ast.Expression) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// Choose the field extraction based on bound types.
-		// When both bounds are numeric, use JSONFieldNumeric (CAST AS REAL) so
-		// that stored numeric strings sort numerically. When either bound is a
-		// string, use JSONField (no cast) so that lexicographic ordering is
-		// preserved — CAST(date_string AS REAL) silently coerces to the year
-		// portion (e.g. "2025-06-01" → 2025.0), making all date strings within
-		// the same year compare equal and producing incorrect results.
-		var jsonField string
+		// Choose the OQL type based on bound types.
+		// Both bounds numeric → "numeric" so that stored numeric strings sort
+		// numerically. Either bound a string → "text" so that lexicographic
+		// ordering is preserved — CAST(date_string AS REAL/NUMERIC) silently
+		// coerces to the year portion (e.g. "2025-06-01" → 2025.0), making
+		// all dates within the same year compare equal.
+		oqlType := "text"
 		if isNumericValue(lowVal) && isNumericValue(highVal) {
-			jsonField = g.dialect.JSONFieldNumeric(field)
-		} else {
-			jsonField = g.dialect.JSONField(field)
+			oqlType = "numeric"
 		}
+		jsonField := g.dialect.JSONFieldAs(field, oqlType)
 		lowPh := g.addArg(lowVal)
 		highPh := g.addArg(highVal)
 		sql := fmt.Sprintf("%s BETWEEN %s AND %s", jsonField, lowPh, highPh)
@@ -352,15 +429,23 @@ func (g *SQLGenerator) translateExpr(expr ast.Expression) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		jsonField := g.dialect.JSONField(field)
 		var placeholders []string
+		var firstVal interface{}
 		for _, v := range ex.Values {
 			val, err := g.literalValue(v)
 			if err != nil {
 				return "", err
 			}
+			if firstVal == nil {
+				firstVal = val
+			}
 			placeholders = append(placeholders, g.addArg(val))
 		}
+		// Infer extraction type from the first IN value. All values in a well-
+		// formed IN list share the same type; heterogeneous lists are rare and
+		// the first value is a reasonable approximation.
+		inType := chooseType("=", firstVal)
+		jsonField := g.dialect.JSONFieldAs(field, inType)
 		sql := fmt.Sprintf("%s IN (%s)", jsonField, strings.Join(placeholders, ", "))
 		if ex.Not {
 			sql = "NOT (" + sql + ")"
@@ -376,7 +461,8 @@ func (g *SQLGenerator) translateExpr(expr ast.Expression) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		jsonField := g.dialect.JSONField(field)
+		// LIKE is always a text pattern match.
+		jsonField := g.dialect.JSONFieldAs(field, "text")
 		ph := g.addArg(patternVal)
 		sql := fmt.Sprintf("%s LIKE %s", jsonField, ph)
 		if ex.Not {
@@ -431,25 +517,32 @@ func (g *SQLGenerator) translateInfix(ex *ast.InfixExpression) (string, error) {
 	}
 }
 
-// chooseFieldExtraction picks JSONField or JSONFieldNumeric based on
-// the operator and the literal value's type. This mirrors the Go-side
-// behaviour in compareValues/toFloatSafe.
+// chooseType returns the OQL type token for a field extraction based on the
+// comparison operator and the literal value's type. This is the single
+// authoritative place where the operator+literal pair maps to a storage type.
 //
 // Rules:
-//   - Ordering operators (>, <, >=, <=): always numeric
-//   - Equality (=, !=, <>): numeric if the RHS is numeric, text otherwise
-func (g *SQLGenerator) chooseFieldExtraction(field, op string, val interface{}) string {
+//   - Ordering operators (>, <, >=, <=): "numeric" when RHS is numeric;
+//     "text" otherwise (ISO 8601 timestamps sort correctly as text, and
+//     CAST(date_string AS REAL/NUMERIC) silently truncates to the year).
+//   - Equality (=, !=, <>): "numeric" when RHS is numeric; "text" otherwise.
+//   - All other operators: "auto" (fall back to backend's native JSON type).
+func chooseType(op string, val interface{}) string {
 	switch op {
-	case ">", "<", ">=", "<=":
-		return g.dialect.JSONFieldNumeric(field)
-	case "=", "!=", "<>":
+	case ">", "<", ">=", "<=", "=", "!=", "<>":
 		if isNumericValue(val) {
-			return g.dialect.JSONFieldNumeric(field)
+			return "numeric"
 		}
-		return g.dialect.JSONField(field)
+		return "text"
 	default:
-		return g.dialect.JSONField(field)
+		return "auto"
 	}
+}
+
+// chooseFieldExtraction is a convenience wrapper used at comparison sites.
+// It calls chooseType and returns the appropriate dialect extraction expression.
+func (g *SQLGenerator) chooseFieldExtraction(field, op string, val interface{}) string {
+	return g.dialect.JSONFieldAs(field, chooseType(op, val))
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +556,12 @@ func (g *SQLGenerator) translateOrderBy(items []*ast.OrderByItem) (string, error
 		if err != nil {
 			return "", err
 		}
-		jsonField := g.dialect.JSONField(field)
+		// ORDER BY without a literal context: use "auto" for now. A future
+		// improvement is to thread schema type information through the generator
+		// so that numeric fields can use "numeric" here. On PostgreSQL this
+		// ordering will produce text-order results for numeric fields — schema
+		// typing is required before a PostgreSQL dialect can be added.
+		jsonField := g.dialect.JSONFieldAs(field, "auto")
 		dir := "ASC"
 		if item.Descending {
 			dir = "DESC"
@@ -585,7 +683,7 @@ func generateMutationSQL(where ast.Expression, entity, tenantID string, dialect 
 				gen.addArg(tenantID)))
 		} else {
 			clauses = append(clauses, fmt.Sprintf("AND %s = %s",
-				dialect.JSONField("tenant_id"), gen.addArg(tenantID)))
+				dialect.JSONFieldAs("tenant_id", "text"), gen.addArg(tenantID)))
 		}
 	}
 

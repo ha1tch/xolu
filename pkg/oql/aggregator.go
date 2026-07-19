@@ -7,10 +7,10 @@ package oql
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/qs"
 )
 
 // AggregateFunc is a function that computes an aggregate over values
@@ -25,153 +25,49 @@ var Aggregates = map[string]AggregateFunc{
 	"MAX":   aggMax,
 }
 
-func aggCount(values []interface{}) interface{} {
-	// COUNT counts non-nil values, COUNT(*) counts all
-	count := 0
-	for _, v := range values {
-		if v != nil {
-			count++
-		}
-	}
-	return count
-}
+// Aggregate implementations delegate to pkg/qs so that OQL and Sulpher
+// share a single canonical implementation.
+func aggCount(values []interface{}) interface{} { return qs.AggCount(values) }
+func aggSum(values []interface{}) interface{}   { return qs.AggSum(values) }
+func aggAvg(values []interface{}) interface{}   { return qs.AggAvg(values) }
+func aggMin(values []interface{}) interface{}   { return qs.AggMin(values) }
+func aggMax(values []interface{}) interface{}   { return qs.AggMax(values) }
 
-func aggSum(values []interface{}) interface{} {
-	// SQL standard: SUM over empty set is NULL
-	hasValue := false
-	var sum float64
-	for _, v := range values {
-		if v != nil {
-			sum += toFloat(v)
-			hasValue = true
-		}
-	}
-	if !hasValue {
-		return nil
-	}
-	return sum
-}
-
-func aggAvg(values []interface{}) interface{} {
-	if len(values) == 0 {
-		return nil
-	}
-	var sum float64
-	var count int
-	for _, v := range values {
-		if v != nil {
-			sum += toFloat(v)
-			count++
-		}
-	}
-	if count == 0 {
-		return nil
-	}
-	return sum / float64(count)
-}
-
-func aggMin(values []interface{}) interface{} {
-	var min interface{}
-	for _, v := range values {
-		if v == nil {
-			continue
-		}
-		if min == nil || compareValues(v, min) < 0 {
-			min = v
-		}
-	}
-	return min
-}
-
-func aggMax(values []interface{}) interface{} {
-	var max interface{}
-	for _, v := range values {
-		if v == nil {
-			continue
-		}
-		if max == nil || compareValues(v, max) > 0 {
-			max = v
-		}
-	}
-	return max
-}
-
-// toFloat converts a value to float64
+// toFloat delegates to pkg/qs but also handles string-encoded numerics,
+// matching the original OQL behaviour. Returns 0 for unrecognised types
+// (does not handle bool — use qs.ToFloat directly if bool support needed).
 func toFloat(v interface{}) float64 {
-	switch val := v.(type) {
-	case int:
-		return float64(val)
-	case int64:
-		return float64(val)
-	case float64:
-		return val
-	case float32:
-		return float64(val)
-	case string:
-		var f float64
-		_, _ = fmt.Sscanf(val, "%f", &f)
+	if f, ok := qs.ToFloatSafe(v); ok {
+		// Original OQL toFloat did not handle bool
+		if _, isBool := v.(bool); isBool {
+			return 0
+		}
 		return f
-	default:
-		return 0
 	}
-}
-
-// compareValues compares two values, returns -1, 0, or 1
-func compareValues(a, b interface{}) int {
-	if a == nil && b == nil {
-		return 0
-	}
-	if a == nil {
-		return -1
-	}
-	if b == nil {
-		return 1
-	}
-
-	// Try numeric comparison
-	aFloat, aOk := toFloatSafe(a)
-	bFloat, bOk := toFloatSafe(b)
-	if aOk && bOk {
-		if aFloat < bFloat {
-			return -1
+	if s, ok := v.(string); ok {
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+			return f
 		}
-		if aFloat > bFloat {
-			return 1
-		}
-		return 0
-	}
-
-	// String comparison
-	aStr := fmt.Sprintf("%v", a)
-	bStr := fmt.Sprintf("%v", b)
-	if aStr < bStr {
-		return -1
-	}
-	if aStr > bStr {
-		return 1
 	}
 	return 0
 }
 
+// compareValues delegates to pkg/qs.
+func compareValues(a, b interface{}) int { return qs.CompareValues(a, b) }
+
+// toFloatSafe delegates to pkg/qs but also handles string-encoded numerics.
 func toFloatSafe(v interface{}) (float64, bool) {
-	switch val := v.(type) {
-	case int:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case float64:
-		return val, true
-	case float32:
-		return float64(val), true
-	case string:
-		f, err := strconv.ParseFloat(val, 64)
-		if err != nil {
-			return 0, false
-		}
+	if f, ok := qs.ToFloatSafe(v); ok {
 		return f, true
-	default:
-		return 0, false
 	}
+	if s, ok := v.(string); ok {
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 // Aggregator handles GROUP BY and aggregate function execution
@@ -261,6 +157,25 @@ func (a *Aggregator) Aggregate(
 					} else if len(fc.Arguments) > 0 {
 						values = a.extractColumnValues(groupRecords, fc.Arguments[0])
 
+						// COUNT(DISTINCT x) / SUM(DISTINCT x) etc. — deduplicate
+						// extracted values before aggregating. nil (absent field)
+						// is excluded from the distinct set, consistent with SQL semantics.
+						if fc.Distinct {
+							seen := make(map[string]struct{}, len(values))
+							deduped := make([]interface{}, 0, len(values))
+							for _, v := range values {
+								if v == nil {
+									continue
+								}
+								key := fmt.Sprintf("%T:%v", v, v)
+								if _, exists := seen[key]; !exists {
+									seen[key] = struct{}{}
+									deduped = append(deduped, v)
+								}
+							}
+							values = deduped
+						}
+
 						// Use decimal-precise aggregation if the field is decimal
 						if funcName != "COUNT" {
 							argName := exprToString(fc.Arguments[0])
@@ -338,17 +253,17 @@ func (a *Aggregator) evalCondition(row map[string]interface{}, expr ast.Expressi
 
 		switch e.Operator {
 		case "=":
-			return compareValues(left, right) == 0
+			return havingCompare(left, right) == 0
 		case "!=", "<>":
-			return compareValues(left, right) != 0
+			return havingCompare(left, right) != 0
 		case "<":
-			return compareValues(left, right) < 0
+			return havingCompare(left, right) < 0
 		case ">":
-			return compareValues(left, right) > 0
+			return havingCompare(left, right) > 0
 		case "<=":
-			return compareValues(left, right) <= 0
+			return havingCompare(left, right) <= 0
 		case ">=":
-			return compareValues(left, right) >= 0
+			return havingCompare(left, right) >= 0
 		case "AND":
 			return a.evalCondition(row, e.Left) && a.evalCondition(row, e.Right)
 		case "OR":
@@ -356,6 +271,25 @@ func (a *Aggregator) evalCondition(row map[string]interface{}, expr ast.Expressi
 		}
 	}
 	return true
+}
+
+// havingCompare compares two values for HAVING evaluation.
+// Always attempts numeric comparison first (including string-encoded
+// numerics such as denormalised decimal aggregate results like "42372.89"),
+// falling back to qs.CompareValues for non-numeric types.
+func havingCompare(a, b interface{}) int {
+	af, aOk := toFloatSafe(a)
+	bf, bOk := toFloatSafe(b)
+	if aOk && bOk {
+		if af < bf {
+			return -1
+		}
+		if af > bf {
+			return 1
+		}
+		return 0
+	}
+	return qs.CompareValues(a, b)
 }
 
 // evalExpr evaluates an expression against a row
@@ -476,7 +410,10 @@ func OrderBy(records []map[string]interface{}, orderBy []*ast.OrderByItem) []map
 			vi := getFieldValue(records[i], colName)
 			vj := getFieldValue(records[j], colName)
 
-			cmp := compareValues(vi, vj)
+			// Use havingCompare (numeric-aware, handles string-encoded decimals)
+			// rather than compareValues so that denormalised aggregate results
+			// like "9369.41" sort numerically rather than lexicographically.
+			cmp := havingCompare(vi, vj)
 			if cmp == 0 {
 				continue
 			}

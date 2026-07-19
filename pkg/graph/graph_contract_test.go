@@ -14,7 +14,6 @@ package graph
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -404,10 +403,10 @@ func TestContract_GetNeighbors(t *testing.T) {
 			if len(nb) != 2 {
 				t.Errorf("len: want 2, got %d", len(nb))
 			}
-			if nb["u:2"] != "FOLLOWS" {
+			if nb["u:2"].Rel != "FOLLOWS" {
 				t.Errorf("FOLLOWS edge to u:2 missing; got %v", nb)
 			}
-			if nb["u:3"] != "KNOWS" {
+			if nb["u:3"].Rel != "KNOWS" {
 				t.Errorf("KNOWS edge to u:3 missing; got %v", nb)
 			}
 		})
@@ -451,10 +450,10 @@ func TestContract_GetIncomingEdges(t *testing.T) {
 			if len(inc) != 2 {
 				t.Errorf("len: want 2, got %d: %v", len(inc), inc)
 			}
-			if inc["u:1"] != "FOLLOWS" {
+			if inc["u:1"].Rel != "FOLLOWS" {
 				t.Errorf("FOLLOWS from u:1 missing; got %v", inc)
 			}
-			if inc["u:2"] != "FOLLOWS" {
+			if inc["u:2"].Rel != "FOLLOWS" {
 				t.Errorf("FOLLOWS from u:2 missing; got %v", inc)
 			}
 		})
@@ -661,7 +660,6 @@ func TestContract_GetNodeInfo_AbsentNodeErrors(t *testing.T) {
 		})
 	}
 }
-
 
 // TestContract_GetNodeInfo_PrefixedNode verifies that Entity is reported
 // without the tenant prefix for nodes in the "XXXX@entity:id" format.
@@ -1255,133 +1253,6 @@ func TestContract_Clear_AllowsRebuild(t *testing.T) {
 // Save / Load round-trip
 // ---------------------------------------------------------------------------
 
-func TestContract_SaveLoad_Roundtrip(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			g := impl.new()
-			mustAddNodeG(t, g, "users:1", "users")
-			mustAddNodeG(t, g, "users:2", "users")
-			mustAddNodeG(t, g, "posts:1", "posts")
-			mustAddEdgeG(t, g, "users:1", "users:2", "FOLLOWS")
-			mustAddEdgeG(t, g, "users:1", "posts:1", "AUTHORED")
-
-			f, err := os.CreateTemp("", "contract_graph_*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-
-			if err := g.Save(f.Name()); err != nil {
-				t.Fatalf("Save: %v", err)
-			}
-
-			g2 := impl.new()
-			if err := g2.Load(f.Name()); err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-
-			if g2.NodeCount() != g.NodeCount() {
-				t.Errorf("NodeCount: want %d, got %d", g.NodeCount(), g2.NodeCount())
-			}
-			if g2.EdgeCount() != g.EdgeCount() {
-				t.Errorf("EdgeCount: want %d, got %d", g.EdgeCount(), g2.EdgeCount())
-			}
-			nb, err := g2.GetNeighbors("users:1")
-			if err != nil {
-				t.Fatalf("GetNeighbors after Load: %v", err)
-			}
-			if nb["users:2"] != "FOLLOWS" {
-				t.Error("FOLLOWS edge not preserved after Load")
-			}
-			if nb["posts:1"] != "AUTHORED" {
-				t.Error("AUTHORED edge not preserved after Load")
-			}
-			inc, _ := g2.GetIncomingEdges("users:2")
-			if inc["users:1"] != "FOLLOWS" {
-				t.Error("reverse FOLLOWS edge not preserved after Load")
-			}
-			users := g2.GetNodesByType("users")
-			if len(users) != 2 {
-				t.Errorf("type index after Load: want 2 users, got %d", len(users))
-			}
-		})
-	}
-}
-
-func TestContract_SaveLoad_Empty(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			g := impl.new()
-			f, err := os.CreateTemp("", "contract_empty_*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-
-			if err := g.Save(f.Name()); err != nil {
-				t.Fatalf("Save empty: %v", err)
-			}
-			g2 := impl.new()
-			if err := g2.Load(f.Name()); err != nil {
-				t.Fatalf("Load empty: %v", err)
-			}
-			if g2.NodeCount() != 0 || g2.EdgeCount() != 0 {
-				t.Errorf("loaded empty graph should be empty; nodes=%d edges=%d",
-					g2.NodeCount(), g2.EdgeCount())
-			}
-		})
-	}
-}
-
-func TestContract_Load_NonexistentFile_IsNoOp(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			g := impl.new()
-			// Missing file should not error and should leave graph empty.
-			if err := g.Load("/tmp/does_not_exist_contract_test.json"); err != nil {
-				t.Errorf("Load of missing file should not error: %v", err)
-			}
-			if g.NodeCount() != 0 {
-				t.Errorf("NodeCount after loading missing file: want 0, got %d", g.NodeCount())
-			}
-		})
-	}
-}
-
-func TestContract_Load_InvalidCycleDetectionMode_Errors(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			f, err := os.CreateTemp("", "olu-graph-badmode-*.json")
-			if err != nil {
-				t.Fatalf("create temp file: %v", err)
-			}
-			defer os.Remove(f.Name())
-			// Write a file with an unrecognised cycle_detection value.
-			_, _ = f.WriteString(`{"cycle_detection":"strict","nodes":{}}`)
-			f.Close()
-
-			g := impl.new()
-			if err := g.Load(f.Name()); err == nil {
-				t.Error("Load with invalid cycle_detection mode should return an error")
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // UpdateFromEntity (single-tenant path)
 // ---------------------------------------------------------------------------
@@ -1417,11 +1288,11 @@ func TestContract_UpdateFromEntity_CreatesNodeAndEdge(t *testing.T) {
 				t.Error("assets:1 node should exist")
 			}
 			nb, _ := g.GetNeighbors("assets:1")
-			if nb["asset_types:1"] != "asset_type" {
+			if nb["asset_types:1"].Rel != "asset_type" {
 				t.Errorf("edge missing; neighbors: %v", nb)
 			}
 			inc, _ := g.GetIncomingEdges("asset_types:1")
-			if inc["assets:1"] != "asset_type" {
+			if inc["assets:1"].Rel != "asset_type" {
 				t.Errorf("reverse edge missing; incoming: %v", inc)
 			}
 		})
@@ -1439,7 +1310,7 @@ func TestContract_UpdateFromEntity_MultipleRefs(t *testing.T) {
 			mustAddNodeG(t, g, "sensors:1", "sensors")
 
 			data := map[string]interface{}{
-				"asset": map[string]interface{}{"type": "REF", "entity": "assets", "id": 1},
+				"asset":  map[string]interface{}{"type": "REF", "entity": "assets", "id": 1},
 				"sensor": map[string]interface{}{"type": "REF", "entity": "sensors", "id": 1},
 			}
 			ug := g.(interface {
@@ -1452,10 +1323,10 @@ func TestContract_UpdateFromEntity_MultipleRefs(t *testing.T) {
 			if len(nb) != 2 {
 				t.Errorf("expected 2 outgoing edges, got %d: %v", len(nb), nb)
 			}
-			if nb["assets:1"] != "asset" {
+			if nb["assets:1"].Rel != "asset" {
 				t.Errorf("asset edge: got %v", nb)
 			}
-			if nb["sensors:1"] != "sensor" {
+			if nb["sensors:1"].Rel != "sensor" {
 				t.Errorf("sensor edge: got %v", nb)
 			}
 		})
@@ -1493,7 +1364,7 @@ func TestContract_UpdateFromEntity_RefChange_RemovesOldEdge(t *testing.T) {
 			if _, stillLinked := nb["asset_types:1"]; stillLinked {
 				t.Error("old edge to asset_types:1 should have been removed")
 			}
-			if nb["asset_types:2"] != "asset_type" {
+			if nb["asset_types:2"].Rel != "asset_type" {
 				t.Errorf("new edge to asset_types:2 missing; got %v", nb)
 			}
 			if g.EdgeCount() != 1 {
@@ -2055,8 +1926,8 @@ func TestContract_AddNode_MalformedID_Rejected(t *testing.T) {
 				"bad@node",
 				"@item:1",
 				"item@1",
-				"xx@item:1",     // only 2 hex chars before '@'
-				"00001@item:1",  // 5 hex chars — too long
+				"xx@item:1",    // only 2 hex chars before '@'
+				"00001@item:1", // 5 hex chars — too long
 			}
 			for _, id := range malformed {
 				if err := g.AddNode(id, "item"); err == nil {
@@ -2340,8 +2211,8 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetNeighbors after initial update: %v", err)
 			}
-			if nb[toNode] != "owns" {
-				t.Fatalf("want initial label %q, got %q", "owns", nb[toNode])
+			if nb[toNode].Rel != "owns" {
+				t.Fatalf("want initial label %q, got %q", "owns", nb[toNode].Rel)
 			}
 
 			// Sanity: edge counter is 1 before relabel.
@@ -2375,8 +2246,8 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetNeighbors after relabel: %v", err)
 			}
-			if nb[toNode] != "purchased" {
-				t.Errorf("want relabelled label %q, got %q", "purchased", nb[toNode])
+			if nb[toNode].Rel != "purchased" {
+				t.Errorf("want relabelled label %q, got %q", "purchased", nb[toNode].Rel)
 			}
 
 			// Edge count must still be 1 — relabel is not a net add.
@@ -2393,8 +2264,8 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetIncomingEdges: %v", err)
 			}
-			if in[fromNode] != "purchased" {
-				t.Errorf("want incoming label %q, got %q", "purchased", in[fromNode])
+			if in[fromNode].Rel != "purchased" {
+				t.Errorf("want incoming label %q, got %q", "purchased", in[fromNode].Rel)
 			}
 		})
 	}
@@ -2403,77 +2274,6 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Missing test #9: Load round-trip for cycleCheckLimit
 // ---------------------------------------------------------------------------
-
-// TestContract_SaveLoad_CycleCheckLimitPreserved verifies that a graph saved
-// with a custom cycleCheckLimit reloads with that value intact, and that
-// loading an older file that lacks the field preserves the runtime value
-// rather than silently reverting to the package default.
-func TestContract_SaveLoad_CycleCheckLimitPreserved(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Part A: custom limit round-trips through Save/Load.
-			g := impl.newCycle("error")
-			fg, ok := g.(*FlatGraph)
-			if !ok {
-				t.Skip("implementation is not *FlatGraph; SetCycleCheckLimit not available")
-			}
-			const customLimit = 1024
-			fg.SetCycleCheckLimit(customLimit)
-			mustAddEdgeG(t, g, "a:1", "b:1", "R")
-
-			f, err := os.CreateTemp("", "olu-graph-limit-*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-
-			if err := g.Save(f.Name()); err != nil {
-				t.Fatalf("Save: %v", err)
-			}
-
-			g2 := impl.newCycle("error")
-			fg2 := g2.(*FlatGraph)
-			if err := g2.Load(f.Name()); err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			fg2.mu.RLock()
-			got := fg2.cycleCheckLimit
-			fg2.mu.RUnlock()
-			if got != customLimit {
-				t.Errorf("cycleCheckLimit after Load: want %d, got %d", customLimit, got)
-			}
-
-			// Part B: loading an older file (no cycle_check_limit field) must
-			// preserve the runtime value, not revert to DefaultCycleCheckLimit.
-			f2, err := os.CreateTemp("", "olu-graph-oldfile-*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			_, _ = f2.WriteString(`{"cycle_detection":"error","nodes":{}}`)
-			f2.Close()
-			defer os.Remove(f2.Name())
-
-			const runtimeLimit = 2048
-			g3 := impl.newCycle("error")
-			fg3 := g3.(*FlatGraph)
-			fg3.SetCycleCheckLimit(runtimeLimit)
-			if err := g3.Load(f2.Name()); err != nil {
-				t.Fatalf("Load old file: %v", err)
-			}
-			fg3.mu.RLock()
-			got3 := fg3.cycleCheckLimit
-			fg3.mu.RUnlock()
-			if got3 != runtimeLimit {
-				t.Errorf("cycleCheckLimit after loading old file: want %d (runtime), got %d", runtimeLimit, got3)
-			}
-		})
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Missing test #10: global counter vs per-tenant counter map consistency
@@ -2660,50 +2460,6 @@ func TestContract_CycleMode_InvalidMode_FallsBackToIgnore(t *testing.T) {
 	}
 }
 
-// TestContract_Load_ConcurrentCalls_DoNotCorrupt (#4, #18)
-// Concurrent Load calls must not produce inconsistent counter state.
-func TestContract_Load_ConcurrentCalls_DoNotCorrupt(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			g := impl.new()
-			mustAddNodeG(t, g, "a:1", "a")
-			mustAddEdgeG(t, g, "a:1", "b:1", "R")
-
-			f, err := os.CreateTemp("", "olu-concurrent-load-*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-			if err := g.Save(f.Name()); err != nil {
-				t.Fatalf("Save: %v", err)
-			}
-
-			g2 := impl.new()
-			var wg sync.WaitGroup
-			for i := 0; i < 8; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					_ = g2.Load(f.Name())
-				}()
-			}
-			wg.Wait()
-
-			// After all concurrent loads the graph must be internally consistent.
-			if g2.NodeCount() != g.NodeCount() {
-				t.Errorf("NodeCount after concurrent Load: want %d, got %d", g.NodeCount(), g2.NodeCount())
-			}
-			if g2.EdgeCount() != g.EdgeCount() {
-				t.Errorf("EdgeCount after concurrent Load: want %d, got %d", g.EdgeCount(), g2.EdgeCount())
-			}
-		})
-	}
-}
-
 // TestContract_PathExists_CyclicGraph_Terminates (#19)
 // PathExists must terminate on a cyclic graph and return correct results.
 func TestContract_PathExists_CyclicGraph_Terminates(t *testing.T) {
@@ -2832,43 +2588,6 @@ func TestContract_Vode_ClearResetsCounter(t *testing.T) {
 			}
 			if g.VodeCount() != 0 {
 				t.Errorf("VodeCount after Clear: want 0, got %d", g.VodeCount())
-			}
-		})
-	}
-}
-
-// TestContract_Vode_SaveLoadRoundtrip
-// Vodes must survive a Save/Load roundtrip with their type intact.
-func TestContract_Vode_SaveLoadRoundtrip(t *testing.T) {
-	t.Parallel()
-	for _, impl := range graphImpls {
-		impl := impl
-		t.Run(impl.name, func(t *testing.T) {
-			t.Parallel()
-			g := impl.new()
-			mustAddEdgeG(t, g, "a:1", "b:1", "R")
-			mustAddNodeG(t, g, "a:1", "a") // promote a:1; b:1 remains a vode
-
-			f, err := os.CreateTemp("", "olu-vode-roundtrip-*.json")
-			if err != nil {
-				t.Fatalf("TempFile: %v", err)
-			}
-			f.Close()
-			defer os.Remove(f.Name())
-
-			if err := g.Save(f.Name()); err != nil {
-				t.Fatalf("Save: %v", err)
-			}
-			g2 := impl.new()
-			if err := g2.Load(f.Name()); err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			if g2.VodeCount() != 1 {
-				t.Errorf("VodeCount after Load: want 1, got %d", g2.VodeCount())
-			}
-			vodes := g2.GetNodesByType(NodeTypeVode)
-			if len(vodes) != 1 || vodes[0] != "b:1" {
-				t.Errorf("vode type index after Load: want [b:1], got %v", vodes)
 			}
 		})
 	}

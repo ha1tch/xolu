@@ -11,6 +11,8 @@ package server
 
 import (
 	"testing"
+
+	"github.com/ha1tch/xolu/pkg/graph"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,9 +105,9 @@ func TestStripPrefix_RoundTrip(t *testing.T) {
 
 func TestStripPrefixFromEdgeMap(t *testing.T) {
 	prefix := "0001@"
-	input := map[string]string{
-		"0001@author:1": "author_ref",
-		"0001@tag:1":    "tag_ref",
+	input := map[string]graph.EdgeRef{
+		"0001@author:1": {Rel: "author_ref"},
+		"0001@tag:1":    {Rel: "tag_ref"},
 	}
 	got := stripPrefixFromEdgeMap(prefix, input)
 
@@ -118,20 +120,19 @@ func TestStripPrefixFromEdgeMap(t *testing.T) {
 	if len(got) != 2 {
 		t.Errorf("expected 2 entries, got %d: %v", len(got), got)
 	}
-	// Relationship values must be preserved exactly.
-	if got["author:1"] != "author_ref" {
-		t.Errorf("relationship value for author:1: want %q, got %q", "author_ref", got["author:1"])
+	// Relationship label must be preserved exactly.
+	if got["author:1"].Rel != "author_ref" {
+		t.Errorf("relationship value for author:1: want %q, got %q", "author_ref", got["author:1"].Rel)
 	}
 }
 
 func TestStripPrefixFromEdgeMap_EmptyPrefix(t *testing.T) {
-	input := map[string]string{
-		"post:1": "next_ref",
+	input := map[string]graph.EdgeRef{
+		"post:1": {Rel: "next_ref"},
 	}
 	got := stripPrefixFromEdgeMap("", input)
 	// Empty prefix: must return the original map unmodified.
-	// &got == &input (same map reference) is acceptable; no assertion needed.
-	if v, ok := got["post:1"]; !ok || v != "next_ref" {
+	if v, ok := got["post:1"]; !ok || v.Rel != "next_ref" {
 		t.Errorf("empty prefix: expected map unchanged, got %v", got)
 	}
 }
@@ -141,27 +142,27 @@ func TestStripPrefixFromEdgeMap_NilAndEmpty(t *testing.T) {
 	if got := stripPrefixFromEdgeMap("0001@", nil); got != nil {
 		t.Errorf("nil map: expected nil back, got %v", got)
 	}
-	empty := map[string]string{}
+	empty := map[string]graph.EdgeRef{}
 	if got := stripPrefixFromEdgeMap("0001@", empty); len(got) != 0 {
 		t.Errorf("empty map: expected empty back, got %v", got)
 	}
 }
 
 func TestStripPrefixFromEdgeMap_RelationshipTypeNotStripped(t *testing.T) {
-	// Relationship type strings must never be altered — they are not node IDs.
-	// This test explicitly verifies that a relationship type that happens to
+	// Relationship label values must never be altered — they are not node IDs.
+	// This test explicitly verifies that a relationship label that happens to
 	// start with a tenant prefix substring is left untouched.
 	prefix := "0001@"
-	input := map[string]string{
-		"0001@post:1": "0001@weird_relationship", // bizarre but possible in theory
+	input := map[string]graph.EdgeRef{
+		"0001@post:1": {Rel: "0001@weird_relationship"}, // bizarre but possible in theory
 	}
 	got := stripPrefixFromEdgeMap(prefix, input)
 	// The key must be stripped; the value must not be.
 	if _, ok := got["post:1"]; !ok {
 		t.Error("key was not stripped")
 	}
-	if got["post:1"] != "0001@weird_relationship" {
-		t.Errorf("relationship value was incorrectly stripped: got %q", got["post:1"])
+	if got["post:1"].Rel != "0001@weird_relationship" {
+		t.Errorf("relationship value was incorrectly stripped: got %q", got["post:1"].Rel)
 	}
 }
 

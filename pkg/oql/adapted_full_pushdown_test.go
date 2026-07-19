@@ -252,13 +252,13 @@ func TestFullPD(t *testing.T) {
 }
 
 func TestFullPD_GroupByWhereHavingOrderLimit(t *testing.T) {
-env := newFullPDEnv(t)
+	env := newFullPDEnv(t)
 	// Full compound query: WHERE + GROUP BY + HAVING + ORDER BY + LIMIT
 	env.run(t, "SELECT TOP 2 region, SUM(amount), COUNT(*) FROM items WHERE quantity > 20 GROUP BY region HAVING COUNT(*) > 50 ORDER BY SUM(amount) DESC")
 }
 
 func TestFullPD_DecimalMinMax(t *testing.T) {
-// Note: the Go path compares decimal values as strings, which gives
+	// Note: the Go path compares decimal values as strings, which gives
 	// lexicographic ordering ("9.99" > "45.00"). The push-down path
 	// operates on scaled int64 columns and produces numerically correct
 	// results. This test verifies the push-down path returns reasonable
@@ -293,7 +293,7 @@ func TestFullPD_DecimalMinMax(t *testing.T) {
 }
 
 func TestFullPD_Benchmark(t *testing.T) {
-if testing.Short() {
+	if testing.Short() {
 		t.Skip("skipping benchmark in -short mode")
 	}
 

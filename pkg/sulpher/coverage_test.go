@@ -207,15 +207,19 @@ func TestJobError_Error(t *testing.T) {
 
 func TestExecute_LessThanOperator(t *testing.T) {
 	g := setupTestGraph()
-	executor := NewExecutor(g, 5)
+	store := newMockStore()
+	for i := 1; i <= 5; i++ {
+		store.set("users", i, map[string]interface{}{"id": i})
+	}
+	executor := NewExecutor(g, 5).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id < 3 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id < 3 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -227,15 +231,19 @@ func TestExecute_LessThanOperator(t *testing.T) {
 
 func TestExecute_GreaterThanOrEqual(t *testing.T) {
 	g := setupTestGraph()
-	executor := NewExecutor(g, 5)
+	store := newMockStore()
+	for i := 1; i <= 5; i++ {
+		store.set("users", i, map[string]interface{}{"id": i})
+	}
+	executor := NewExecutor(g, 5).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id >= 4 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id >= 4 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -247,15 +255,19 @@ func TestExecute_GreaterThanOrEqual(t *testing.T) {
 
 func TestExecute_LessThanOrEqual(t *testing.T) {
 	g := setupTestGraph()
-	executor := NewExecutor(g, 5)
+	store := newMockStore()
+	for i := 1; i <= 5; i++ {
+		store.set("users", i, map[string]interface{}{"id": i})
+	}
+	executor := NewExecutor(g, 5).WithStore(store)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id <= 2 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id <= 2 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -270,12 +282,12 @@ func TestExecute_NotEqual(t *testing.T) {
 	executor := NewExecutor(g, 5)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) WHERE u.id != 3 RETURN u")
+	query, hint, err := parser.Parse("MATCH (u:users) WHERE u.id != 3 RETURN u")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -290,12 +302,12 @@ func TestExecute_OrderByDesc(t *testing.T) {
 	executor := NewExecutor(g, 5)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (u:users) RETURN u ORDER BY u.id DESC")
+	query, hint, err := parser.Parse("MATCH (u:users) RETURN u ORDER BY u.id DESC")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -310,12 +322,12 @@ func TestExecute_EmptyGraphQuery(t *testing.T) {
 	executor := NewExecutor(g, 5)
 	parser := NewParser()
 
-	query, err := parser.Parse("MATCH (a:nonexistent) RETURN a")
+	query, hint, err := parser.Parse("MATCH (a:nonexistent) RETURN a")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}

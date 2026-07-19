@@ -515,7 +515,7 @@ calls `dialect.DefaultThreshold()` at construction time. Currently:
 
 If the threshold ever needs to be configurable at runtime:
 
-1. Add a `PushDownThreshold` field to the olu config struct.
+1. Add a `PushDownThreshold` field to the xolu config struct.
 2. Pass it through `NewEngine` → `NewExecutor` → `NewPlannerWithThreshold`.
 3. The planner is already designed for this — it stores `threshold int`.
 
@@ -528,5 +528,5 @@ If the threshold ever needs to be configurable at runtime:
 | JOIN push-down (all entity combinations) | **Implemented in v0.9.7-patched89–91.** All four combinations (adapted+adapted, adapted+blob, blob+adapted, blob+blob) are pushed to SQLite as a single SQL statement. See `docs/OQL_JOIN_PUSHDOWN.md` and `docs/OQL_API.md`. | — |
 | Partial WHERE push-down | e.g., push `status = 'active'` and filter `UPPER(name) = 'FOO'` in Go | v2, if mixed pushable/non-pushable queries become common |
 | Expression indexes | `CREATE INDEX ... ON entities(entity_type, json_extract(data, '$.field'))` | When any entity type regularly exceeds 50,000 records |
-| JSONFile push-down | JSONFile has no query engine | Not planned |
+
 | PostgreSQL dialect | Requires `data->>'field'`, `$N` placeholders, `CAST(... AS NUMERIC)` | When PostgreSQL storage backend is implemented |

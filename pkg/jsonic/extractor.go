@@ -149,9 +149,10 @@ func (fe *FieldExtractor) Extract(tok *Tokeniser, cs *ColumnStore) {
 					cs.Floats[spec.Atom] = append(cs.Floats[spec.Atom], v)
 				}
 			case FieldBool:
-				if tokens[i].Type == TokTrue {
+				switch tokens[i].Type {
+				case TokTrue:
 					cs.Bools[spec.Atom] = append(cs.Bools[spec.Atom], true)
-				} else if tokens[i].Type == TokFalse {
+				case TokFalse:
 					cs.Bools[spec.Atom] = append(cs.Bools[spec.Atom], false)
 				}
 			}

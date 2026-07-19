@@ -41,23 +41,23 @@ type tsEnv struct {
 
 func setupTSServer(t *testing.T, overrides func(*config.Config)) *tsEnv {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "olu-ts-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-ts-e2e-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	cfg := &config.Config{
-		Host:             "localhost",
-		Port:             0,
-		BaseDir:          tmpDir,
-		Schema:           "test_schema",
-		SchemaDir:        tmpDir + "/test_schema",
-		StorageType:      "sqlite",
-		CacheType:        "memory",
-		CacheTTL:         300,
-		MaxEntitySize:    1048576,
-		PatchNullBehavior: "store",
-		TenantMode:       "strict",
+		Host:               "localhost",
+		Port:               0,
+		BaseDir:            tmpDir,
+		Schema:             "test_schema",
+		SchemaDir:          tmpDir + "/test_schema",
+		StorageType:        "sqlite",
+		CacheType:          "memory",
+		CacheTTL:           300,
+		MaxEntitySize:      1048576,
+		PatchNullBehavior:  "store",
+		TenantMode:         "strict",
 		TenantAutoRegister: true,
 
 		// Timeseries
@@ -72,12 +72,15 @@ func setupTSServer(t *testing.T, overrides func(*config.Config)) *tsEnv {
 		TSRetentionEnabled:       false,
 
 		// Guardrails — generous defaults; individual tests override.
-		TSQueryTimeoutSecs:  30,
-		TSMaxQueryEvents:    10000,
-		TSMaxScanEvents:     500000,
-		TSMaxRangeDays:      366,
-		TSMaxBatchSize:      5000,
-		TSMaxResponseBytes:  10 * 1024 * 1024,
+		TSQueryTimeoutSecs: 30,
+		TSMaxQueryEvents:   10000,
+		TSMaxScanEvents:    500000,
+		TSMaxRangeDays:     366,
+		TSMaxBatchSize:     5000,
+		TSMaxResponseBytes: 10 * 1024 * 1024,
+
+		// Rollup
+		TSRollupCascadeDelete: true,
 	}
 
 	if overrides != nil {
@@ -87,7 +90,7 @@ func setupTSServer(t *testing.T, overrides func(*config.Config)) *tsEnv {
 	os.MkdirAll(cfg.SchemaDir, 0755)
 
 	store, err := storage.NewStore("sqlite", map[string]interface{}{
-		"db_path": tmpDir + "/olu.db",
+		"db_path": tmpDir + "/xolu.db",
 	})
 	if err != nil {
 		os.RemoveAll(tmpDir)
@@ -100,7 +103,7 @@ func setupTSServer(t *testing.T, overrides func(*config.Config)) *tsEnv {
 	validator := validation.NewJSONSchemaValidator(schemaPath)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, nil, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, nil, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	env := &tsEnv{ts: ts, srv: srv, tmpDir: tmpDir, t: t}
@@ -143,7 +146,7 @@ func (e *tsEnv) provision(tenant string) {
 // defineTimeline defines a timeline and returns its ID. Asserts 201.
 func (e *tsEnv) defineTimeline(tenant string, body map[string]interface{}) int {
 	e.t.Helper()
-	status, result := e.do("POST", e.tsURL(tenant, "/timelines"), body)
+	status, result := e.do("POST", e.tsURL(tenant, "/tl/def"), body)
 	if status != http.StatusCreated {
 		e.t.Fatalf("defineTimeline: got %d: %v", status, result)
 	}
@@ -180,7 +183,7 @@ func TestTSE2E_HappyPath(t *testing.T) {
 	})
 
 	// Verify it appears in the list.
-	listStatus, timelines := doJSONArray(t, "GET", env.tsURL(tenant, "/timelines"), nil)
+	listStatus, timelines := doJSONArray(t, "GET", env.tsURL(tenant, "/tl/list"), nil)
 	if listStatus != http.StatusOK {
 		t.Fatalf("list timelines: got %d", listStatus)
 	}
@@ -343,7 +346,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	})
 
 	// Get.
-	status, result := env.do("GET", env.tsURL("corp", "/timelines/5"), nil)
+	status, result := env.do("GET", env.tsURL("corp", "/tl/5"), nil)
 	if status != http.StatusOK {
 		t.Fatalf("get timeline: %d: %v", status, result)
 	}
@@ -352,7 +355,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	}
 
 	// Update name.
-	status, result = env.do("PATCH", env.tsURL("corp", "/timelines/5"), map[string]interface{}{
+	status, result = env.do("PATCH", env.tsURL("corp", "/tl/5"), map[string]interface{}{
 		"name": "vib-updated",
 	})
 	if status != http.StatusOK {
@@ -360,7 +363,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	}
 
 	// Verify update.
-	_, result = env.do("GET", env.tsURL("corp", "/timelines/5"), nil)
+	_, result = env.do("GET", env.tsURL("corp", "/tl/5"), nil)
 	if result["name"] != "vib-updated" {
 		t.Errorf("after patch: name %q, want vib-updated", result["name"])
 	}
@@ -373,7 +376,7 @@ func TestTSE2E_TimelineLifecycle(t *testing.T) {
 	})
 
 	// Attempt to redefine with different dims — must fail.
-	status, _ = env.do("POST", env.tsURL("corp", "/timelines"), map[string]interface{}{
+	status, _ = env.do("POST", env.tsURL("corp", "/tl/def"), map[string]interface{}{
 		"id": 5, "dims": 3,
 	})
 	if status == http.StatusCreated {
@@ -577,9 +580,9 @@ func TestTSE2E_AggregateWindowed(t *testing.T) {
 func TestTSE2E_UnprovisionedTenant(t *testing.T) {
 	env := setupTSServer(t, nil)
 	// Register the tenant so the middleware passes, but do NOT call provision —
-	// the TS handler should return OLU-TS003 (not provisioned for timeseries).
+	// the TS handler should return XOLU-TS003 (not provisioned for timeseries).
 	env.registerTenant("ghost")
-	status, result := env.do("POST", env.tsURL("ghost", "/timelines"), map[string]interface{}{
+	status, result := env.do("POST", env.tsURL("ghost", "/tl/def"), map[string]interface{}{
 		"id": 1, "dims": 1,
 	})
 	if status == http.StatusCreated {
@@ -587,8 +590,8 @@ func TestTSE2E_UnprovisionedTenant(t *testing.T) {
 	}
 	errObj, _ := result["error"].(map[string]interface{})
 	code, _ := errObj["code"].(string)
-	if code != "OLU-TS003" {
-		t.Errorf("expected OLU-TS003 for unprovisioned tenant, got %q", code)
+	if code != "XOLU-TS003" {
+		t.Errorf("expected XOLU-TS003 for unprovisioned tenant, got %q", code)
 	}
 }
 
@@ -675,4 +678,298 @@ func doJSONRequest(t *testing.T, method, url string, body interface{}) (int, map
 	var out map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&out)
 	return resp.StatusCode, out
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the three new endpoints
+// ---------------------------------------------------------------------------
+
+// TestTSRangeAggregate verifies that POST /ts/range_aggregate returns correct
+// statistics for all seven numeric fields in a single pass.
+func TestTSRangeAggregate(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("acme")
+	e.provision("acme")
+
+	e.defineTimeline("acme", map[string]interface{}{
+		"id":   1,
+		"dims": 1,
+		"name": "sensors",
+	})
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Append 3 events with known numeric values across num fields 0 and 1.
+	for i, nums := range [][]float64{
+		{10.0, 20.0},
+		{20.0, 40.0},
+		{30.0, 60.0},
+	} {
+		e.appendEvent("acme", map[string]interface{}{
+			"timeline": 1,
+			"dims":     []uint64{uint64(i + 1)},
+			"time":     base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			"nums":     nums,
+		})
+	}
+
+	status, result := e.do("POST", e.tsURL("acme", "/range_aggregate"), map[string]interface{}{
+		"timeline": 1,
+		"dims":     []uint64{1},
+		"from":     base.Add(-time.Minute).Format(time.RFC3339),
+		"to":       base.Add(time.Hour).Format(time.RFC3339),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("range_aggregate: got %d: %v", status, result)
+	}
+
+	// count must be 1 (only dim [1] matched; we used dims [1], [2], [3])
+	count, _ := result["count"].(float64)
+	if count != 1 {
+		t.Errorf("range_aggregate: expected count=1 (single dim prefix match), got %v", count)
+	}
+
+	// fields[0] must be true
+	fields, _ := result["fields"].([]interface{})
+	if len(fields) < 1 || fields[0] != true {
+		t.Errorf("range_aggregate: expected fields[0]=true, got %v", fields)
+	}
+
+	// sums[0] must be 10.0 (only event for dim 1)
+	sums, _ := result["sums"].([]interface{})
+	if len(sums) < 1 {
+		t.Fatalf("range_aggregate: sums missing")
+	}
+	if sums[0].(float64) != 10.0 {
+		t.Errorf("range_aggregate: expected sums[0]=10.0, got %v", sums[0])
+	}
+}
+
+// TestTSRangeAggregate_AllDims queries all events by supplying dim prefix [0]
+// — but with full dims=1, so we must query each dim individually. Instead,
+// use a prefix-1 approach: dims=[1] prefix on a timeline with dims=2.
+func TestTSRangeAggregate_MultiField(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("beta")
+	e.provision("beta")
+
+	// Timeline with 1 dim so all events can be reached with a single dim prefix.
+	e.defineTimeline("beta", map[string]interface{}{
+		"id":   2,
+		"dims": 1,
+		"name": "multi",
+	})
+
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	// 3 events, same dim=1, varying fields 0–2.
+	for i := 0; i < 3; i++ {
+		e.appendEvent("beta", map[string]interface{}{
+			"timeline": 2,
+			"dims":     []uint64{1},
+			"time":     base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			"nums":     []float64{float64(i + 1), float64((i + 1) * 10), float64((i + 1) * 100)},
+		})
+	}
+
+	status, result := e.do("POST", e.tsURL("beta", "/range_aggregate"), map[string]interface{}{
+		"timeline": 2,
+		"dims":     []uint64{1},
+		"from":     base.Add(-time.Minute).Format(time.RFC3339),
+		"to":       base.Add(time.Hour).Format(time.RFC3339),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("range_aggregate multi-field: got %d: %v", status, result)
+	}
+
+	count, _ := result["count"].(float64)
+	if count != 3 {
+		t.Errorf("expected count=3, got %v", count)
+	}
+	sums, _ := result["sums"].([]interface{})
+	if len(sums) < 3 {
+		t.Fatalf("sums too short: %v", sums)
+	}
+	// sums[0] = 1+2+3 = 6
+	if sums[0].(float64) != 6.0 {
+		t.Errorf("sums[0]: expected 6.0, got %v", sums[0])
+	}
+	// sums[1] = 10+20+30 = 60
+	if sums[1].(float64) != 60.0 {
+		t.Errorf("sums[1]: expected 60.0, got %v", sums[1])
+	}
+	// sums[2] = 100+200+300 = 600
+	if sums[2].(float64) != 600.0 {
+		t.Errorf("sums[2]: expected 600.0, got %v", sums[2])
+	}
+}
+
+// TestTSPatchRetention verifies that PATCH /ts/retention updates the store-level
+// default and that GET /ts/retention reflects the change.
+func TestTSPatchRetention(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("corp")
+	e.provision("corp")
+
+	// GET initial retention
+	status, result := e.do("GET", e.tsURL("corp", "/retention"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET retention: %d %v", status, result)
+	}
+	initial, _ := result["default_retention_days"].(float64)
+
+	// PATCH to a new value
+	newDays := int(initial) + 45
+	status, result = e.do("PATCH", e.tsURL("corp", "/retention"), map[string]interface{}{
+		"default_retention_days": newDays,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH retention: got %d: %v", status, result)
+	}
+	if result["status"] != "updated" {
+		t.Errorf("PATCH retention: expected status=updated, got %v", result["status"])
+	}
+
+	// GET again — must reflect the new value
+	status, result = e.do("GET", e.tsURL("corp", "/retention"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET retention after PATCH: %d %v", status, result)
+	}
+	updated, _ := result["default_retention_days"].(float64)
+	if int(updated) != newDays {
+		t.Errorf("GET retention: expected %d, got %v", newDays, updated)
+	}
+}
+
+// TestTSFullAggregate_NoQuantiles verifies that full_aggregate without quantiles
+// behaves identically to range_aggregate.
+func TestTSFullAggregate_NoQuantiles(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("qa")
+	e.provision("qa")
+
+	e.defineTimeline("qa", map[string]interface{}{
+		"id": 3, "dims": 1, "name": "full-no-q",
+	})
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		e.appendEvent("qa", map[string]interface{}{
+			"timeline": 3,
+			"dims":     []uint64{1},
+			"time":     base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			"nums":     []float64{float64(i + 1)},
+		})
+	}
+	window := map[string]interface{}{
+		"timeline": 3,
+		"dims":     []uint64{1},
+		"from":     base.Add(-time.Minute).Format(time.RFC3339),
+		"to":       base.Add(time.Hour).Format(time.RFC3339),
+	}
+
+	// range_aggregate
+	_, ra := e.do("POST", e.tsURL("qa", "/range_aggregate"), window)
+	// full_aggregate (no quantiles field)
+	_, fa := e.do("POST", e.tsURL("qa", "/full_aggregate"), window)
+
+	raCount, _ := ra["count"].(float64)
+	faCount, _ := fa["count"].(float64)
+	if raCount != faCount {
+		t.Errorf("count mismatch: range_aggregate=%v full_aggregate=%v", raCount, faCount)
+	}
+	raSums, _ := ra["sums"].([]interface{})
+	faSums, _ := fa["sums"].([]interface{})
+	if len(raSums) == 0 || len(faSums) == 0 || raSums[0] != faSums[0] {
+		t.Errorf("sums[0] mismatch: range_aggregate=%v full_aggregate=%v", raSums, faSums)
+	}
+}
+
+// TestTSFullAggregate_WithQuantiles verifies that full_aggregate returns
+// quantile estimates when requested.
+func TestTSFullAggregate_WithQuantiles(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("qb")
+	e.provision("qb")
+
+	e.defineTimeline("qb", map[string]interface{}{
+		"id": 4, "dims": 1, "name": "full-with-q",
+	})
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	// 100 events with nums[0] = 1..100
+	for i := 0; i < 100; i++ {
+		e.appendEvent("qb", map[string]interface{}{
+			"timeline": 4,
+			"dims":     []uint64{1},
+			"time":     base.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+			"nums":     []float64{float64(i + 1)},
+		})
+	}
+
+	status, result := e.do("POST", e.tsURL("qb", "/full_aggregate"), map[string]interface{}{
+		"timeline":        4,
+		"dims":            []uint64{1},
+		"from":            base.Add(-time.Minute).Format(time.RFC3339),
+		"to":              base.Add(time.Hour).Format(time.RFC3339),
+		"quantiles":       []float64{0.5, 0.9},
+		"quantile_fields": []int{0},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("full_aggregate with quantiles: %d %v", status, result)
+	}
+
+	count, _ := result["count"].(float64)
+	if count != 100 {
+		t.Errorf("expected count=100, got %v", count)
+	}
+
+	// quantiles[0] must be present (field 0 was requested)
+	quantiles, _ := result["quantiles"].([]interface{})
+	if len(quantiles) < 1 {
+		t.Fatalf("quantiles array missing or empty")
+	}
+	field0Qs, ok := quantiles[0].([]interface{})
+	if !ok || len(field0Qs) != 2 {
+		t.Fatalf("quantiles[0] should have 2 estimates (P50, P90), got %v", quantiles[0])
+	}
+
+	// P50 of 1..100 is ~50; P90 is ~90. t-digest is approximate; check order only.
+	p50, _ := field0Qs[0].(float64)
+	p90, _ := field0Qs[1].(float64)
+	if p50 >= p90 {
+		t.Errorf("expected P50 < P90, got P50=%v P90=%v", p50, p90)
+	}
+	if p50 < 40 || p50 > 60 {
+		t.Errorf("P50 of 1..100 expected ~50, got %v", p50)
+	}
+	if p90 < 80 || p90 > 100 {
+		t.Errorf("P90 of 1..100 expected ~90, got %v", p90)
+	}
+
+	// quantiles[1]..quantiles[6] must all be nil (not requested)
+	for i := 1; i < len(quantiles) && i < 7; i++ {
+		if quantiles[i] != nil {
+			t.Errorf("quantiles[%d] should be nil (not requested), got %v", i, quantiles[i])
+		}
+	}
+}
+
+// TestTSFullAggregate_InvalidQuantile verifies that a quantile value outside
+// [0, 1] returns a 400 error.
+func TestTSFullAggregate_InvalidQuantile(t *testing.T) {
+	e := setupTSServer(t, nil)
+	e.registerTenant("qc")
+	e.provision("qc")
+
+	e.defineTimeline("qc", map[string]interface{}{
+		"id": 5, "dims": 1, "name": "invalid-q",
+	})
+	status, _ := e.do("POST", e.tsURL("qc", "/full_aggregate"), map[string]interface{}{
+		"timeline":  5,
+		"dims":      []uint64{1},
+		"from":      "2026-01-01T00:00:00Z",
+		"to":        "2026-01-02T00:00:00Z",
+		"quantiles": []float64{1.5}, // out of range
+	})
+	if status != http.StatusBadRequest {
+		t.Errorf("expected 400 for quantile out of range, got %d", status)
+	}
 }

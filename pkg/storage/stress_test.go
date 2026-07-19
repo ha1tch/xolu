@@ -39,7 +39,7 @@ const (
 func setupStressTest(t *testing.T) (storage.Store, func()) {
 	t.Helper()
 
-	tmpFile, err := os.CreateTemp("", "olu-stress-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-stress-*.db")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestStress_MixedWorkload(t *testing.T) {
 
 // BenchmarkStress provides benchmark versions for CI integration
 func BenchmarkStress_PointRead_10k(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -408,7 +408,7 @@ func BenchmarkStress_PointRead_10k(b *testing.B) {
 }
 
 func BenchmarkStress_Update_10k(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)
@@ -437,7 +437,7 @@ func BenchmarkStress_Update_10k(b *testing.B) {
 }
 
 func BenchmarkStress_Search_10k(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-*.db")
 	tmpFile.Close()
 	dbPath := tmpFile.Name()
 	defer os.Remove(dbPath)

@@ -105,13 +105,211 @@ func ScopeKey(tenantID uint16, key string) string {
 	return fmt.Sprintf("%04X:%s", tenantID, key)
 }
 
-// GraphEdgesTableName returns the SQLite table name used to store graph edges
-// for a given tenant. All tenants, including tenant 0, get their own table.
-// The name is "graph_tXXXX" where XXXX is the zero-padded hex tenant ID,
-// e.g. "graph_t0000" for tenant 0, "graph_t0001" for tenant 1.
-func GraphEdgesTableName(tenantID uint16) string {
-	return fmt.Sprintf("graph_t%04X", tenantID)
+// ---------------------------------------------------------------------------
+// SQLite table naming — per-tenant table family
+// ---------------------------------------------------------------------------
+//
+// All per-tenant tables follow the prefix convention:
+//
+//   t<XXXX>_<family>           — single-table families
+//   t<XXXX>_<family>_<name>   — multi-table families (adapted tables)
+//
+// where XXXX is the zero-padded uppercase hex tenant ID.
+//
+// Full table family for tenant 0001:
+//
+//   t0001_graph           — topology (source, target, relationship, edge_id)
+//   t0001_nodes           — blob node store (formerly: entities)
+//   t0001_edges           — blob edge property store
+//   t0001_n_sch           — node schema + adaptation registry
+//   t0001_e_sch           — edge schema + adaptation registry
+//   t0001_ndata_user      — adapted node entity (native columns)
+//   t0001_edata_KNOWS     — adapted edge label (native columns)
+//
+// Tenant 0 (unscoped) uses the same naming: t0000_nodes, t0000_graph, etc.
+// This keeps all storage tables in one namespace regardless of mode.
+
+func tablePrefix(tenantID uint16) string {
+	return fmt.Sprintf("t%04X", tenantID)
 }
+
+// GraphTableName returns the topology table name for a tenant.
+// Stores directed edges as (source_entity, source_id, target_entity, target_id,
+// relationship_name, edge_id).
+// Example: t0001_graph
+func GraphTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_graph"
+}
+
+// GraphEdgesTableName is the legacy name for GraphTableName.
+// Deprecated: use GraphTableName. Retained for the migration command only.
+func GraphEdgesTableName(tenantID uint16) string {
+	return GraphTableName(tenantID)
+}
+
+// NodesTableName returns the blob node store table name for a tenant.
+// Replaces the global shared-mode `entities` table.
+// Example: t0001_nodes
+func NodesTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_nodes"
+}
+
+// NodeSeqTableName returns the node ID sequence table name for a tenant.
+// Replaces the global shared-mode `entity_sequences` table.
+// Example: t0001_nseq
+func NodeSeqTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_nseq"
+}
+
+// NodeFTSTableName returns the node full-text search virtual table name for a tenant.
+// Replaces the global shared-mode `entities_fts` virtual table.
+// Example: t0001_nfts
+func NodeFTSTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_nfts"
+}
+
+// EdgePropsTableName returns the blob edge property store table name for a tenant.
+// Stores JSON property blobs for edges whose label has no registered schema.
+// Example: t0001_edges
+func EdgePropsTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_edges"
+}
+
+// EdgeSeqTableName returns the edge ID sequence table name for a tenant.
+// Provides explicit control over surrogate edge ID assignment, consistent
+// with NodeSeqTableName. One row per relationship label per tenant.
+// Example: t0001_eseq
+func EdgeSeqTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_eseq"
+}
+
+// NodeSchemaTableName returns the node schema registry table name for a tenant.
+// Stores both the raw JSON schema and the derived adapted-table column spec.
+// Replaces the global `schemas` and `adapted_table_schemas` tables.
+// Example: t0001_n_sch
+func NodeSchemaTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_n_sch"
+}
+
+// EdgeSchemaTableName returns the edge schema registry table name for a tenant.
+// Stores the raw JSON schema, derived column spec, and warning-suppression flag
+// for each relationship label.
+// Example: t0001_e_sch
+func EdgeSchemaTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_e_sch"
+}
+
+// AdaptedNodeTableName returns the adapted native-column table name for a
+// schema-registered node entity type.
+// Example: t0001_ndata_user, t0001_ndata_user_profile
+func AdaptedNodeTableName(tenantID uint16, entityType string) string {
+	return tablePrefix(tenantID) + "_ndata_" + entityType
+}
+
+// AdaptedEdgeTableName returns the adapted native-column table name for a
+// schema-registered edge label.
+// Example: t0001_edata_KNOWS, t0001_edata_MEMBER_OF
+func AdaptedEdgeTableName(tenantID uint16, relType string) string {
+	return tablePrefix(tenantID) + "_edata_" + relType
+}
+
+// ---------------------------------------------------------------------------
+// Index naming — per-tenant indexes on per-tenant tables
+// ---------------------------------------------------------------------------
+//
+// SQLite index names are global within a database file. In shared-file mode
+// where t0000_nodes and t0001_nodes coexist, every index must encode both
+// the table name (which already encodes the tenant) to avoid collisions.
+// The convention is: idx_<tableName>_<purpose>
+//
+// These functions derive index names from the table name functions above,
+// so the index naming is always consistent with the table naming.
+
+// NodesIndexEntityType returns the index name for entity_type lookups on t<X>_nodes.
+// Example: idx_t0001_nodes_etype
+func NodesIndexEntityType(tenantID uint16) string {
+	return "idx_" + NodesTableName(tenantID) + "_etype"
+}
+
+// NodesIndexUpdatedAt returns the index name for updated_at ordering on t<X>_nodes.
+// Example: idx_t0001_nodes_updated
+func NodesIndexUpdatedAt(tenantID uint16) string {
+	return "idx_" + NodesTableName(tenantID) + "_updated"
+}
+
+// NodeSeqIndexEntityType returns the index on t<X>_nseq (the PK already covers this,
+// but an explicit name is needed for migration assertions).
+// Example: idx_t0001_nseq_etype
+func NodeSeqIndexEntityType(tenantID uint16) string {
+	return "idx_" + NodeSeqTableName(tenantID) + "_etype"
+}
+
+// EdgeSeqIndexRelType returns the index on t<X>_eseq.
+// Example: idx_t0001_eseq_rel
+func EdgeSeqIndexRelType(tenantID uint16) string {
+	return "idx_" + EdgeSeqTableName(tenantID) + "_rel"
+}
+
+// GraphIndexSource returns the index name for source-side lookups on t<X>_graph.
+// Example: idx_t0001_graph_src
+func GraphIndexSource(tenantID uint16) string {
+	return "idx_" + GraphTableName(tenantID) + "_src"
+}
+
+// GraphIndexTarget returns the index name for target-side lookups on t<X>_graph.
+// Example: idx_t0001_graph_tgt
+func GraphIndexTarget(tenantID uint16) string {
+	return "idx_" + GraphTableName(tenantID) + "_tgt"
+}
+
+// GraphIndexRel returns the index name for relationship_name lookups on t<X>_graph.
+// Example: idx_t0001_graph_rel
+func GraphIndexRel(tenantID uint16) string {
+	return "idx_" + GraphTableName(tenantID) + "_rel"
+}
+
+// AdaptedNodeIndexTenant returns the tenant index name on an adapted node table.
+// Example: idx_t0001_ndata_user_tenant
+func AdaptedNodeIndexTenant(tenantID uint16, entityType string) string {
+	return "idx_" + AdaptedNodeTableName(tenantID, entityType) + "_tenant"
+}
+
+// AdaptedNodeIndexField returns a field index name on an adapted node table.
+// Example: idx_t0001_ndata_user_email
+func AdaptedNodeIndexField(tenantID uint16, entityType, field string) string {
+	return "idx_" + AdaptedNodeTableName(tenantID, entityType) + "_" + field
+}
+
+// AdaptedEdgeIndexField returns a field index name on an adapted edge table.
+// Example: idx_t0001_edata_KNOWS_since
+func AdaptedEdgeIndexField(tenantID uint16, relType, field string) string {
+	return "idx_" + AdaptedEdgeTableName(tenantID, relType) + "_" + field
+}
+
+// EdgeFTSTableName returns the edge full-text search virtual table name for
+// a tenant. Used when edge properties carry free-text content that needs
+// full-text search — e.g. a contract document on a MARRIED_TO relationship,
+// a clinical note on a TREATS relationship, or a lease agreement on LEASES.
+// Example: t0001_efts
+func EdgeFTSTableName(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_efts"
+}
+
+// ---------------------------------------------------------------------------
+// Global (non-tenant-scoped) table names
+// ---------------------------------------------------------------------------
+//
+// These tables are created once per database file and are not scoped to any
+// tenant. They do not follow the t<XXXX>_ convention because they are owned
+// by the database itself, not by any tenant.
+
+const (
+	// TenantsTable is the tenant registry table. One per database file.
+	TenantsTable = "tenants"
+
+	// SchemaVersionTable tracks applied migrations. One per database file.
+	SchemaVersionTable = "schema_version"
+)
 
 // CacheKey returns a cache key scoped to a tenant.
 // For tenant 0 (unscoped): "entity:id"
@@ -384,4 +582,52 @@ func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.byName)
+}
+
+// ---------------------------------------------------------------------------
+// Element kinds
+// ---------------------------------------------------------------------------
+//
+// ElementKind identifies the fundamental kind of a graph element. Both nodes
+// and edges implement the Element interface; Vode is a third kind representing
+// a forward-reference placeholder node created implicitly by AddEdge when the
+// target entity has not yet been written.
+
+// ElementKind is the fundamental kind of a graph element.
+type ElementKind uint8
+
+const (
+	// ElementNode is a real node with a confirmed entity type and property store.
+	// Properties live in t<X>_nodes (blob) or t<X>_ndata_<label> (adapted).
+	ElementNode ElementKind = iota
+
+	// ElementEdge is a directed relationship between two nodes.
+	// Properties live in t<X>_edges (blob) or t<X>_edata_<label> (adapted).
+	ElementEdge
+
+	// ElementVode is a forward-reference placeholder node created implicitly
+	// by AddEdge when the target entity has not yet been written. A Vode has
+	// topology (it exists in t<X>_graph adjacency) but no property store entry.
+	// Its label is always NodeTypeVode ("__vode__"). Vodes are promoted to real
+	// nodes when the entity data arrives; a non-zero Vode count at the end of
+	// hydration indicates dangling references.
+	//
+	// Hydration must short-circuit for Vodes: there is no property row to fetch.
+	// Query results that include Vodes should be excluded or flagged rather than
+	// returned with empty property maps.
+	ElementVode
+)
+
+// String returns a human-readable name for the ElementKind.
+func (k ElementKind) String() string {
+	switch k {
+	case ElementNode:
+		return "node"
+	case ElementEdge:
+		return "edge"
+	case ElementVode:
+		return "vode"
+	default:
+		return "unknown"
+	}
 }

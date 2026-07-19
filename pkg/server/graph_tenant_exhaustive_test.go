@@ -86,12 +86,12 @@ func seedBlogFixture(t *testing.T, s *Server) {
 	seedGraphEntity(t, s, "alpha", "author", 2, map[string]interface{}{"name": "Bob"})
 	seedGraphEntity(t, s, "alpha", "tag", 1, map[string]interface{}{"label": "go"})
 	seedGraphEntity(t, s, "alpha", "post", 1, map[string]interface{}{
-		"title":      "olu intro",
+		"title":      "xolu intro",
 		"author_ref": map[string]interface{}{"type": "REF", "entity": "author", "id": 1},
 		"tag_ref":    map[string]interface{}{"type": "REF", "entity": "tag", "id": 1},
 	})
 	seedGraphEntity(t, s, "alpha", "post", 2, map[string]interface{}{
-		"title":      "graphs in olu",
+		"title":      "graphs in xolu",
 		"author_ref": map[string]interface{}{"type": "REF", "entity": "author", "id": 2},
 	})
 	seedGraphEntity(t, s, "alpha", "post", 3, map[string]interface{}{

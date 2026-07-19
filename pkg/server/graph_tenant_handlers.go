@@ -22,16 +22,13 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	oluerr "github.com/ha1tch/xolu/pkg/errors"
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/xolu/pkg/sulpher"
 	"github.com/ha1tch/xolu/pkg/tenant"
@@ -54,14 +51,14 @@ func stripPrefix(prefix, nodeID string) string {
 }
 
 // stripPrefixFromEdgeMap strips the tenant prefix from the keys of a
-// neighbor map (map[nodeID]relationship).
-func stripPrefixFromEdgeMap(prefix string, m map[string]string) map[string]string {
+// neighbor map (map[nodeID]EdgeRef).
+func stripPrefixFromEdgeMap(prefix string, m map[string]graph.EdgeRef) map[string]graph.EdgeRef {
 	if prefix == "" || len(m) == 0 {
 		return m
 	}
-	result := make(map[string]string, len(m))
-	for nodeID, rel := range m {
-		result[stripPrefix(prefix, nodeID)] = rel
+	result := make(map[string]graph.EdgeRef, len(m))
+	for nodeID, ref := range m {
+		result[stripPrefix(prefix, nodeID)] = ref
 	}
 	return result
 }
@@ -116,11 +113,11 @@ func (s *Server) guardSlice(prefix string, nodes []string, context string) []str
 // delete idiom is safe only when the caller passes a freshly-allocated map
 // (e.g. from stripPrefixFromEdgeMap), but that contract is invisible at call
 // sites and easy to violate, so we allocate defensively.
-func (s *Server) guardEdgeMap(prefix string, m map[string]string, context string) map[string]string {
+func (s *Server) guardEdgeMap(prefix string, m map[string]graph.EdgeRef, context string) map[string]graph.EdgeRef {
 	if prefix == "" {
 		return m
 	}
-	clean := make(map[string]string, len(m))
+	clean := make(map[string]graph.EdgeRef, len(m))
 	for k, v := range m {
 		if strings.Contains(k, "@") {
 			s.logger.Warn().
@@ -135,11 +132,32 @@ func (s *Server) guardEdgeMap(prefix string, m map[string]string, context string
 	return clean
 }
 
+// guardRelMap is the map[string]string variant of guardEdgeMap, used for
+// NodeInfo.Outgoing / NodeInfo.Incoming which carry plain rel-label strings.
+func (s *Server) guardRelMap(prefix string, m map[string]string, context string) map[string]string {
+	if prefix == "" {
+		return m
+	}
+	clean := make(map[string]string, len(m))
+	for k, v := range m {
+		if strings.Contains(k, "@") {
+			s.logger.Warn().
+				Str("tenant_prefix", prefix).
+				Str("foreign_node", k).
+				Str("context", context).
+				Msg("cross-tenant node detected in REST handler rel map — excluding from response")
+			continue
+		}
+		clean[k] = v
+	}
+	return clean
+}
+
 // handleTenantGraphStats returns graph statistics for a specific tenant.
 // GET /api/v1/tenant/{tenant_id}/graph/stats
 func (s *Server) handleTenantGraphStats(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -148,12 +166,12 @@ func (s *Server) handleTenantGraphStats(w http.ResponseWriter, r *http.Request) 
 
 	nodeCount, err := s.graph.NodeCountForTenant(prefix)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrTenantRequired, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTenantRequired, err.Error())
 		return
 	}
 	edgeCount, err := s.graph.EdgeCountForTenant(prefix)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrTenantRequired, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTenantRequired, err.Error())
 		return
 	}
 
@@ -168,13 +186,13 @@ func (s *Server) handleTenantGraphStats(w http.ResponseWriter, r *http.Request) 
 // GET /api/v1/tenant/{tenant_id}/graph/nodes/{node_id}
 func (s *Server) handleTenantGraphNodeInfo(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	nodeID := chi.URLParam(r, "node_id")
 	if nodeID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_id required")
 		return
 	}
 
@@ -184,7 +202,7 @@ func (s *Server) handleTenantGraphNodeInfo(w http.ResponseWriter, r *http.Reques
 
 	info, err := s.graph.GetNodeInfo(internalID)
 	if err != nil {
-		s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound, err.Error())
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound, err.Error())
 		return
 	}
 
@@ -192,8 +210,18 @@ func (s *Server) handleTenantGraphNodeInfo(w http.ResponseWriter, r *http.Reques
 	// GetNodeInfo already strips the XXXX@ prefix from Entity internally,
 	// so only info.ID and the edge maps need cleaning here.
 	info.ID = stripPrefix(prefix, info.ID)
-	info.Outgoing = s.guardEdgeMap(prefix, stripPrefixFromEdgeMap(prefix, info.Outgoing), "nodeInfo/outgoing")
-	info.Incoming = s.guardEdgeMap(prefix, stripPrefixFromEdgeMap(prefix, info.Incoming), "nodeInfo/incoming")
+	if prefix != "" {
+		stripped := make(map[string]string, len(info.Outgoing))
+		for k, v := range info.Outgoing {
+			stripped[stripPrefix(prefix, k)] = v
+		}
+		info.Outgoing = s.guardRelMap(prefix, stripped, "nodeInfo/outgoing")
+		stripped = make(map[string]string, len(info.Incoming))
+		for k, v := range info.Incoming {
+			stripped[stripPrefix(prefix, k)] = v
+		}
+		info.Incoming = s.guardRelMap(prefix, stripped, "nodeInfo/incoming")
+	}
 	s.writeJSON(w, http.StatusOK, info)
 }
 
@@ -201,13 +229,13 @@ func (s *Server) handleTenantGraphNodeInfo(w http.ResponseWriter, r *http.Reques
 // GET /api/v1/tenant/{tenant_id}/graph/nodes/{node_id}/degree
 func (s *Server) handleTenantGraphNodeDegree(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	nodeID := chi.URLParam(r, "node_id")
 	if nodeID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_id required")
 		return
 	}
 
@@ -232,7 +260,7 @@ func (s *Server) handleTenantGraphNodeDegree(w http.ResponseWriter, r *http.Requ
 				}
 			}
 		}
-		s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound, err.Error())
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound, err.Error())
 		return
 	}
 
@@ -246,13 +274,13 @@ func (s *Server) handleTenantGraphNodeDegree(w http.ResponseWriter, r *http.Requ
 // GET /api/v1/tenant/{tenant_id}/graph/{node_id}/in
 func (s *Server) handleTenantGraphIncoming(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	nodeID := chi.URLParam(r, "node_id")
 	if nodeID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_id required")
 		return
 	}
 
@@ -262,12 +290,12 @@ func (s *Server) handleTenantGraphIncoming(w http.ResponseWriter, r *http.Reques
 
 	incoming, err := s.graph.GetIncomingEdges(internalID)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, err.Error())
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
 	}
 
 	edges := make([]map[string]string, 0, len(incoming))
-	for source, relationship := range incoming {
+	for source, ref := range incoming {
 		cleanSource := stripPrefix(prefix, source)
 		if prefix != "" && strings.Contains(cleanSource, "@") {
 			s.logger.Warn().
@@ -280,7 +308,7 @@ func (s *Server) handleTenantGraphIncoming(w http.ResponseWriter, r *http.Reques
 		edges = append(edges, map[string]string{
 			"source":       cleanSource,
 			"target":       nodeID,
-			"relationship": relationship,
+			"relationship": ref.Rel,
 		})
 	}
 
@@ -295,13 +323,13 @@ func (s *Server) handleTenantGraphIncoming(w http.ResponseWriter, r *http.Reques
 // GET /api/v1/tenant/{tenant_id}/graph/{node_id}/out
 func (s *Server) handleTenantGraphOutgoing(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	nodeID := chi.URLParam(r, "node_id")
 	if nodeID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_id required")
 		return
 	}
 
@@ -311,12 +339,12 @@ func (s *Server) handleTenantGraphOutgoing(w http.ResponseWriter, r *http.Reques
 
 	outgoing, err := s.graph.GetNeighbors(internalID)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, err.Error())
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
 	}
 
 	edges := make([]map[string]string, 0, len(outgoing))
-	for target, relationship := range outgoing {
+	for target, ref := range outgoing {
 		cleanTarget := stripPrefix(prefix, target)
 		if prefix != "" && strings.Contains(cleanTarget, "@") {
 			s.logger.Warn().
@@ -329,7 +357,7 @@ func (s *Server) handleTenantGraphOutgoing(w http.ResponseWriter, r *http.Reques
 		edges = append(edges, map[string]string{
 			"source":       nodeID,
 			"target":       cleanTarget,
-			"relationship": relationship,
+			"relationship": ref.Rel,
 		})
 	}
 
@@ -360,7 +388,7 @@ func (s *Server) tenantPathResult(prefix string, path []string, context string) 
 // POST /api/v1/tenant/{tenant_id}/graph/path
 func (s *Server) handleTenantGraphPath(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -373,7 +401,7 @@ func (s *Server) handleTenantGraphPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.From == "" || req.To == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "from and to are required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "from and to are required")
 		return
 	}
 	if req.MaxDepth <= 0 {
@@ -385,7 +413,7 @@ func (s *Server) handleTenantGraphPath(w http.ResponseWriter, r *http.Request) {
 
 	path, err := s.graph.FindPath(addPrefix(prefix, req.From), addPrefix(prefix, req.To), req.MaxDepth)
 	if err != nil {
-		s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound, err.Error())
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound, err.Error())
 		return
 	}
 
@@ -402,7 +430,7 @@ func (s *Server) handleTenantGraphPath(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/tenant/{tenant_id}/graph/neighbors
 func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -414,14 +442,14 @@ func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if req.NodeID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_id required")
 		return
 	}
 	if req.Direction == "" {
 		req.Direction = "out"
 	}
 	if req.Direction != "out" && req.Direction != "in" && req.Direction != "both" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, `direction must be "out", "in", or "both"`)
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, `direction must be "out", "in", or "both"`)
 		return
 	}
 
@@ -434,7 +462,7 @@ func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Reque
 	if req.Direction == "out" || req.Direction == "both" {
 		neighbors, err := s.graph.GetNeighbors(internalID)
 		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, err.Error())
+			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 			return
 		}
 		result["outgoing"] = s.guardEdgeMap(prefix, stripPrefixFromEdgeMap(prefix, neighbors), "neighbors/outgoing")
@@ -443,7 +471,7 @@ func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Reque
 	if req.Direction == "in" || req.Direction == "both" {
 		incoming, err := s.graph.GetIncomingEdges(internalID)
 		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, oluerr.ErrStorageFailed, err.Error())
+			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 			return
 		}
 		result["incoming"] = s.guardEdgeMap(prefix, stripPrefixFromEdgeMap(prefix, incoming), "neighbors/incoming")
@@ -460,7 +488,7 @@ func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Reque
 // POST /api/v1/tenant/{tenant_id}/graph/shortestPath
 func (s *Server) handleTenantGraphShortestPath(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -473,7 +501,7 @@ func (s *Server) handleTenantGraphShortestPath(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if req.From == "" || req.To == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "from and to are required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "from and to are required")
 		return
 	}
 	if req.MaxDepth <= 0 {
@@ -508,7 +536,7 @@ func (s *Server) handleTenantGraphShortestPath(w http.ResponseWriter, r *http.Re
 // POST /api/v1/tenant/{tenant_id}/graph/pathExists
 func (s *Server) handleTenantGraphPathExists(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -521,7 +549,7 @@ func (s *Server) handleTenantGraphPathExists(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if req.From == "" || req.To == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "from and to are required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "from and to are required")
 		return
 	}
 	if req.MaxDepth <= 0 {
@@ -535,7 +563,7 @@ func (s *Server) handleTenantGraphPathExists(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// Use the client-supplied IDs in the error message, not the internal
 		// prefixed form, to avoid leaking the XXXX@ tenant prefix.
-		s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound,
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 			fmt.Sprintf("node %s or %s not found", req.From, req.To))
 		return
 	}
@@ -552,7 +580,7 @@ func (s *Server) handleTenantGraphPathExists(w http.ResponseWriter, r *http.Requ
 // POST /api/v1/tenant/{tenant_id}/graph/commonNeighbors
 func (s *Server) handleTenantGraphCommonNeighbors(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -564,7 +592,7 @@ func (s *Server) handleTenantGraphCommonNeighbors(w http.ResponseWriter, r *http
 		return
 	}
 	if req.NodeA == "" || req.NodeB == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "node_a and node_b are required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "node_a and node_b are required")
 		return
 	}
 
@@ -573,7 +601,7 @@ func (s *Server) handleTenantGraphCommonNeighbors(w http.ResponseWriter, r *http
 
 	common, err := s.graph.SharedOutNeighbors(addPrefix(prefix, req.NodeA), addPrefix(prefix, req.NodeB))
 	if err != nil {
-		s.writeError(w, http.StatusNotFound, oluerr.ErrEntityNotFound, err.Error())
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound, err.Error())
 		return
 	}
 
@@ -590,7 +618,7 @@ func (s *Server) handleTenantGraphCommonNeighbors(w http.ResponseWriter, r *http
 // POST /api/v1/tenant/{tenant_id}/graph/nodes/search
 func (s *Server) handleTenantGraphNodeSearch(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
@@ -620,7 +648,7 @@ func (s *Server) handleTenantGraphNodeSearch(w http.ResponseWriter, r *http.Requ
 		if rawNodes == nil {
 			nodes, err := s.graph.GetNodesByTypeForTenant(prefix, req.Entity)
 			if err != nil {
-				s.writeError(w, http.StatusBadRequest, oluerr.ErrTenantRequired, err.Error())
+				s.writeError(w, http.StatusBadRequest, xoluerr.ErrTenantRequired, err.Error())
 				return
 			}
 			rawNodes = nodes
@@ -628,7 +656,7 @@ func (s *Server) handleTenantGraphNodeSearch(w http.ResponseWriter, r *http.Requ
 	} else {
 		nodes, err := s.graph.GetAllNodesForTenant(prefix)
 		if err != nil {
-			s.writeError(w, http.StatusBadRequest, oluerr.ErrTenantRequired, err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrTenantRequired, err.Error())
 			return
 		}
 		rawNodes = nodes
@@ -658,111 +686,28 @@ func (s *Server) handleTenantGraphNodeSearch(w http.ResponseWriter, r *http.Requ
 // POST /api/v1/tenant/{tenant_id}/graph/query
 func (s *Server) handleTenantSulpherQuery(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
-
 	tid := getTenantIDNumeric(r.Context())
 	jm := s.sulpherJobsForTenant(tid)
 	if jm == nil {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
 		return
 	}
-
-	var req struct {
-		Query    string `json:"query"`
-		MaxDepth int    `json:"max_depth"`
-	}
-	if !s.decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Query == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrQueryRequired, "Query is required")
-		return
-	}
-	if req.MaxDepth <= 0 {
-		req.MaxDepth = s.config.MaxQueryDepth
-	}
-
-	timeout := time.Duration(s.config.QueryTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-
-	result, err := jm.ExecuteSync(ctx, req.Query, req.MaxDepth)
-	if err != nil {
-		code := oluerr.ErrGraphFailed
-		status := http.StatusBadRequest
-		if ctx.Err() != nil {
-			code = oluerr.ErrQueryTimeout
-			status = http.StatusGatewayTimeout
-		} else if errors.Is(err, sulpher.ErrVisitedNodeLimit) {
-			code = oluerr.ErrGraphVisitedLimit
-			status = http.StatusRequestEntityTooLarge
-		} else if errors.Is(err, sulpher.ErrResultLimit) {
-			code = oluerr.ErrGraphResultLimit
-			status = http.StatusRequestEntityTooLarge
-		}
-		s.writeError(w, status, code, err.Error())
-		return
-	}
-
-	response := map[string]interface{}{
-		"status": "completed",
-		"result": result.Data,
-		"stats": map[string]interface{}{
-			"nodes_traversed":   result.Stats.NodesTraversed,
-			"paths_found":       result.Stats.PathsFound,
-			"execution_time_ms": result.Stats.ExecutionTime.Milliseconds(),
-		},
-	}
-
-	maxBytes := s.config.QueryMaxResponseBytes
-	if maxBytes <= 0 {
-		maxBytes = 10 * 1024 * 1024
-	}
-	encoded, jsonErr := json.Marshal(response)
-	if jsonErr != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.ErrQueryFailed, "failed to encode response")
-		return
-	}
-	if len(encoded) > maxBytes {
-		s.writeError(w, http.StatusRequestEntityTooLarge, oluerr.ErrQueryResponseSize,
-			fmt.Sprintf("response too large: %d bytes (max %d)", len(encoded), maxBytes))
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(encoded) //nolint:errcheck
-
-	if result.Stats.ExecutionTime > 5*time.Second {
-		s.logger.Warn().
-			Str("type", "sulpher_tenant").
-			Uint16("tenant_id", tid).
-			Int64("duration_ms", result.Stats.ExecutionTime.Milliseconds()).
-			Int("nodes_traversed", result.Stats.NodesTraversed).
-			Int("paths_found", result.Stats.PathsFound).
-			Int("response_bytes", len(encoded)).
-			Msg("Slow query")
-	}
+	s.executeSulpherQueryBody(w, r, jm, tid, "sulpher_tenant", tid)
 }
 
-// handleTenantSulpherQueryAsync submits a Sulpher query for async execution
-// within the tenant's subgraph.
-// POST /api/v1/tenant/{tenant_id}/graph/query/async
 func (s *Server) handleTenantSulpherQueryAsync(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	tid := getTenantIDNumeric(r.Context())
 	jm := s.sulpherJobsForTenant(tid)
 	if jm == nil {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
 		return
 	}
 
@@ -774,7 +719,7 @@ func (s *Server) handleTenantSulpherQueryAsync(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if req.Query == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrQueryRequired, "Query is required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrQueryRequired, "Query is required")
 		return
 	}
 	if req.MaxDepth <= 0 {
@@ -783,7 +728,7 @@ func (s *Server) handleTenantSulpherQueryAsync(w http.ResponseWriter, r *http.Re
 
 	job, err := jm.Submit(req.Query, req.MaxDepth)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrInvalidEntity, err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
 
@@ -798,26 +743,26 @@ func (s *Server) handleTenantSulpherQueryAsync(w http.ResponseWriter, r *http.Re
 // GET /api/v1/tenant/{tenant_id}/graph/query/{query_id}
 func (s *Server) handleTenantSulpherQueryStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	tid := getTenantIDNumeric(r.Context())
 	jm := s.sulpherJobsForTenant(tid)
 	if jm == nil {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
 		return
 	}
 
 	queryID := chi.URLParam(r, "query_id")
 	if queryID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "query_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "query_id required")
 		return
 	}
 
 	job, exists := jm.GetJob(queryID)
 	if !exists {
-		s.writeError(w, http.StatusNotFound, oluerr.ErrQueryNotFound, "Query not found")
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrQueryNotFound, "Query not found")
 		return
 	}
 
@@ -844,26 +789,26 @@ func (s *Server) handleTenantSulpherQueryStatus(w http.ResponseWriter, r *http.R
 // GET /api/v1/tenant/{tenant_id}/graph/query/{query_id}/result
 func (s *Server) handleTenantSulpherQueryResult(w http.ResponseWriter, r *http.Request) {
 	if !s.config.GraphEnabled {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrGraphDisabled, "Graph operations are disabled")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrGraphDisabled, "Graph operations are disabled")
 		return
 	}
 
 	tid := getTenantIDNumeric(r.Context())
 	jm := s.sulpherJobsForTenant(tid)
 	if jm == nil {
-		s.writeError(w, http.StatusNotImplemented, oluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrQueryEngineNotInit, "Sulpher query engine not initialized")
 		return
 	}
 
 	queryID := chi.URLParam(r, "query_id")
 	if queryID == "" {
-		s.writeError(w, http.StatusBadRequest, oluerr.ErrMissingParam, "query_id required")
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrMissingParam, "query_id required")
 		return
 	}
 
 	job, exists := jm.GetJob(queryID)
 	if !exists {
-		s.writeError(w, http.StatusNotFound, oluerr.ErrQueryNotFound, "Query not found")
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrQueryNotFound, "Query not found")
 		return
 	}
 

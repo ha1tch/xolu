@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 )
 
 // TestComparativeE2E_BlobVsAdapted runs identical workloads through the
-// olu Store interface for both blob-storage entities and adapted-table
+// xolu Store interface for both blob-storage entities and adapted-table
 // entities, then prints a comparative timing report.
 //
 // The test creates two entity types on the SAME SQLiteStore:
@@ -47,7 +48,7 @@ func TestComparativeE2E_BlobVsAdapted(t *testing.T) {
 	t.Log("\n" + report)
 
 	// Write report to working directory if available
-	outPath := filepath.Join(os.TempDir(), "olu-blob-vs-adapted.md")
+	outPath := filepath.Join(os.TempDir(), "xolu-blob-vs-adapted.md")
 	if err := os.WriteFile(outPath, []byte(report), 0644); err == nil {
 		t.Logf("Report written to %s", outPath)
 	}
@@ -78,8 +79,8 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// Register schema for the adapted entity
 	schema := map[string]interface{}{
 		"properties": map[string]interface{}{
-			"name":  map[string]interface{}{"type": "string"},
-			"sku":   map[string]interface{}{"type": "string"},
+			"name": map[string]interface{}{"type": "string"},
+			"sku":  map[string]interface{}{"type": "string"},
 			"category": map[string]interface{}{
 				"type": "string",
 				"enum": []interface{}{"electronics", "clothing", "food", "tools", "furniture"},
@@ -119,7 +120,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	categories := []string{"electronics", "clothing", "food", "tools", "furniture"}
 	data := make([]map[string]interface{}, n)
 	for i := 0; i < n; i++ {
-		price := float64(rng.Intn(99900)+100) / 100.0 // 1.00 - 999.99
+		price := float64(rng.Intn(99900)+100) / 100.0  // 1.00 - 999.99
 		weight := float64(rng.Intn(50000)+10) / 1000.0 // 0.010 - 50.009
 		data[i] = map[string]interface{}{
 			"name":     fmt.Sprintf("Product-%05d", i),
@@ -335,7 +336,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7a. Filtered SELECT (WHERE on numeric field, ~50% selectivity)
 	start = time.Now()
 	rows, err := db.QueryContext(ctx,
-		`SELECT data FROM entities WHERE tenant_id = 0 AND entity_type = 'products_blob' AND json_extract(data, '$.quantity') > 500`)
+		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.quantity') > 500`)
 	if err != nil {
 		t.Fatalf("blob SQL filter: %v", err)
 	}
@@ -346,7 +347,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	optTable := sqlStore.AdaptedRegistry().Get("products_opt").TableName()
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE tenant_id = 0 AND quantity > 500`, optTable))
+		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE quantity > 500`, optTable))
 	if err != nil {
 		t.Fatalf("adapted SQL filter: %v", err)
 	}
@@ -357,7 +358,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7b. ORDER BY + LIMIT (top 20 by price)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM entities WHERE tenant_id = 0 AND entity_type = 'products_blob' ORDER BY CAST(json_extract(data, '$.price') AS REAL) DESC LIMIT 20`)
+		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' ORDER BY CAST(json_extract(data, '$.price') AS REAL) DESC LIMIT 20`)
 	if err != nil {
 		t.Fatalf("blob SQL sort: %v", err)
 	}
@@ -367,7 +368,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE tenant_id = 0 ORDER BY price DESC LIMIT 20`, optTable))
+		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s ORDER BY price DESC LIMIT 20`, optTable))
 	if err != nil {
 		t.Fatalf("adapted SQL sort: %v", err)
 	}
@@ -378,7 +379,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7c. Range scan (price between 100.00 and 200.00 as scaled integers)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM entities WHERE tenant_id = 0 AND entity_type = 'products_blob' AND CAST(json_extract(data, '$.price') AS REAL) BETWEEN 100.0 AND 200.0`)
+		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND CAST(json_extract(data, '$.price') AS REAL) BETWEEN 100.0 AND 200.0`)
 	if err != nil {
 		t.Fatalf("blob SQL range: %v", err)
 	}
@@ -389,7 +390,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// For adapted, price is stored as scaled int: 100.00 = 10000, 200.00 = 20000
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE tenant_id = 0 AND price BETWEEN 10000 AND 20000`, optTable))
+		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE price BETWEEN 10000 AND 20000`, optTable))
 	if err != nil {
 		t.Fatalf("adapted SQL range: %v", err)
 	}
@@ -401,7 +402,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	target := fmt.Sprintf("SKU-%05d", n/2)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM entities WHERE tenant_id = 0 AND entity_type = 'products_blob' AND json_extract(data, '$.sku') = ?`, target)
+		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.sku') = ?`, target)
 	if err != nil {
 		t.Fatalf("blob SQL text_eq: %v", err)
 	}
@@ -411,7 +412,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE tenant_id = 0 AND sku = ?`, optTable), target)
+		fmt.Sprintf(`SELECT id, name, sku, category, price, weight, in_stock, quantity FROM %s WHERE sku = ?`, optTable), target)
 	if err != nil {
 		t.Fatalf("adapted SQL text_eq: %v", err)
 	}
@@ -448,7 +449,7 @@ func copyMap(m map[string]interface{}) map[string]interface{} {
 func formatReport(results []benchResult) string {
 	var b []byte
 
-	b = append(b, []byte("# olu Store API: Blob vs Adapted Table Benchmark\n\n")...)
+	b = append(b, []byte("# xolu Store API: Blob vs Adapted Table Benchmark\n\n")...)
 	b = append(b, []byte(fmt.Sprintf("**Date:** %s\n", time.Now().Format("2006-01-02")))...)
 	b = append(b, []byte("**Method:** End-to-end through `storage.Store` interface (Create/Get/List/Update/Delete)\n")...)
 	b = append(b, []byte("**Schema:** 7 fields (2 string, 1 enum, 2 decimal, 1 boolean, 1 integer)\n")...)

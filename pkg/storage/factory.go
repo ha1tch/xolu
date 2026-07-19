@@ -29,11 +29,11 @@ func NewStore(name string, config map[string]interface{}) (Store, error) {
 	storeMu.RLock()
 	factory, exists := storeRegistry[name]
 	storeMu.RUnlock()
-	
+
 	if !exists {
 		return nil, fmt.Errorf("unknown store type: %s", name)
 	}
-	
+
 	return factory(config)
 }
 
@@ -41,7 +41,7 @@ func NewStore(name string, config map[string]interface{}) (Store, error) {
 func ListStores() []string {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
-	
+
 	stores := make([]string, 0, len(storeRegistry))
 	for name := range storeRegistry {
 		stores = append(stores, name)
@@ -69,15 +69,6 @@ func NewStoreFromConfig(cfg StoreConfig) (Store, error) {
 			ContentionThreshold: cfg.SQLiteContentionThreshold,
 			PerFileTenants:      cfg.SQLitePerFileTenants,
 		})
-	case "jsonfile":
-		store, err := NewJSONFileStore(cfg.BaseDir, cfg.Schema)
-		if err != nil {
-			return nil, err
-		}
-		store.storeConfig.TenantID = cfg.TenantID
-		store.storeConfig.FullTextEnabled = cfg.FullTextEnabled
-		store.storeConfig.GraphEnabled = cfg.GraphEnabled
-		return store, nil
 	default:
 		return nil, fmt.Errorf("unknown store type: %s", cfg.Type)
 	}
@@ -85,37 +76,22 @@ func NewStoreFromConfig(cfg StoreConfig) (Store, error) {
 
 // init registers built-in stores
 func init() {
-	// Register JSONFileStore
-	RegisterStore("jsonfile", func(config map[string]interface{}) (Store, error) {
-		baseDir, ok := config["base_dir"].(string)
-		if !ok {
-			baseDir = "data"
-		}
-		
-		schema, ok := config["schema"].(string)
-		if !ok {
-			schema = "default"
-		}
-		
-		return NewJSONFileStore(baseDir, schema)
-	})
-	
 	// Register SQLiteStore
 	RegisterStore("sqlite", func(config map[string]interface{}) (Store, error) {
 		dbPath, ok := config["db_path"].(string)
 		if !ok {
-			dbPath = "olu.db"
+			dbPath = "xolu.db"
 		}
-		
+
 		sqliteConfig := SQLiteConfig{
-			DBPath:           dbPath,
-			EnableWAL:        true,
+			DBPath:            dbPath,
+			EnableWAL:         true,
 			EnableForeignKeys: true,
-			CacheSize:        2000, // 2MB
-			BusyTimeout:      5000, // 5 seconds
-			FullTextEnabled:  false,
+			CacheSize:         2000, // 2MB
+			BusyTimeout:       5000, // 5 seconds
+			FullTextEnabled:   false,
 		}
-		
+
 		// Allow overriding config options
 		if wal, ok := config["enable_wal"].(bool); ok {
 			sqliteConfig.EnableWAL = wal
@@ -135,8 +111,7 @@ func init() {
 		if pft, ok := config["per_file_tenants"].(bool); ok {
 			sqliteConfig.PerFileTenants = pft
 		}
-		
+
 		return NewSQLiteStore(dbPath, sqliteConfig)
 	})
 }
-

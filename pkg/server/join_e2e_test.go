@@ -241,7 +241,7 @@ func TestJoinPushdown_BlobFallback(t *testing.T) {
 
 	// Execute a JOIN between tag_links and tags
 	rows := joinOQLData(t, ts,
-		fmt.Sprintf(`SELECT a.post_id, b.label FROM tag_links AS a INNER JOIN tags AS b ON a.tag_id = b.id WHERE b.label = 'go'`))
+		`SELECT a.post_id, b.label FROM tag_links AS a INNER JOIN tags AS b ON a.tag_id = b.id WHERE b.label = 'go'`)
 
 	// Two tag_links point to the 'go' tag
 	if len(rows) != 2 {

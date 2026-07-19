@@ -6,11 +6,11 @@ package storage_test
 
 // contract_test.go
 //
-// Shared behavioural tests that verify both storage backends (JSONFile and
+// Shared behavioural tests that verify the storage backend (
 // SQLite) conform to the Store interface contract identically. Any divergence
 // between backends will surface here.
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 
 import (
 	"context"
@@ -23,26 +23,9 @@ import (
 // storeFactory creates a Store and returns a cleanup function.
 type storeFactory func(t *testing.T) (storage.Store, func())
 
-func jsonfileFactory(t *testing.T) (storage.Store, func()) {
-	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "olu-contract-jf-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := storage.NewStore("jsonfile", map[string]interface{}{
-		"base_dir": tmpDir,
-		"schema":   "test",
-	})
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Fatal(err)
-	}
-	return store, func() { store.Close(); os.RemoveAll(tmpDir) }
-}
-
 func sqliteFactory(t *testing.T) (storage.Store, func()) {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "olu-contract-sq-*.db")
+	tmpFile, err := os.CreateTemp("", "xolu-contract-sq-*.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,10 +303,6 @@ func runContractSuite(t *testing.T, name string, factory storeFactory) {
 // =============================================================================
 // Run the contract suite against both backends
 // =============================================================================
-
-func TestContract_JSONFile(t *testing.T) {
-	runContractSuite(t, "jsonfile", jsonfileFactory)
-}
 
 func TestContract_SQLite(t *testing.T) {
 	runContractSuite(t, "sqlite", sqliteFactory)

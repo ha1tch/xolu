@@ -28,38 +28,36 @@ import (
 func setupSQLiteTestServer(t *testing.T) *TestServer {
 	t.Helper()
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
 
 	cfg := &config.Config{
-		Host:                "localhost",
-		Port:                0,
-		StorageType:         "sqlite",
-		DBPath:              dbPath,
-		BaseDir:             tmpDir,
-		Schema:              "test_schema",
-		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
-		CacheType:           "memory",
-		CacheTTL:            300,
-		GraphEnabled:        false,
-		FullTextEnabled:     false,
-		MaxEmbedDepth:       10,
-		RefEmbedDepth:       3,
-		MaxEntitySize:       1048576,
-		DefaultPageSize:     10,
-		PatchNullBehavior:   "store",
-		TenantMode:          "path",
-		TenantAutoRegister:  true,
-		MaxCascadeDeletions: 100,
-		QueryTimeout:        30,
-		QueryMaxRows:        10000,
-		QueryMaxScanRows:    100000,
+		Host:                  "localhost",
+		Port:                  0,
+		StorageType:           "sqlite",
+		BaseDir:               tmpDir,
+		Schema:                "test_schema",
+		SchemaDir:             filepath.Join(tmpDir, "test_schema"),
+		CacheType:             "memory",
+		CacheTTL:              300,
+		GraphEnabled:          false,
+		FullTextEnabled:       false,
+		MaxEmbedDepth:         10,
+		RefEmbedDepth:         3,
+		MaxEntitySize:         1048576,
+		DefaultPageSize:       10,
+		PatchNullBehavior:     "store",
+		TenantMode:            "path",
+		TenantAutoRegister:    true,
+		MaxCascadeDeletions:   100,
+		QueryTimeout:          30,
+		QueryMaxRows:          10000,
+		QueryMaxScanRows:      100000,
 		QueryMaxResponseBytes: 10485760,
 	}
 
 	os.MkdirAll(cfg.SchemaDir, 0755)
 
 	storeConfig := map[string]interface{}{
-		"db_path": dbPath,
+		"db_path": baseStorePath(cfg),
 	}
 	store, err := storage.NewStore("sqlite", storeConfig)
 	if err != nil {
@@ -71,7 +69,7 @@ func setupSQLiteTestServer(t *testing.T) *TestServer {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, nil, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, nil, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{
@@ -88,40 +86,43 @@ func startServerFromDB(t *testing.T, dbPath string) *TestServer {
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	// Copy the DB to a new location so we don't share file handles
-	restoredDB := filepath.Join(tmpDir, "restored.db")
+	cfg := &config.Config{
+		Host:                  "localhost",
+		Port:                  0,
+		StorageType:           "sqlite",
+		BaseDir:               tmpDir,
+		Schema:                "test_schema",
+		SchemaDir:             filepath.Join(tmpDir, "test_schema"),
+		CacheType:             "memory",
+		CacheTTL:              300,
+		GraphEnabled:          false,
+		FullTextEnabled:       false,
+		MaxEmbedDepth:         10,
+		RefEmbedDepth:         3,
+		MaxEntitySize:         1048576,
+		DefaultPageSize:       100, // large enough to see all records
+		PatchNullBehavior:     "store",
+		TenantMode:            "path",
+		TenantAutoRegister:    true,
+		MaxCascadeDeletions:   100,
+		QueryTimeout:          30,
+		QueryMaxRows:          10000,
+		QueryMaxScanRows:      100000,
+		QueryMaxResponseBytes: 10485760,
+	}
+
+	// Copy the DB to the invariant-derived store location for the new data root
+	// so the server (which derives its store path from BaseDir) finds it.
+	restoredDB := baseStorePath(cfg)
+	if err := os.MkdirAll(filepath.Dir(restoredDB), 0755); err != nil {
+		t.Fatalf("mkdir restored store dir: %v", err)
+	}
 	src, err := os.ReadFile(dbPath)
 	if err != nil {
 		t.Fatalf("read backup db: %v", err)
 	}
 	if err := os.WriteFile(restoredDB, src, 0644); err != nil {
 		t.Fatalf("write restored db: %v", err)
-	}
-
-	cfg := &config.Config{
-		Host:                "localhost",
-		Port:                0,
-		StorageType:         "sqlite",
-		DBPath:              restoredDB,
-		BaseDir:             tmpDir,
-		Schema:              "test_schema",
-		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
-		CacheType:           "memory",
-		CacheTTL:            300,
-		GraphEnabled:        false,
-		FullTextEnabled:     false,
-		MaxEmbedDepth:       10,
-		RefEmbedDepth:       3,
-		MaxEntitySize:       1048576,
-		DefaultPageSize:     100, // large enough to see all records
-		PatchNullBehavior:   "store",
-		TenantMode:          "path",
-		TenantAutoRegister:  true,
-		MaxCascadeDeletions: 100,
-		QueryTimeout:        30,
-		QueryMaxRows:        10000,
-		QueryMaxScanRows:    100000,
-		QueryMaxResponseBytes: 10485760,
 	}
 
 	os.MkdirAll(cfg.SchemaDir, 0755)
@@ -139,7 +140,7 @@ func startServerFromDB(t *testing.T, dbPath string) *TestServer {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, nil, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, nil, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{
@@ -153,12 +154,12 @@ func startServerFromDB(t *testing.T, dbPath string) *TestServer {
 
 // TestBackupRestore_SQLite is the backup/restore verification drill.
 // It exercises the full round trip:
-//   1. Create a SQLite-backed server
-//   2. Write entities via REST
-//   3. Export via /api/v1/export (backup)
-//   4. Extract the DB from the zip
-//   5. Start a new server against the restored DB
-//   6. Verify data integrity
+//  1. Create a SQLite-backed server
+//  2. Write entities via REST
+//  3. Export via /api/v1/export (backup)
+//  4. Extract the DB from the zip
+//  5. Start a new server against the restored DB
+//  6. Verify data integrity
 func TestBackupRestore_SQLite(t *testing.T) {
 	// --- Phase 1: Create and populate ---
 
@@ -216,12 +217,12 @@ func TestBackupRestore_SQLite(t *testing.T) {
 		t.Fatalf("export: invalid zip: %v", err)
 	}
 
-	// Find the entities.db file
+	// Find the xolu.db file
 	var dbFile *zip.File
 	var manifestFile *zip.File
 	for _, f := range zipReader.File {
 		switch f.Name {
-		case "entities.db":
+		case "xolu.db":
 			dbFile = f
 		case "manifest.json":
 			manifestFile = f
@@ -233,7 +234,7 @@ func TestBackupRestore_SQLite(t *testing.T) {
 		for i, f := range zipReader.File {
 			names[i] = f.Name
 		}
-		t.Fatalf("export: no entities.db in zip (files: %v)", names)
+		t.Fatalf("export: no xolu.db in zip (files: %v)", names)
 	}
 
 	if manifestFile != nil {

@@ -9,6 +9,8 @@ package cache
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -19,14 +21,35 @@ import (
 // ============================================================================
 
 // These tests require a running Redis instance.
-// Run with: go test -tags=redis ./pkg/cache/...
+//
+// By default they connect to localhost:6379. Set REDIS_ADDR=host:port to
+// point at a different instance. Run with:
+//
+//	go test -tags=redis ./pkg/cache/...
+//	REDIS_ADDR=redis.example.com:6379 go test -tags=redis ./pkg/cache/...
 
-func TestRedisCache_SetGet(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
+// newRealRedisCache connects to the Redis instance determined by resolveRedisAddr
+// (defined in cache_coverage_test.go). Resolution order: XOLU_REDIS_HOST/XOLU_REDIS_PORT,
+// then REDIS_ADDR, then localhost:6379. Fails the test immediately if the connection fails.
+func newRealRedisCache(t *testing.T) *RedisCache {
+	t.Helper()
+	host, port, source := resolveRedisAddr()
+	if source == "" {
+		// No env var set — fall back to the default localhost:6379 for the
+		// -tags redis path, which is always an explicit opt-in for network testing.
+		host, port, source = "localhost", 6379, "default (localhost:6379)"
 	}
-	defer cache.Close()
+	rc, err := NewRedisCache(host, port, time.Second*60, 0, 0)
+	if err != nil {
+		t.Fatalf("could not connect to Redis at %s:%d (via %s): %v", host, port, source, err)
+	}
+	t.Cleanup(func() { rc.Close() })
+	return rc
+}
+
+func TestRealRedisCache_SetGet(t *testing.T) {
+	cache := newRealRedisCache(t)
+	var err error
 
 	ctx := context.Background()
 
@@ -52,13 +75,10 @@ func TestRedisCache_SetGet(t *testing.T) {
 	cache.Delete(ctx, "test:key1")
 }
 
-func TestRedisCache_PerItemTTL(t *testing.T) {
+func TestRealRedisCache_PerItemTTL(t *testing.T) {
 	// Create cache with long default TTL
-	cache, err := NewRedisCache("localhost", 6379, time.Hour, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+	cache := newRealRedisCache(t)
+	var err error
 
 	ctx := context.Background()
 
@@ -87,12 +107,9 @@ func TestRedisCache_PerItemTTL(t *testing.T) {
 	}
 }
 
-func TestRedisCache_Delete(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisCache_Delete(t *testing.T) {
+	cache := newRealRedisCache(t)
+	var err error
 
 	ctx := context.Background()
 
@@ -109,12 +126,9 @@ func TestRedisCache_Delete(t *testing.T) {
 	}
 }
 
-func TestRedisCache_Exists(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisCache_Exists(t *testing.T) {
+	cache := newRealRedisCache(t)
+	var err error
 
 	ctx := context.Background()
 
@@ -146,12 +160,9 @@ func TestRedisCache_Exists(t *testing.T) {
 	cache.Delete(ctx, "test:exists")
 }
 
-func TestRedisCache_ComplexValues(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisCache_ComplexValues(t *testing.T) {
+	cache := newRealRedisCache(t)
+	var err error
 
 	ctx := context.Background()
 
@@ -190,12 +201,8 @@ func TestRedisCache_ComplexValues(t *testing.T) {
 // Redis Stress Tests
 // ============================================================================
 
-func TestRedisStress_ConcurrentAccess(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisStress_ConcurrentAccess(t *testing.T) {
+	cache := newRealRedisCache(t)
 
 	ctx := context.Background()
 	numWorkers := 50
@@ -261,12 +268,8 @@ func TestRedisStress_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestRedisStress_LargeValues(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisStress_LargeValues(t *testing.T) {
+	cache := newRealRedisCache(t)
 
 	ctx := context.Background()
 
@@ -318,12 +321,8 @@ func TestRedisStress_LargeValues(t *testing.T) {
 	}
 }
 
-func TestRedisStress_PatternDelete(t *testing.T) {
-	cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create Redis cache: %v", err)
-	}
-	defer cache.Close()
+func TestRealRedisStress_PatternDelete(t *testing.T) {
+	cache := newRealRedisCache(t)
 
 	ctx := context.Background()
 	numKeys := 500
@@ -372,7 +371,12 @@ func TestRedisStress_PatternDelete(t *testing.T) {
 	t.Logf("Pattern delete: Created %d keys in %v, deleted in %v", numKeys, setTime, deleteTime)
 }
 
-func TestRedisStress_RapidReconnect(t *testing.T) {
+func TestRealRedisStress_RapidReconnect(t *testing.T) {
+	// Verify connectivity before spawning goroutines — a missing Redis would
+	// produce 50 goroutine errors that obscure the root cause.
+	probe := newRealRedisCache(t)
+	probe.Close()
+
 	ctx := context.Background()
 	numConnections := 50
 
@@ -385,7 +389,11 @@ func TestRedisStress_RapidReconnect(t *testing.T) {
 		go func(connID int) {
 			defer wg.Done()
 
-			cache, err := NewRedisCache("localhost", 6379, time.Second*60, 0, 0)
+			h, p, src := resolveRedisAddr()
+			if src == "" {
+				h, p = "localhost", 6379
+			}
+			cache, err := NewRedisCache(h, p, time.Second*60, 0, 0)
 			if err != nil {
 				errors <- fmt.Errorf("Connection %d failed: %v", connID, err)
 				return
@@ -415,7 +423,7 @@ func TestRedisStress_RapidReconnect(t *testing.T) {
 		}
 	}
 
-	t.Logf("Rapid reconnect: %d connections in %v (%.0f conn/sec)", 
+	t.Logf("Rapid reconnect: %d connections in %v (%.0f conn/sec)",
 		numConnections, elapsed, float64(numConnections)/elapsed.Seconds())
 
 	if errCount > 0 {

@@ -10,7 +10,7 @@ package server_test
 // writeError() call path in handlers.go or server.go to ensure error
 // responses are correct and don't panic.
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 
 import (
 	"encoding/json"
@@ -26,6 +26,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/cache"
 	"github.com/ha1tch/xolu/pkg/server"
 	"github.com/ha1tch/xolu/pkg/storage"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/validation"
 	"github.com/rs/zerolog"
 )
@@ -659,16 +660,13 @@ func setupTestServerNoGraph(t *testing.T) *TestServer {
 	// Recreate server with updated config (graph disabled)
 	ts.ts.Close()
 
-	store, _ := storage.NewStore("jsonfile", map[string]interface{}{
-		"base_dir": ts.cfg.BaseDir,
-		"schema":   ts.cfg.Schema,
-	})
+	store, _ := storage.NewStore("sqlite", map[string]interface{}{"db_path": sl.TenantStorePath(ts.cfg.BaseDir, 0)})
 	memCache := cache.NewMemoryCache(1000, 300*time.Second)
 	validator := validation.NewJSONSchemaValidator(
 		filepath.Join(ts.cfg.BaseDir, ts.cfg.Schema, "_schemas"))
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(ts.cfg, store, memCache, nil, nil, validator, logger)
+	srv := server.New(ts.cfg, store, memCache, nil, validator, logger)
 	ts.server = srv
 	ts.ts = httptest.NewServer(srv.Handler())
 

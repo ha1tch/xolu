@@ -16,5 +16,5 @@ func newLocalRNG(seed int64) *localRNG {
 	return &localRNG{r: rand.New(rand.NewSource(seed))} //nolint:gosec
 }
 
-func (l *localRNG) intn(n int) int     { return l.r.Intn(n) }
-func (l *localRNG) float32() float32   { return l.r.Float32() }
+func (l *localRNG) intn(n int) int   { return l.r.Intn(n) }
+func (l *localRNG) float32() float32 { return l.r.Float32() }

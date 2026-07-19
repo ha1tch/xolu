@@ -16,26 +16,31 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/ha1tch/xolu/pkg/dynconfig"
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/tdigest"
 )
 
 const (
-	purgeBatchSize  = 10_000
-	metaFlushSecs   = 60
+	purgeBatchSize = 10_000
+	metaFlushSecs  = 60
 )
 
 // ErrScanLimitExceeded is returned when a query exceeds its MaxScanEvents budget.
-var ErrScanLimitExceeded = fmt.Errorf("ts: scan limit exceeded (OLU-TS013)")
+var ErrScanLimitExceeded = fmt.Errorf("ts: scan limit exceeded (XOLU-TS013)")
 
 // ErrBucketLimitExceeded is returned when an aggregate query would produce
 // more buckets than the configured MaxBuckets limit.
-var ErrBucketLimitExceeded = fmt.Errorf("ts: aggregate bucket limit exceeded (OLU-TS019)")
+var ErrBucketLimitExceeded = fmt.Errorf("ts: aggregate bucket limit exceeded (%s)", xoluerr.ErrTSBucketLimit)
 
 // PebbleStore implements Store backed by a single Pebble instance per tenant.
 type PebbleStore struct {
-	db       *pebble.DB
-	dir      string
-	reg      *registry
+	db         *pebble.DB
+	dir        string
+	reg        *registry
+	cfg        StoreConfig          // backend-agnostic store configuration
+	tenantName string               // used to scope dynconfig lookups
+	dc         *dynconfig.DynConfig // nil when dynconfig is disabled
 
 	// Per-timeline event counters. Loaded from meta.json on open, persisted
 	// periodically and on Close. Eventually consistent after crash (by design).
@@ -43,20 +48,39 @@ type PebbleStore struct {
 	counters   map[TimelineID]*atomic.Int64
 
 	metaPath string
+
+	// Write performance configuration — per-timeline, persisted separately.
+	wcMu   sync.RWMutex
+	wc     map[TimelineID]TimelineWriteConfig
+	wcPath string // path to write_config.json
+
+	// Write coalescer — started lazily when dynconfig ts.writecoal becomes true.
+	coalOnce          sync.Once
+	coalStarted       atomic.Bool
+	coalCh            chan coalEntry
+	coalStop          chan struct{}
+	coalDone          chan struct{}
+	coalFlushInterval time.Duration
+	coalMaxEvents     int
+
+	// Rollup definitions and workers.
+	rollupReg       *rollupRegistry
+	rollupWorkersMu sync.RWMutex
+	rollupWorkers   map[RollupID]*rollupWorker
 }
 
 // storeMeta is the on-disk metadata for a tenant's timeseries store.
 type storeMeta struct {
-	CreatedAt   time.Time         `json:"created_at"`
-	Compression string            `json:"compression"`
-	Counts      map[string]int64  `json:"counts,omitempty"` // timeline_id (decimal string) -> count
+	CreatedAt   time.Time        `json:"created_at"`
+	Compression string           `json:"compression"`
+	Counts      map[string]int64 `json:"counts,omitempty"` // timeline_id (decimal string) -> count
 }
 
 // NewPebbleStore opens or creates a Pebble timeseries store in dir.
 // cfg carries the backend-agnostic settings (retention); pcfg carries the
 // Pebble-specific tuning parameters. Zero values in pcfg are safe — sensible
 // defaults are applied for each unset field.
-func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig) (Store, error) {
+func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig, tenantName string, dc *dynconfig.DynConfig) (Store, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("ts: mkdir %s: %w", dir, err)
 	}
@@ -109,16 +133,62 @@ func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig) (Store, erro
 		return nil, fmt.Errorf("ts: open %s: %w", tsDir, err)
 	}
 
+	coalInterval := time.Duration(pcfg.CoalFlushIntervalMs) * time.Millisecond
+	if coalInterval <= 0 {
+		coalInterval = 10 * time.Millisecond
+	}
+	coalMax := pcfg.CoalMaxEvents
+	if coalMax <= 0 {
+		coalMax = 2000
+	}
+
 	s := &PebbleStore{
-		db:       db,
-		dir:      dir,
-		reg:      reg,
-		counters: make(map[TimelineID]*atomic.Int64),
-		metaPath: filepath.Join(dir, "meta.json"),
+		db:                db,
+		dir:               dir,
+		reg:               reg,
+		cfg:               cfg,
+		tenantName:        tenantName,
+		dc:                dc,
+		counters:          make(map[TimelineID]*atomic.Int64),
+		metaPath:          filepath.Join(dir, "meta.json"),
+		wc:                make(map[TimelineID]TimelineWriteConfig),
+		wcPath:            filepath.Join(dir, "write_config.json"),
+		coalCh:            make(chan coalEntry, 8192),
+		coalStop:          make(chan struct{}),
+		coalDone:          make(chan struct{}),
+		coalFlushInterval: coalInterval,
+		coalMaxEvents:     coalMax,
+		rollupWorkers:     make(map[RollupID]*rollupWorker),
 	}
 	if err := s.loadMeta(pcfg.Compression); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ts: load meta: %w", err)
+	}
+	if err := s.loadWriteConfig(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ts: load write config: %w", err)
+	}
+	rr, err := loadRollupRegistry(dir)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ts: load rollup registry: %w", err)
+	}
+	s.rollupReg = rr
+	// Restart workers for definitions that were running before shutdown.
+	// Definitions with Running=false were never started or were explicitly
+	// stopped and should remain stopped.
+	for _, d := range rr.defs {
+		if d.Running {
+			w := newRollupWorker(*d, s)
+			s.rollupWorkers[d.ID] = w
+			w.start()
+		}
+	}
+	// If dynconfig already has ts.writecoal=true for this tenant (or globally),
+	// start the coalescer now so the first write doesn't pay the goroutine
+	// startup cost.
+	if s.coalEnabled() {
+		s.startCoalescer()
 	}
 	return s, nil
 }
@@ -129,9 +199,9 @@ func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig) (Store, erro
 //
 // A zero-value PebbleConfig is valid — NewPebbleStore applies sensible
 // defaults for every unset field.
-func NewPebbleStoreFactory(pcfg PebbleConfig) StoreFactory {
-	return func(dir string, cfg StoreConfig) (Store, error) {
-		return NewPebbleStore(dir, cfg, pcfg)
+func NewPebbleStoreFactory(pcfg PebbleConfig, dc *dynconfig.DynConfig) StoreFactory {
+	return func(dir string, cfg StoreConfig, tenantName string) (Store, error) {
+		return NewPebbleStore(dir, cfg, pcfg, tenantName, dc)
 	}
 }
 
@@ -161,10 +231,26 @@ func (s *PebbleStore) Append(ctx context.Context, e Event) error {
 	}
 	cfg, ok := s.reg.get(e.Timeline)
 	if !ok {
-		return fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", e.Timeline)
+		return fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", e.Timeline)
 	}
 	if len(e.Dims) != int(cfg.Dims) {
-		return fmt.Errorf("ts: timeline %d expects %d dims, got %d (OLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
+		return fmt.Errorf("ts: timeline %d expects %d dims, got %d (XOLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
+	}
+
+	// If WriteCoal is enabled for this timeline, hand off to the coalescer
+	// and wait for the coalesced commit result.
+	s.wcMu.RLock()
+	wc := s.wc[e.Timeline]
+	s.wcMu.RUnlock()
+	if s.coalEnabled() {
+		s.startCoalescer()
+		errCh := make(chan error, 1)
+		select {
+		case s.coalCh <- coalEntry{event: e, errCh: errCh}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return <-errCh
 	}
 
 	key, err := EncodeKey(e.Timeline, cfg.Dims, e.Dims, e.Time)
@@ -175,8 +261,11 @@ func (s *PebbleStore) Append(ctx context.Context, e Event) error {
 	if err != nil {
 		return err
 	}
-
-	if err := s.db.Set(key, val, pebble.Sync); err != nil {
+	writeOpts := pebble.Sync
+	if wc.NoSync {
+		writeOpts = pebble.NoSync
+	}
+	if err := s.db.Set(key, val, writeOpts); err != nil {
 		return fmt.Errorf("ts: pebble set: %w", err)
 	}
 
@@ -193,7 +282,7 @@ func (s *PebbleStore) AppendBatch(ctx context.Context, events []Event, maxBatch 
 		maxBatch = 5000
 	}
 	if len(events) > maxBatch {
-		return 0, fmt.Errorf("ts: batch too large (%d events, max %d) (OLU-TS006)", len(events), maxBatch)
+		return 0, fmt.Errorf("ts: batch too large (%d events, max %d) (XOLU-TS006)", len(events), maxBatch)
 	}
 
 	// Validate all events and resolve their configs before touching Pebble.
@@ -202,17 +291,36 @@ func (s *PebbleStore) AppendBatch(ctx context.Context, events []Event, maxBatch 
 		val []byte
 		tid TimelineID
 	}
-	items := make([]prepared, 0, len(events))
+
+	// Decide once whether the coalescer is active for this store.
+	// coalEnabled() reads dynconfig so it's consistent across the batch.
+	useCoal := s.coalEnabled()
+	if useCoal {
+		s.startCoalescer()
+	}
+
+	// Take a snapshot of per-timeline nosync flags under the read lock.
+	s.wcMu.RLock()
+	wcSnapshot := make(map[TimelineID]TimelineWriteConfig, len(s.wc))
+	for id, cfg := range s.wc {
+		wcSnapshot[id] = cfg
+	}
+	s.wcMu.RUnlock()
+
+	var direct []prepared
+	var coalErrChs []chan error
+	useNoSync := true // for direct batch: false if any direct timeline requires Sync
+
 	for i, e := range events {
 		if err := s.validateEvent(e); err != nil {
 			return 0, fmt.Errorf("ts: event[%d]: %w", i, err)
 		}
 		cfg, ok := s.reg.get(e.Timeline)
 		if !ok {
-			return 0, fmt.Errorf("ts: event[%d]: timeline %d not defined (OLU-TS004)", i, e.Timeline)
+			return 0, fmt.Errorf("ts: event[%d]: timeline %d not defined (XOLU-TS004)", i, e.Timeline)
 		}
 		if len(e.Dims) != int(cfg.Dims) {
-			return 0, fmt.Errorf("ts: event[%d]: timeline %d expects %d dims, got %d (OLU-TS007)", i, e.Timeline, cfg.Dims, len(e.Dims))
+			return 0, fmt.Errorf("ts: event[%d]: timeline %d expects %d dims, got %d (XOLU-TS007)", i, e.Timeline, cfg.Dims, len(e.Dims))
 		}
 		key, err := EncodeKey(e.Timeline, cfg.Dims, e.Dims, e.Time)
 		if err != nil {
@@ -222,25 +330,53 @@ func (s *PebbleStore) AppendBatch(ctx context.Context, events []Event, maxBatch 
 		if err != nil {
 			return 0, fmt.Errorf("ts: event[%d]: %w", i, err)
 		}
-		items = append(items, prepared{key: key, val: val, tid: e.Timeline})
-	}
 
-	batch := s.db.NewBatch()
-	defer batch.Close()
-	for _, p := range items {
-		if err := batch.Set(p.key, p.val, nil); err != nil {
-			return 0, fmt.Errorf("ts: batch set: %w", err)
+		wc := wcSnapshot[e.Timeline]
+		if useCoal {
+			errCh := make(chan error, 1)
+			select {
+			case s.coalCh <- coalEntry{event: e, errCh: errCh}:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+			coalErrChs = append(coalErrChs, errCh)
+		} else {
+			if !wc.NoSync {
+				useNoSync = false
+			}
+			direct = append(direct, prepared{key: key, val: val, tid: e.Timeline})
 		}
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
-		return 0, fmt.Errorf("ts: batch commit: %w", err)
+
+	// Commit direct events.
+	if len(direct) > 0 {
+		writeOpts := pebble.Sync
+		if useNoSync {
+			writeOpts = pebble.NoSync
+		}
+		batch := s.db.NewBatch()
+		defer func() { _ = batch.Close() }()
+		for _, p := range direct {
+			if err := batch.Set(p.key, p.val, nil); err != nil {
+				return 0, fmt.Errorf("ts: batch set: %w", err)
+			}
+		}
+		if err := batch.Commit(writeOpts); err != nil {
+			return 0, fmt.Errorf("ts: batch commit: %w", err)
+		}
+		for _, p := range direct {
+			s.counter(p.tid).Add(1)
+			_ = s.reg.recordFirstWrite(p.tid)
+		}
 	}
 
-	// Update counters and lock Dims after successful commit.
-	for _, e := range events {
-		s.counter(e.Timeline).Add(1)
-		_ = s.reg.recordFirstWrite(e.Timeline)
+	// Wait for coalesced events.
+	for _, ch := range coalErrChs {
+		if err := <-ch; err != nil {
+			return 0, fmt.Errorf("ts: coalesced commit: %w", err)
+		}
 	}
+
 	return len(events), nil
 }
 
@@ -253,10 +389,10 @@ func (s *PebbleStore) AppendBatch(ctx context.Context, events []Event, maxBatch 
 func (s *PebbleStore) Delete(ctx context.Context, e Event) error {
 	cfg, ok := s.reg.get(e.Timeline)
 	if !ok {
-		return fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", e.Timeline)
+		return fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", e.Timeline)
 	}
 	if len(e.Dims) != int(cfg.Dims) {
-		return fmt.Errorf("ts: timeline %d expects %d dims, got %d (OLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
+		return fmt.Errorf("ts: timeline %d expects %d dims, got %d (XOLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
 	}
 	key, err := EncodeKey(e.Timeline, cfg.Dims, e.Dims, e.Time)
 	if err != nil {
@@ -283,7 +419,7 @@ func (s *PebbleStore) DeleteKeys(ctx context.Context, keys [][]byte) error {
 		return nil
 	}
 	batch := s.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	for _, key := range keys {
 		if err := batch.Delete(key, nil); err != nil {
 			return fmt.Errorf("ts: batch delete: %w", err)
@@ -295,15 +431,13 @@ func (s *PebbleStore) DeleteKeys(ctx context.Context, keys [][]byte) error {
 	return nil
 }
 
-
-
 func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, error) {
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 
 	limit := q.Limit
@@ -311,7 +445,7 @@ func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, er
 		limit = 1000
 	}
 	if limit > 10000 {
-		return nil, fmt.Errorf("ts: result limit %d exceeds max 10000 (OLU-TS012)", q.Limit)
+		return nil, fmt.Errorf("ts: result limit %d exceeds max 10000 (XOLU-TS012)", q.Limit)
 	}
 	desc := q.Order == "desc"
 
@@ -342,7 +476,7 @@ func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, er
 		if err != nil {
 			return nil, fmt.Errorf("ts: new iter: %w", err)
 		}
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 		var scanned int
 		for iter.First(); iter.Valid() && len(results) < limit; iter.Next() {
 			if err := ctx.Err(); err != nil {
@@ -369,7 +503,7 @@ func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, er
 		if err != nil {
 			return nil, fmt.Errorf("ts: new iter: %w", err)
 		}
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 		var scanned int
 		for iter.Last(); iter.Valid() && len(results) < limit; iter.Prev() {
 			if err := ctx.Err(); err != nil {
@@ -398,10 +532,10 @@ func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, er
 func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error) {
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 
 	n := q.N
@@ -409,10 +543,10 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 		n = 10
 	}
 	if n > 10000 {
-		return nil, fmt.Errorf("ts: n %d exceeds max 10000 (OLU-TS012)", q.N)
+		return nil, fmt.Errorf("ts: n %d exceeds max 10000 (XOLU-TS012)", q.N)
 	}
 	if !q.From.IsZero() && !q.To.IsZero() && q.From.After(q.To) {
-		return nil, fmt.Errorf("ts: latest: from (%v) is after to (%v) (OLU-TS005)", q.From, q.To)
+		return nil, fmt.Errorf("ts: latest: from (%v) is after to (%v) (XOLU-TS005)", q.From, q.To)
 	}
 
 	startKey := EncodePrefixKey(q.Timeline, padDims(q.Dims, cfg.Dims, 0))
@@ -422,7 +556,7 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 	if err != nil {
 		return nil, fmt.Errorf("ts: new iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	hasBounds := !q.From.IsZero() || !q.To.IsZero()
 
@@ -456,18 +590,18 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 func (s *PebbleStore) Aggregate(ctx context.Context, q AggregateQuery) ([]Bucket, error) {
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 	if q.NumField > 6 {
-		return nil, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return nil, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	switch q.Function {
 	case "avg", "min", "max", "sum", "count":
 	default:
-		return nil, fmt.Errorf("ts: unknown function %q (OLU-TS008)", q.Function)
+		return nil, fmt.Errorf("ts: unknown function %q (XOLU-TS008)", q.Function)
 	}
 
 	startKey, err := EncodeKey(q.Timeline, cfg.Dims, padDims(q.Dims, cfg.Dims, 0), q.From)
@@ -484,7 +618,7 @@ func (s *PebbleStore) Aggregate(ctx context.Context, q AggregateQuery) ([]Bucket
 	if err != nil {
 		return nil, fmt.Errorf("ts: new iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	// Bucketing state.
 	type bucket struct {
@@ -607,7 +741,7 @@ func rangeNumToAll(q RangeNumQuery) RangeAllQuery {
 // Syntax sugar over RangeAggregate; performs one full scan pass.
 func (s *PebbleStore) RangeSum(ctx context.Context, q RangeNumQuery) (float64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	res, err := s.RangeAggregate(ctx, rangeNumToAll(q))
 	if err != nil {
@@ -621,7 +755,7 @@ func (s *PebbleStore) RangeSum(ctx context.Context, q RangeNumQuery) (float64, e
 // Syntax sugar over RangeAggregate; performs one full scan pass.
 func (s *PebbleStore) RangeAvg(ctx context.Context, q RangeNumQuery) (float64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	res, err := s.RangeAggregate(ctx, rangeNumToAll(q))
 	if err != nil {
@@ -635,7 +769,7 @@ func (s *PebbleStore) RangeAvg(ctx context.Context, q RangeNumQuery) (float64, e
 // Syntax sugar over RangeAggregate; performs one full scan pass.
 func (s *PebbleStore) RangeMin(ctx context.Context, q RangeNumQuery) (float64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	res, err := s.RangeAggregate(ctx, rangeNumToAll(q))
 	if err != nil {
@@ -649,7 +783,7 @@ func (s *PebbleStore) RangeMin(ctx context.Context, q RangeNumQuery) (float64, e
 // Syntax sugar over RangeAggregate; performs one full scan pass.
 func (s *PebbleStore) RangeMax(ctx context.Context, q RangeNumQuery) (float64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	res, err := s.RangeAggregate(ctx, rangeNumToAll(q))
 	if err != nil {
@@ -662,7 +796,7 @@ func (s *PebbleStore) RangeMax(ctx context.Context, q RangeNumQuery) (float64, e
 // field q.NumField. Syntax sugar over RangeAggregate; performs one full scan pass.
 func (s *PebbleStore) RangeCount(ctx context.Context, q RangeNumQuery) (uint64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0–6 (XOLU-TS009)", q.NumField)
 	}
 	res, err := s.RangeAggregate(ctx, rangeNumToAll(q))
 	if err != nil {
@@ -690,7 +824,7 @@ func (s *PebbleStore) RangeCount(ctx context.Context, q RangeNumQuery) (uint64, 
 // through the Store contract.
 func (s *PebbleStore) RangeQuantile(ctx context.Context, q RangeNumQuery, quantile float64) (float64, error) {
 	if q.NumField > 6 {
-		return 0, fmt.Errorf("ts: num_field %d out of range 0\u20136 (OLU-TS009)", q.NumField)
+		return 0, fmt.Errorf("ts: num_field %d out of range 0\u20136 (XOLU-TS009)", q.NumField)
 	}
 	if quantile < 0 || quantile > 1 {
 		return 0, fmt.Errorf("ts: quantile %g out of range [0, 1]", quantile)
@@ -698,10 +832,10 @@ func (s *PebbleStore) RangeQuantile(ctx context.Context, q RangeNumQuery, quanti
 
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return 0, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return 0, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return 0, fmt.Errorf("ts: query dims %d out of range 1\u2013%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return 0, fmt.Errorf("ts: query dims %d out of range 1\u2013%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 
 	startKey, err := EncodeKey(q.Timeline, cfg.Dims, padDims(q.Dims, cfg.Dims, 0), q.From)
@@ -718,7 +852,7 @@ func (s *PebbleStore) RangeQuantile(ctx context.Context, q RangeNumQuery, quanti
 	if err != nil {
 		return 0, fmt.Errorf("ts: new iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	td, err := tdigest.New(100)
 	if err != nil {
@@ -790,10 +924,10 @@ func (s *PebbleStore) RangeMedian(ctx context.Context, q RangeNumQuery) (float64
 func (s *PebbleStore) RangeFullAggregate(ctx context.Context, q RangeFullQuery) (*RangeFullResult, error) {
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 	for _, qv := range q.Quantiles {
 		if qv < 0 || qv > 1 {
@@ -809,7 +943,7 @@ func (s *PebbleStore) RangeFullAggregate(ctx context.Context, q RangeFullQuery) 
 		} else {
 			for _, f := range q.QuantileFields {
 				if f > 6 {
-					return nil, fmt.Errorf("ts: quantile_field %d out of range 0–6 (OLU-TS009)", f)
+					return nil, fmt.Errorf("ts: quantile_field %d out of range 0–6 (XOLU-TS009)", f)
 				}
 				wantDigest[f] = true
 			}
@@ -838,7 +972,7 @@ func (s *PebbleStore) RangeFullAggregate(ctx context.Context, q RangeFullQuery) 
 	if err != nil {
 		return nil, fmt.Errorf("ts: new iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	res := &RangeFullResult{}
 	agg := &res.Aggregate
 	for i := range agg.Mins {
@@ -928,10 +1062,10 @@ func (s *PebbleStore) RangeFullAggregate(ctx context.Context, q RangeFullQuery) 
 func (s *PebbleStore) RangeAggregate(ctx context.Context, q RangeAllQuery) (*RangeAggregateResult, error) {
 	cfg, ok := s.reg.get(q.Timeline)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", q.Timeline)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	if len(q.Dims) < 1 || len(q.Dims) > int(cfg.Dims) {
-		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (OLU-TS007)", len(q.Dims), cfg.Dims)
+		return nil, fmt.Errorf("ts: query dims %d out of range 1–%d (XOLU-TS007)", len(q.Dims), cfg.Dims)
 	}
 
 	startKey, err := EncodeKey(q.Timeline, cfg.Dims, padDims(q.Dims, cfg.Dims, 0), q.From)
@@ -948,7 +1082,7 @@ func (s *PebbleStore) RangeAggregate(ctx context.Context, q RangeAllQuery) (*Ran
 	if err != nil {
 		return nil, fmt.Errorf("ts: new iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	res := &RangeAggregateResult{}
 	for i := range res.Mins {
@@ -1018,8 +1152,6 @@ func (s *PebbleStore) RangeAggregate(ctx context.Context, q RangeAllQuery) (*Ran
 	return res, nil
 }
 
-
-
 // Purge deletes events older than the applicable retention window for each
 // timeline. Timelines with effective RetentionDays == 0 are skipped (no expiry).
 func (s *PebbleStore) Purge(ctx context.Context) error {
@@ -1055,7 +1187,7 @@ func (s *PebbleStore) purgeTimeline(ctx context.Context, id TimelineID) error {
 	if err != nil {
 		return fmt.Errorf("ts: purge iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	batch := s.db.NewBatch()
 	batchCount := 0
@@ -1068,7 +1200,7 @@ func (s *PebbleStore) purgeTimeline(ctx context.Context, id TimelineID) error {
 		if err := batch.Commit(pebble.Sync); err != nil {
 			return fmt.Errorf("ts: purge commit: %w", err)
 		}
-		batch.Close()
+		_ = batch.Close()
 		batch = s.db.NewBatch()
 		batchCount = 0
 		return nil
@@ -1076,12 +1208,12 @@ func (s *PebbleStore) purgeTimeline(ctx context.Context, id TimelineID) error {
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		if err := ctx.Err(); err != nil {
-			batch.Close()
+			_ = batch.Close()
 			return err
 		}
 		ts, err := DecodeTimestamp(iter.Key(), cfg.Dims)
 		if err != nil {
-			batch.Close()
+			_ = batch.Close()
 			return err
 		}
 		if !ts.Before(cutoff) {
@@ -1090,7 +1222,7 @@ func (s *PebbleStore) purgeTimeline(ctx context.Context, id TimelineID) error {
 		keyCopy := make([]byte, len(iter.Key()))
 		copy(keyCopy, iter.Key())
 		if err := batch.Delete(keyCopy, nil); err != nil {
-			batch.Close()
+			_ = batch.Close()
 			return fmt.Errorf("ts: purge delete: %w", err)
 		}
 		batchCount++
@@ -1103,7 +1235,7 @@ func (s *PebbleStore) purgeTimeline(ctx context.Context, id TimelineID) error {
 		}
 	}
 	if err := iter.Error(); err != nil {
-		batch.Close()
+		_ = batch.Close()
 		return fmt.Errorf("ts: purge iter: %w", err)
 	}
 	if err := flush(); err != nil {
@@ -1127,6 +1259,259 @@ func (s *PebbleStore) SetDefaultRetentionDays(days int) error {
 	return s.reg.setDefaultRetention(days)
 }
 
+// --- Write performance configuration ---
+
+// coalEntry is a single event queued to the write coalescer.
+type coalEntry struct {
+	event Event
+	errCh chan error
+}
+
+// writeConfigDisk is the on-disk format for write_config.json.
+// Only per-timeline settings are stored here; store-level coalescer settings
+// live in dynconfig.
+type writeConfigDisk struct {
+	Timelines []writeConfigEntry `json:"timelines"`
+}
+
+type writeConfigEntry struct {
+	ID     uint16 `json:"id"`
+	NoSync bool   `json:"nosync"`
+}
+
+// loadWriteConfig reads write_config.json. Missing file is not an error.
+func (s *PebbleStore) loadWriteConfig() error {
+	data, err := os.ReadFile(s.wcPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("ts: read write_config.json: %w", err)
+	}
+	var disk writeConfigDisk
+	if err := json.Unmarshal(data, &disk); err != nil {
+		return fmt.Errorf("ts: parse write_config.json: %w", err)
+	}
+	for _, e := range disk.Timelines {
+		if e.NoSync {
+			s.wc[TimelineID(e.ID)] = TimelineWriteConfig{NoSync: true}
+		}
+	}
+	return nil
+}
+
+// saveWriteConfig persists the current write config. Caller must hold s.wcMu
+// at least for reading (entries are read but not modified here).
+func (s *PebbleStore) saveWriteConfig() error {
+	disk := writeConfigDisk{}
+	for id, cfg := range s.wc {
+		if cfg.NoSync {
+			disk.Timelines = append(disk.Timelines, writeConfigEntry{
+				ID:     uint16(id),
+				NoSync: cfg.NoSync,
+			})
+		}
+	}
+	data, err := json.MarshalIndent(disk, "", "  ")
+	if err != nil {
+		return fmt.Errorf("ts: marshal write_config.json: %w", err)
+	}
+	tmp := s.wcPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("ts: write write_config.json: %w", err)
+	}
+	return os.Rename(tmp, s.wcPath)
+}
+
+// WriteConfig returns the write performance configuration for the given timeline.
+// Returns the zero value (NoSync=false) if no config has been set.
+func (s *PebbleStore) WriteConfig(id TimelineID) TimelineWriteConfig {
+	s.wcMu.RLock()
+	defer s.wcMu.RUnlock()
+	return s.wc[id]
+}
+
+// SetWriteConfig updates the write performance configuration for a timeline.
+// The timeline must already be defined. The new config is persisted to disk.
+func (s *PebbleStore) SetWriteConfig(id TimelineID, cfg TimelineWriteConfig) error {
+	if _, ok := s.reg.get(id); !ok {
+		return fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", id)
+	}
+
+	s.wcMu.Lock()
+	if cfg.NoSync {
+		s.wc[id] = cfg
+	} else {
+		delete(s.wc, id)
+	}
+	err := s.saveWriteConfig()
+	s.wcMu.Unlock()
+
+	return err
+}
+
+// coalEnabled reports whether write coalescing is active for this store.
+// It checks the tenant-scoped dynconfig namespace first, then "global".
+// Returns false when dynconfig is not configured.
+func (s *PebbleStore) coalEnabled() bool {
+	if s.dc == nil {
+		return false
+	}
+	ns := dynconfig.TenantNamespace(s.tenantName)
+	if v, ok := s.dc.GetBool(ns, "ts.writecoal"); ok {
+		return v
+	}
+	v, _ := s.dc.GetBool("global", "ts.writecoal")
+	return v
+}
+
+// coalParams returns the current flush interval and max-events threshold,
+// reading from dynconfig with tenant-then-global fallback and then the
+// store-level defaults set at open time.
+func (s *PebbleStore) coalParams() (time.Duration, int) {
+	interval := s.coalFlushInterval
+	maxEvt := s.coalMaxEvents
+
+	if s.dc != nil {
+		ns := dynconfig.TenantNamespace(s.tenantName)
+		if n, ok := s.dc.GetInt64(ns, "ts.coal_flush_interval_ms"); ok && n > 0 {
+			interval = time.Duration(n) * time.Millisecond
+		} else if n, ok := s.dc.GetInt64("global", "ts.coal_flush_interval_ms"); ok && n > 0 {
+			interval = time.Duration(n) * time.Millisecond
+		}
+		if n, ok := s.dc.GetInt64(ns, "ts.coal_max_events"); ok && n > 0 {
+			maxEvt = int(n)
+		} else if n, ok := s.dc.GetInt64("global", "ts.coal_max_events"); ok && n > 0 {
+			maxEvt = int(n)
+		}
+	}
+	return interval, maxEvt
+}
+
+// startCoalescer starts the write-coalescing goroutine exactly once.
+func (s *PebbleStore) startCoalescer() {
+	s.coalOnce.Do(func() {
+		s.coalStarted.Store(true)
+		go s.coalescerLoop()
+	})
+}
+
+// coalescerLoop drains coalCh, accumulating events into a batch and committing
+// every s.coalFlushInterval or when s.coalMaxEvents are queued, whichever
+// comes first. Each caller's errCh receives the commit result.
+func (s *PebbleStore) coalescerLoop() {
+	defer close(s.coalDone)
+
+	type pending struct {
+		entry coalEntry
+		key   []byte
+		val   []byte
+	}
+
+	// Read initial params; re-read on every tick so dynconfig changes take
+	// effect within one flush cycle without requiring a store restart.
+	interval, maxEvt := s.coalParams()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var buf []pending
+
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+
+		// Determine sync option: if any event's timeline requires sync, use Sync.
+		opts := pebble.NoSync
+		s.wcMu.RLock()
+		for _, p := range buf {
+			wc, ok := s.wc[p.entry.event.Timeline]
+			if !ok || !wc.NoSync {
+				opts = pebble.Sync
+				break
+			}
+		}
+		s.wcMu.RUnlock()
+
+		batch := s.db.NewBatch()
+		for _, p := range buf {
+			_ = batch.Set(p.key, p.val, nil)
+		}
+		err := batch.Commit(opts)
+		_ = batch.Close()
+
+		if err == nil {
+			for _, p := range buf {
+				s.counter(p.entry.event.Timeline).Add(1)
+				_ = s.reg.recordFirstWrite(p.entry.event.Timeline)
+			}
+		}
+		for _, p := range buf {
+			p.entry.errCh <- err
+		}
+		buf = buf[:0]
+	}
+
+	for {
+		select {
+		case <-s.coalStop:
+			// Drain remaining entries before exiting.
+			for {
+				select {
+				case e := <-s.coalCh:
+					cfg, _ := s.reg.get(e.event.Timeline)
+					key, err := EncodeKey(e.event.Timeline, cfg.Dims, e.event.Dims, e.event.Time)
+					if err != nil {
+						e.errCh <- err
+						continue
+					}
+					val, err := EncodeValue(e.event.Nums, e.event.Payload)
+					if err != nil {
+						e.errCh <- err
+						continue
+					}
+					buf = append(buf, pending{entry: e, key: key, val: val})
+				default:
+					flush()
+					return
+				}
+			}
+
+		case e := <-s.coalCh:
+			cfg, ok := s.reg.get(e.event.Timeline)
+			if !ok {
+				e.errCh <- fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", e.event.Timeline)
+				continue
+			}
+			key, err := EncodeKey(e.event.Timeline, cfg.Dims, e.event.Dims, e.event.Time)
+			if err != nil {
+				e.errCh <- err
+				continue
+			}
+			val, err := EncodeValue(e.event.Nums, e.event.Payload)
+			if err != nil {
+				e.errCh <- err
+				continue
+			}
+			buf = append(buf, pending{entry: e, key: key, val: val})
+			if len(buf) >= maxEvt {
+				flush()
+			}
+
+		case <-ticker.C:
+			flush()
+			// Re-read dynconfig params on each tick; reset ticker if interval
+			// changed so the new setting takes effect immediately.
+			newInterval, newMax := s.coalParams()
+			maxEvt = newMax
+			if newInterval != interval {
+				interval = newInterval
+				ticker.Reset(interval)
+			}
+		}
+	}
+}
+
 // --- Diagnostics ---
 
 func (s *PebbleStore) Stats(_ context.Context) (*StoreStats, error) {
@@ -1143,7 +1528,7 @@ func (s *PebbleStore) Stats(_ context.Context) (*StoreStats, error) {
 func (s *PebbleStore) TimelineStats(ctx context.Context, id TimelineID) (*TimelineStats, error) {
 	cfg, ok := s.reg.get(id)
 	if !ok {
-		return nil, fmt.Errorf("ts: timeline %d not defined (OLU-TS004)", id)
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", id)
 	}
 
 	count := s.counter(id).Load()
@@ -1162,7 +1547,7 @@ func (s *PebbleStore) TimelineStats(ctx context.Context, id TimelineID) (*Timeli
 	if err != nil {
 		return nil, fmt.Errorf("ts: stats iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	if iter.First() {
 		if ts, err := DecodeTimestamp(iter.Key(), cfg.Dims); err == nil {
@@ -1180,6 +1565,19 @@ func (s *PebbleStore) TimelineStats(ctx context.Context, id TimelineID) (*Timeli
 // --- Lifecycle ---
 
 func (s *PebbleStore) Close() error {
+	// Stop all rollup workers.
+	s.rollupWorkersMu.Lock()
+	for id, w := range s.rollupWorkers {
+		w.stop()
+		delete(s.rollupWorkers, id)
+	}
+	s.rollupWorkersMu.Unlock()
+
+	// Stop coalescer.
+	if s.coalStarted.Load() {
+		close(s.coalStop)
+		<-s.coalDone
+	}
 	_ = s.flushMeta()
 	return s.db.Close()
 }
@@ -1205,17 +1603,17 @@ func (s *PebbleStore) counter(id TimelineID) *atomic.Int64 {
 
 func (s *PebbleStore) validateEvent(e Event) error {
 	if e.Timeline == 0 {
-		return fmt.Errorf("ts: timeline ID 0x0000 is reserved (OLU-TS018)")
+		return fmt.Errorf("ts: timeline ID 0x0000 is reserved (%s)", xoluerr.ErrTSReservedID)
 	}
-	if e.Time.Before(time.Unix(0, 0)) {
-		return fmt.Errorf("ts: timestamp before Unix epoch (OLU-TS005)")
+	if e.Time.Before(time.Unix(0, 0).UTC()) {
+		return fmt.Errorf("ts: timestamp before Unix epoch (XOLU-TS005)")
 	}
 	if len(e.Nums) > 7 {
 		return fmt.Errorf("ts: at most 7 numeric fields, got %d", len(e.Nums))
 	}
 	for i, v := range e.Nums {
 		if math.IsNaN(v) {
-			return fmt.Errorf("ts: NaN in Nums[%d] (OLU-TS017)", i)
+			return fmt.Errorf("ts: NaN in Nums[%d] (%s)", i, xoluerr.ErrTSNaNValue)
 		}
 	}
 	return nil

@@ -8,27 +8,30 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 
-	"github.com/ha1tch/xolu/pkg/tenant"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 )
 
 // DefaultManager manages per-tenant Store lifecycle.
 // It is backend-agnostic — the StoreFactory controls which engine is used.
 type DefaultManager struct {
-	baseDir string
-	factory StoreFactory
-	config  StoreConfig
-	stores  sync.Map   // tenantID (uint16) -> Store
-	known   sync.Map   // tenantID (uint16) -> struct{}
-	mu      sync.Mutex // serialises Provision and lazy-open
+	baseDir     string
+	factory     StoreFactory
+	config      StoreConfig
+	stores      sync.Map   // tenantID (uint16) -> Store
+	known       sync.Map   // tenantID (uint16) -> struct{}
+	tenantNames sync.Map   // tenantID (uint16) -> string (tenant name)
+	mu          sync.Mutex // serialises Provision and lazy-open
 }
 
-// NewManager creates a timeseries manager. It scans baseDir for existing
-// tenant directories and registers them as provisioned (lazy-open on first
-// request).
+// NewManager creates a timeseries manager rooted at the data root (baseDir).
+// Each tenant's timeseries store lives at <baseDir>/tXXXX/ts (tenant-first,
+// derived by pkg/storelayout). NewManager scans the data root for existing
+// tenant directories that already contain a ts/ subdirectory and registers them
+// as provisioned (lazy-open on first request). Tenant names for pre-existing
+// stores are not known at scan time; they are recorded on the first StoreFor
+// call that provides a name via Provision.
 func NewManager(baseDir string, factory StoreFactory, cfg StoreConfig) (*DefaultManager, error) {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("ts manager: mkdir %s: %w", baseDir, err)
@@ -48,7 +51,15 @@ func NewManager(baseDir string, factory StoreFactory, cfg StoreConfig) (*Default
 		if !e.IsDir() {
 			continue
 		}
-		if id, ok := parseTenantDirName(e.Name()); ok {
+		id, ok := sl.ParseTenantSegment(e.Name())
+		if !ok {
+			continue
+		}
+		// A tenant counts as having timeseries data only if its ts/ role
+		// directory exists. Tenant directories without one are SQLite-only so
+		// far and will get a ts/ on first Provision.
+		tsDir := sl.TenantTSDir(baseDir, id)
+		if info, statErr := os.Stat(tsDir); statErr == nil && info.IsDir() {
 			m.known.Store(id, struct{}{})
 		}
 	}
@@ -56,15 +67,18 @@ func NewManager(baseDir string, factory StoreFactory, cfg StoreConfig) (*Default
 }
 
 // Provision creates a timeseries store for a tenant. Idempotent.
-func (m *DefaultManager) Provision(ctx context.Context, tenantID uint16) error {
+// tenantName is stored for use as the dynconfig namespace scope.
+func (m *DefaultManager) Provision(ctx context.Context, tenantID uint16, tenantName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.tenantNames.Store(tenantID, tenantName)
 
 	if _, loaded := m.stores.Load(tenantID); loaded {
 		return nil
 	}
 	dir := m.tenantDir(tenantID)
-	store, err := m.factory(dir, m.config)
+	store, err := m.factory(dir, m.config, tenantName)
 	if err != nil {
 		return fmt.Errorf("ts provision tenant %d: %w", tenantID, err)
 	}
@@ -74,12 +88,13 @@ func (m *DefaultManager) Provision(ctx context.Context, tenantID uint16) error {
 }
 
 // StoreFor returns the Store for a tenant, opening it lazily if needed.
+// On lazy open, uses the tenant name previously recorded by Provision (if any).
 func (m *DefaultManager) StoreFor(tenantID uint16) (Store, error) {
 	if v, ok := m.stores.Load(tenantID); ok {
 		return v.(Store), nil
 	}
 	if _, ok := m.known.Load(tenantID); !ok {
-		return nil, fmt.Errorf("tenant %d not provisioned for timeseries (OLU-TS003)", tenantID)
+		return nil, fmt.Errorf("tenant %d not provisioned for timeseries (XOLU-TS003)", tenantID)
 	}
 
 	m.mu.Lock()
@@ -88,8 +103,16 @@ func (m *DefaultManager) StoreFor(tenantID uint16) (Store, error) {
 	if v, ok := m.stores.Load(tenantID); ok {
 		return v.(Store), nil
 	}
+
+	// Retrieve the tenant name recorded during Provision (may be empty string
+	// for stores discovered from disk at startup before any Provision call).
+	tenantName := ""
+	if v, ok := m.tenantNames.Load(tenantID); ok {
+		tenantName = v.(string)
+	}
+
 	dir := m.tenantDir(tenantID)
-	store, err := m.factory(dir, m.config)
+	store, err := m.factory(dir, m.config, tenantName)
 	if err != nil {
 		return nil, fmt.Errorf("ts lazy open tenant %d: %w", tenantID, err)
 	}
@@ -119,17 +142,5 @@ func (m *DefaultManager) Close() error {
 // --- Internal ---
 
 func (m *DefaultManager) tenantDir(tenantID uint16) string {
-	return filepath.Join(m.baseDir, tenant.StorageDirSegment(tenantID))
-}
-
-func parseTenantDirName(name string) (uint16, bool) {
-	if !strings.HasPrefix(name, "t") || len(name) < 2 {
-		return 0, false
-	}
-	var id uint16
-	n, err := fmt.Sscanf(name, "t%x", &id)
-	if err != nil || n != 1 {
-		return 0, false
-	}
-	return id, true
+	return sl.TenantTSDir(m.baseDir, tenantID)
 }

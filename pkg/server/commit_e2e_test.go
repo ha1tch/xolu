@@ -8,10 +8,7 @@ package server_test
 //
 // End-to-end tests for the /commit endpoint through the HTTP layer.
 //
-// /commit is only available on the SQLite backend; the jsonfile backend
-// returns 501 Not Implemented. All substantive tests therefore use a
-// SQLite environment. The 501 behaviour is verified separately using
-// the standard jsonfile e2e env.
+// All tests use a SQLite environment.
 //
 // Tests cover:
 //   - Basic happy path (create + append)
@@ -19,7 +16,6 @@ package server_test
 //   - CAS conflict (stale version → 409 with current_version)
 //   - Validation errors (structural: missing entity, empty append)
 //   - Rollback on duplicate explicit append ID
-//   - 501 on jsonfile backend
 //   - Strict mode: schema validation failure blocks the commit
 
 import (
@@ -44,14 +40,14 @@ import (
 // ----------------------------------------------------------------------------
 
 // commitEnv is a fully-wired test server backed by SQLite.
-// It is separate from the jsonfile-backed e2eEnv because /commit requires SQLite.
+// It uses a dedicated SQLite environment separate from the standard e2eEnv.
 type commitEnv struct {
 	*e2eEnv
 }
 
 func newCommitEnv(t *testing.T) *commitEnv {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "olu-commit-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-commit-e2e-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +60,6 @@ func newCommitEnv(t *testing.T) *commitEnv {
 		Host:                  "localhost",
 		Port:                  0,
 		StorageType:           "sqlite",
-		DBPath:                dbPath,
 		BaseDir:               tmpDir,
 		Schema:                "commit_schema",
 		SchemaDir:             schemaDir,
@@ -85,9 +80,7 @@ func newCommitEnv(t *testing.T) *commitEnv {
 		QueryMaxRows:          10000,
 		QueryMaxScanRows:      100000,
 		QueryMaxResponseBytes: 10485760,
-		GraphDataFile:         filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:        filepath.Join(tmpDir, "graph.index"),
-		GraphQueryTTL:         86400,
+		AsyncJobRetentionTTL:  86400,
 		MaxQueryDepth:         10,
 		StrictCommit:          true,
 	}
@@ -105,7 +98,7 @@ func newCommitEnv(t *testing.T) *commitEnv {
 	validator := validation.NewJSONSchemaValidator(filepath.Join(schemaDir, "_schemas"))
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	inner := &e2eEnv{ts: ts, tmpDir: tmpDir, t: t}
@@ -261,8 +254,8 @@ func TestCommitE2E_CASConflict(t *testing.T) {
 		t.Fatalf("expected 409, got %d: %v", status, result)
 	}
 	errObj, _ := result["error"].(map[string]interface{})
-	if errObj == nil || errObj["code"] != "OLU-CM001" {
-		t.Errorf("expected OLU-CM001, got: %v", result)
+	if errObj == nil || errObj["code"] != "XOLU-CM001" {
+		t.Errorf("expected XOLU-CM001, got: %v", result)
 	}
 	if cv, ok := result["current_version"].(float64); !ok || cv <= 0 {
 		t.Errorf("expected positive current_version, got %v", result["current_version"])
@@ -292,7 +285,7 @@ func TestCommitE2E_ValidationErrors(t *testing.T) {
 				"update": map[string]interface{}{"id": 1, "data": map[string]interface{}{}},
 				"append": []interface{}{map[string]interface{}{"entity": "events", "data": map[string]interface{}{}}},
 			},
-			wantCode: "OLU-CM002",
+			wantCode: "XOLU-CM002",
 		},
 		{
 			name: "empty append array",
@@ -300,7 +293,7 @@ func TestCommitE2E_ValidationErrors(t *testing.T) {
 				"update": map[string]interface{}{"entity": "assets", "id": 1, "data": map[string]interface{}{}},
 				"append": []interface{}{},
 			},
-			wantCode: "OLU-CM003",
+			wantCode: "XOLU-CM003",
 		},
 	}
 
@@ -349,49 +342,13 @@ func TestCommitE2E_AppendDuplicateIDRollback(t *testing.T) {
 		t.Fatalf("expected 409, got %d: %v", status, result)
 	}
 	errObj, _ := result["error"].(map[string]interface{})
-	if errObj == nil || errObj["code"] != "OLU-CM007" {
-		t.Errorf("expected OLU-CM007, got: %v", result)
+	if errObj == nil || errObj["code"] != "XOLU-CM007" {
+		t.Errorf("expected XOLU-CM007, got: %v", result)
 	}
 
 	getStatus, _ := env.doJSON("GET", "/api/v1/assets/3001", nil)
 	if getStatus != http.StatusNotFound {
 		t.Errorf("asset 3001 should not exist after rollback, got status %d", getStatus)
-	}
-}
-
-// ----------------------------------------------------------------------------
-// 501 on jsonfile backend
-// ----------------------------------------------------------------------------
-
-// TestCommitE2E_JSONFileReturns501 verifies that /commit returns 501 Not
-// Implemented when the server is running with the jsonfile backend.
-// The jsonfile backend is deprecated and does not provide true transactional
-// atomicity. OLU-CM009 is the canonical error code for this condition.
-func TestCommitE2E_JSONFileReturns501(t *testing.T) {
-	env := newE2EEnv(t) // standard jsonfile-backed env
-	defer env.cleanup()
-
-	req := map[string]interface{}{
-		"update": map[string]interface{}{
-			"entity": "assets",
-			"id":     1,
-			"data":   map[string]interface{}{"state": "x"},
-		},
-		"append": []interface{}{
-			map[string]interface{}{
-				"entity": "events",
-				"data":   map[string]interface{}{"ev": "test"},
-			},
-		},
-	}
-
-	status, result := env.doJSON("POST", commitURL(""), req)
-	if status != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %v", status, result)
-	}
-	errObj, _ := result["error"].(map[string]interface{})
-	if errObj == nil || errObj["code"] != "OLU-CM009" {
-		t.Errorf("expected OLU-CM009, got: %v", result)
 	}
 }
 
@@ -440,8 +397,8 @@ func TestCommitE2E_StrictModeSchemaValidation(t *testing.T) {
 		t.Fatalf("strict mode: expected 400 for schema violation, got %d: %v", status, result)
 	}
 	errObj, _ := result["error"].(map[string]interface{})
-	if errObj == nil || errObj["code"] != "OLU-VL001" {
-		t.Errorf("expected OLU-VL001, got: %v", result)
+	if errObj == nil || errObj["code"] != "XOLU-VL001" {
+		t.Errorf("expected XOLU-VL001, got: %v", result)
 	}
 
 	// Nothing should have been written.

@@ -15,7 +15,7 @@ package server_test
 //   - Testing graph endpoints with adversarial/edge-case inputs
 //   - Exercising graph + OQL combined workflows
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 
 import (
 	"fmt"
@@ -40,11 +40,11 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 		"name": "Pump", "code": "PMP",
 	})
 	aID := env.create("/api/v1/assets", map[string]interface{}{
-		"code": "PMP-001",
+		"code":       "PMP-001",
 		"asset_type": ref("asset_types", atID),
 	})
 	sID := env.create("/api/v1/sensors", map[string]interface{}{
-		"code": "TEMP-01",
+		"code":  "TEMP-01",
 		"asset": ref("assets", aID),
 	})
 	env.create("/api/v1/events", map[string]interface{}{
@@ -56,7 +56,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 
 	t.Run("GET /graph/stats shape", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/graph/stats", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "node_count", "float64")
 		assertFieldType(t, r, "edge_count", "float64")
 		nc := int(toF64(r["node_count"]))
@@ -76,7 +76,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 
 	t.Run("GET /graph/nodes/{id} shape", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/graph/nodes/%s", assetNode), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "id", "string")
 		assertFieldType(t, r, "entity", "string")
 		assertFieldType(t, r, "entity_id", "float64")
@@ -119,7 +119,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 
 	t.Run("GET /graph/nodes/{id}/degree shape", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/graph/nodes/%s/degree", assetNode), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "node_id", "string")
 		assertFieldExists(t, r, "degree")
 		if r["node_id"] != assetNode {
@@ -129,7 +129,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 
 	t.Run("GET /graph/{id}/in shape", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/graph/%s/in", assetNode), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "node_id", "string")
 		assertFieldType(t, r, "count", "float64")
 		edges := r["edges"].([]interface{})
@@ -148,7 +148,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 
 	t.Run("GET /graph/{id}/out shape", func(t *testing.T) {
 		status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/graph/%s/out", assetNode), nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		edges := r["edges"].([]interface{})
 		if len(edges) != 1 {
 			t.Errorf("expected 1 outgoing edge, got %d", len(edges))
@@ -170,7 +170,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 			"from": fmt.Sprintf("events:%d", 1),
 			"to":   atNode,
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "from", "string")
 		assertFieldType(t, r, "to", "string")
 		assertFieldType(t, r, "exists", "bool")
@@ -189,7 +189,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 			"from": sensorNode,
 			"to":   atNode,
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "from", "string")
 		assertFieldType(t, r, "to", "string")
 		assertFieldType(t, r, "exists", "bool")
@@ -204,7 +204,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 			"node_a": sensorNode,
 			"node_b": fmt.Sprintf("events:%d", 1),
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "node_a", "string")
 		assertFieldType(t, r, "node_b", "string")
 		assertFieldType(t, r, "count", "float64")
@@ -225,7 +225,7 @@ func TestGraphHTTP_ResponseShapes(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/nodes/search", map[string]interface{}{
 			"entity": "assets",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		assertFieldType(t, r, "count", "float64")
 		nodes := r["nodes"].([]interface{})
 		if len(nodes) != 1 {
@@ -293,7 +293,7 @@ func TestGraphHTTP_PatchRefChange(t *testing.T) {
 	// Verify initial edge
 	assetNode := fmt.Sprintf("assets:%d", aID)
 	status, r := env.doJSON("GET", fmt.Sprintf("/api/v1/graph/%s/out", assetNode), nil)
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 	edges := r["edges"].([]interface{})
 	if len(edges) != 1 {
 		t.Fatalf("expected 1 outgoing edge, got %d", len(edges))
@@ -307,11 +307,11 @@ func TestGraphHTTP_PatchRefChange(t *testing.T) {
 	status, _ = env.doJSON("PATCH", fmt.Sprintf("/api/v1/assets/%d", aID), map[string]interface{}{
 		"asset_type": ref("asset_types", at2),
 	})
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 
 	// Verify edge changed
 	status, r = env.doJSON("GET", fmt.Sprintf("/api/v1/graph/%s/out", assetNode), nil)
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 	edges = r["edges"].([]interface{})
 	if len(edges) != 1 {
 		t.Errorf("expected 1 outgoing edge after PATCH, got %d", len(edges))
@@ -356,7 +356,7 @@ func TestGraphHTTP_PutReplacesAllEdges(t *testing.T) {
 		"code":       "MOT-001",
 		"asset_type": ref("asset_types", atID),
 	})
-	assertStatus(t, status, 200)
+	assertStatusCode(t, status, 200)
 
 	// Now only 1 edge should remain
 	_, r = env.doJSON("GET", fmt.Sprintf("/api/v1/graph/%s/out", assetNode), nil)
@@ -556,7 +556,7 @@ func TestGraphHTTP_AdversarialInputs(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/shortestPath", map[string]interface{}{
 			"from": "assets:1", "to": "assets:1",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		// Path to self should exist with length 0
 		if r["exists"] != true {
 			t.Error("path to self should exist")
@@ -567,7 +567,7 @@ func TestGraphHTTP_AdversarialInputs(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/pathExists", map[string]interface{}{
 			"from": "assets:1", "to": "assets:1",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		if r["exists"] != true {
 			t.Error("pathExists to self should be true")
 		}
@@ -580,7 +580,7 @@ func TestGraphHTTP_AdversarialInputs(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/commonNeighbors", map[string]interface{}{
 			"node_a": "assets:1", "node_b": "assets:1",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		// Common neighbors of a node with itself = all its neighbors
 		// Should not crash or return error
 		_ = r
@@ -600,7 +600,7 @@ func TestGraphHTTP_AdversarialInputs(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/nodes/search", map[string]interface{}{
 			"entity": "",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		// Empty entity = search all nodes
 		_ = r
 	})
@@ -628,7 +628,7 @@ func TestGraphHTTP_AdversarialInputs(t *testing.T) {
 			"entity": "assets",
 			"limit":  999999,
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 	})
 
 	t.Run("graph endpoint with extra unknown fields", func(t *testing.T) {
@@ -653,7 +653,7 @@ func TestGraphHTTP_EmptyGraphQueries(t *testing.T) {
 
 	t.Run("stats on empty", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/graph/stats", nil)
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		if toF64(r["node_count"]) != 0 {
 			t.Errorf("expected 0 nodes, got %v", r["node_count"])
 		}
@@ -676,7 +676,7 @@ func TestGraphHTTP_EmptyGraphQueries(t *testing.T) {
 	t.Run("in edges on empty", func(t *testing.T) {
 		status, r := env.doJSON("GET", "/api/v1/graph/assets:1/in", nil)
 		// The handler doesn't check if node exists, just returns empty
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		edges, _ := r["edges"].([]interface{})
 		if len(edges) != 0 {
 			t.Errorf("expected 0 edges, got %d", len(edges))
@@ -687,7 +687,7 @@ func TestGraphHTTP_EmptyGraphQueries(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/shortestPath", map[string]interface{}{
 			"from": "a:1", "to": "b:1",
 		})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		if r["exists"] != false {
 			t.Error("should be no path on empty graph")
 		}
@@ -695,7 +695,7 @@ func TestGraphHTTP_EmptyGraphQueries(t *testing.T) {
 
 	t.Run("search all on empty", func(t *testing.T) {
 		status, r := env.doJSON("POST", "/api/v1/graph/nodes/search", map[string]interface{}{})
-		assertStatus(t, status, 200)
+		assertStatusCode(t, status, 200)
 		nodes, _ := r["nodes"].([]interface{})
 		if len(nodes) != 0 {
 			t.Errorf("expected 0 nodes, got %d", len(nodes))
@@ -761,7 +761,7 @@ func TestGraphHTTP_GraphAndOQLConsistency(t *testing.T) {
 // Assertion helpers
 // ============================================================================
 
-func assertStatus(t *testing.T, got, want int) {
+func assertStatusCode(t *testing.T, got, want int) {
 	t.Helper()
 	if got != want {
 		t.Errorf("status: expected %d, got %d", want, got)

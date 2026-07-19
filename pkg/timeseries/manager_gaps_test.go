@@ -6,59 +6,12 @@ package timeseries
 
 import (
 	"context"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
-
-// ---------------------------------------------------------------------------
-// parseTenantDirName
-// ---------------------------------------------------------------------------
-
-func TestParseTenantDirName_Valid(t *testing.T) {
-	cases := []struct {
-		name     string
-		input    string
-		wantID   uint16
-		wantOK   bool
-	}{
-		{"tenant 1",    "t0001", 1,      true},
-		{"tenant 255",  "t00ff", 255,    true},
-		{"tenant 0",    "t0000", 0,      true},
-		{"max uint16",  "tffff", 65535,  true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			id, ok := parseTenantDirName(c.input)
-			if ok != c.wantOK {
-				t.Fatalf("ok: got %v, want %v", ok, c.wantOK)
-			}
-			if ok && id != c.wantID {
-				t.Errorf("id: got %d, want %d", id, c.wantID)
-			}
-		})
-	}
-}
-
-func TestParseTenantDirName_Invalid(t *testing.T) {
-	cases := []string{
-		"",           // empty
-		"t",          // too short
-		"x0001",      // wrong prefix
-		"0001",       // no prefix
-		"txyz",       // non-hex after t
-		"data",       // random dirname
-	}
-	for _, s := range cases {
-		t.Run(s, func(t *testing.T) {
-			_, ok := parseTenantDirName(s)
-			if ok {
-				t.Errorf("expected false for %q, got true", s)
-			}
-		})
-	}
-}
 
 // ---------------------------------------------------------------------------
 // DefaultManager — IsProvisioned, StoreFor lazy open
@@ -67,7 +20,7 @@ func TestParseTenantDirName_Invalid(t *testing.T) {
 func newTestManager(t *testing.T) (*DefaultManager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), StoreConfig{})
+	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), StoreConfig{})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -84,7 +37,7 @@ func TestIsProvisioned_FalseBeforeProvision(t *testing.T) {
 
 func TestIsProvisioned_TrueAfterProvision(t *testing.T) {
 	m, _ := newTestManager(t)
-	if err := m.Provision(context.Background(), 1); err != nil {
+	if err := m.Provision(context.Background(), 1, ""); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	if !m.IsProvisioned(1) {
@@ -104,12 +57,12 @@ func TestStoreFor_LazyOpen(t *testing.T) {
 	dir := t.TempDir()
 
 	// First manager: provision tenant 7 and write a timeline.
-	m1, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), StoreConfig{})
+	m1, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), StoreConfig{})
 	if err != nil {
 		t.Fatalf("NewManager m1: %v", err)
 	}
 	ctx := context.Background()
-	if err := m1.Provision(ctx, 7); err != nil {
+	if err := m1.Provision(ctx, 7, ""); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	s1, err := m1.StoreFor(7)
@@ -122,7 +75,7 @@ func TestStoreFor_LazyOpen(t *testing.T) {
 	_ = m1.Close()
 
 	// Second manager: scan discovers t0007, lazy-opens on first StoreFor.
-	m2, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), StoreConfig{})
+	m2, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), StoreConfig{})
 	if err != nil {
 		t.Fatalf("NewManager m2: %v", err)
 	}
@@ -157,7 +110,7 @@ func TestStoreFor_LazyOpen(t *testing.T) {
 func newTestStore(t *testing.T) Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewPebbleStoreFactory(testPebbleConfig())(dir, StoreConfig{})
+	s, err := NewPebbleStoreFactory(testPebbleConfig(), nil)(dir, StoreConfig{}, "")
 	if err != nil {
 		t.Fatalf("NewPebbleStore: %v", err)
 	}
@@ -242,12 +195,18 @@ func TestStats_WithTimelines(t *testing.T) {
 func TestNewManager_ScansExistingTenantDirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create valid tenant dirs manually.
-	for _, sub := range []string{"t0001", "t0002", "notenant", "randomdir"} {
-		_ = os.MkdirAll(filepath.Join(dir, sub), 0755)
+	// Tenant-first layout: a tenant counts as having timeseries data only if its
+	// ts/ role directory exists at <base>/tXXXX/ts. Create that for t0001/t0002.
+	for _, id := range []uint16{1, 2} {
+		_ = os.MkdirAll(sl.TenantTSDir(dir, id), 0755)
 	}
+	// A tenant directory without a ts/ subdir (SQLite-only) and non-tenant dirs
+	// must NOT be registered as timeseries-provisioned.
+	_ = os.MkdirAll(sl.TenantStoreDir(dir, 3), 0755) // t0003 has store/ but no ts/
+	_ = os.MkdirAll(filepath.Join(dir, "notenant"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "randomdir"), 0755)
 
-	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), StoreConfig{})
+	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), StoreConfig{})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -259,11 +218,12 @@ func TestNewManager_ScansExistingTenantDirs(t *testing.T) {
 	if !m.IsProvisioned(2) {
 		t.Error("expected tenant 2 to be known from scan")
 	}
-	// "notenant" and "t00gg" should not parse as valid tenant dirs;
-	// those would only ever resolve to tenant ID 0 if they happened to
-	// parse at all, and tenant 0 was not created here.
+	if m.IsProvisioned(3) {
+		t.Error("tenant 3 has no ts/ dir and must not be timeseries-provisioned")
+	}
+	// Non-tenant directories must not cause tenant 0 to appear provisioned.
 	if m.IsProvisioned(0) {
-		t.Error("non-hex dir should not cause tenant 0 to appear provisioned")
+		t.Error("non-tenant dir should not cause tenant 0 to appear provisioned")
 	}
 }
 
@@ -277,7 +237,7 @@ func TestNewManager_IgnoresFiles(t *testing.T) {
 	}
 	f.Close()
 
-	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), StoreConfig{})
+	m, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), StoreConfig{})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

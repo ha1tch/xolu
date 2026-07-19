@@ -8,7 +8,7 @@ package server_test
 //
 // Verifies that backend limits (TSMax* and TSQueryTimeoutSecs config fields)
 // are enforced at the HTTP layer. Each test sets deliberately low limits via
-// config override and asserts the correct status code and OLU-TS error code.
+// config override and asserts the correct status code and XOLU-TS error code.
 //
 // Pattern mirrors guardrail_test.go.
 
@@ -46,7 +46,7 @@ func seedGuardrailTimeline(t *testing.T, env *tsEnv, tenant string, n int) (from
 }
 
 // TestTSGuardrail_MaxScanEvents verifies that a query hitting TSMaxScanEvents
-// is aborted and returns 413 with OLU-TS013.
+// is aborted and returns 413 with XOLU-TS013.
 func TestTSGuardrail_MaxScanEvents(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) {
 		cfg.TSMaxScanEvents = 5
@@ -59,8 +59,8 @@ func TestTSGuardrail_MaxScanEvents(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS013" {
-		t.Errorf("code %q, want OLU-TS013", code)
+	if code := tsErrCode(result); code != "XOLU-TS013" {
+		t.Errorf("code %q, want XOLU-TS013", code)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestTSGuardrail_MaxQueryEvents(t *testing.T) {
 }
 
 // TestTSGuardrail_MaxResponseBytes verifies that a response exceeding
-// TSMaxResponseBytes returns 413 with OLU-TS014.
+// TSMaxResponseBytes returns 413 with XOLU-TS014.
 func TestTSGuardrail_MaxResponseBytes(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) {
 		cfg.TSMaxResponseBytes = 50 // tiny — any non-empty response will exceed this
@@ -98,13 +98,13 @@ func TestTSGuardrail_MaxResponseBytes(t *testing.T) {
 	if status != http.StatusRequestEntityTooLarge {
 		t.Errorf("expected 413, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS013" {
-		t.Errorf("code %q, want OLU-TS014", code)
+	if code := tsErrCode(result); code != "XOLU-TS013" {
+		t.Errorf("code %q, want XOLU-TS014", code)
 	}
 }
 
 // TestTSGuardrail_MaxRangeDays verifies that a query window exceeding
-// TSMaxRangeDays returns 400 with OLU-TS011.
+// TSMaxRangeDays returns 400 with XOLU-TS011.
 func TestTSGuardrail_MaxRangeDays(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) {
 		cfg.TSMaxRangeDays = 7
@@ -120,13 +120,13 @@ func TestTSGuardrail_MaxRangeDays(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS011" {
-		t.Errorf("code %q, want OLU-TS011", code)
+	if code := tsErrCode(result); code != "XOLU-TS011" {
+		t.Errorf("code %q, want XOLU-TS011", code)
 	}
 }
 
 // TestTSGuardrail_MaxBatchSize verifies that a batch exceeding TSMaxBatchSize
-// returns 400 with OLU-TS006.
+// returns 400 with XOLU-TS006.
 func TestTSGuardrail_MaxBatchSize(t *testing.T) {
 	env := setupTSServer(t, func(cfg *config.Config) {
 		cfg.TSMaxBatchSize = 3
@@ -148,8 +148,8 @@ func TestTSGuardrail_MaxBatchSize(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS006" {
-		t.Errorf("code %q, want OLU-TS006", code)
+	if code := tsErrCode(result); code != "XOLU-TS006" {
+		t.Errorf("code %q, want XOLU-TS006", code)
 	}
 }
 
@@ -169,8 +169,8 @@ func TestTSGuardrail_MaxScanEvents_Aggregate(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %v", status, result)
 	}
-	if code := tsErrCode(result); code != "OLU-TS013" {
-		t.Errorf("code %q, want OLU-TS013", code)
+	if code := tsErrCode(result); code != "XOLU-TS013" {
+		t.Errorf("code %q, want XOLU-TS013", code)
 	}
 }
 

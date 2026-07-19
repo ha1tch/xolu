@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	oluerr "github.com/ha1tch/xolu/pkg/errors"
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 )
 
@@ -35,11 +35,11 @@ type tsDefineTimelineRequest struct {
 }
 
 type tsTimelineResponse struct {
-	ID            int       `json:"id"`
-	Name          string    `json:"name,omitempty"`
-	Dims          int       `json:"dims"`
-	RetentionDays int       `json:"retention_days"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            int        `json:"id"`
+	Name          string     `json:"name,omitempty"`
+	Dims          int        `json:"dims"`
+	RetentionDays int        `json:"retention_days"`
+	CreatedAt     time.Time  `json:"created_at"`
 	FirstWriteAt  *time.Time `json:"first_write_at,omitempty"`
 }
 
@@ -81,13 +81,13 @@ type tsRangeResponse struct {
 // Aggregate
 
 type tsAggregateRequest struct {
-	Timeline  int    `json:"timeline"`
-	Dims      []uint64 `json:"dims"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	NumField  int    `json:"num_field"`
-	Function  string `json:"function"`
-	Interval  string `json:"interval,omitempty"`
+	Timeline int      `json:"timeline"`
+	Dims     []uint64 `json:"dims"`
+	From     string   `json:"from"`
+	To       string   `json:"to"`
+	NumField int      `json:"num_field"`
+	Function string   `json:"function"`
+	Interval string   `json:"interval,omitempty"`
 }
 
 type tsBucketResponse struct {
@@ -97,10 +97,10 @@ type tsBucketResponse struct {
 }
 
 type tsAggregateResponse struct {
-	Timeline int                `json:"timeline"`
-	NumField int                `json:"num_field"`
-	Function string             `json:"function"`
-	Interval string             `json:"interval,omitempty"`
+	Timeline int    `json:"timeline"`
+	NumField int    `json:"num_field"`
+	Function string `json:"function"`
+	Interval string `json:"interval,omitempty"`
 	// Bucketed result
 	Buckets []tsBucketResponse `json:"buckets,omitempty"`
 	// Scalar result
@@ -113,8 +113,8 @@ type tsAggregateResponse struct {
 // Retention
 
 type tsRetentionResponse struct {
-	DefaultRetentionDays int                    `json:"default_retention_days"`
-	Timelines            []tsTimelineRetention  `json:"timelines"`
+	DefaultRetentionDays int                   `json:"default_retention_days"`
+	Timelines            []tsTimelineRetention `json:"timelines"`
 }
 
 type tsTimelineRetention struct {
@@ -145,37 +145,49 @@ type tsTimelineStatsResponse struct {
 // Returns nil and writes the appropriate error response if unavailable.
 func (s *Server) tsStore(w http.ResponseWriter, r *http.Request, tenantIDStr string) timeseries.Store {
 	if s.tsManager == nil {
-		s.writeError(w, http.StatusForbidden, oluerr.Code("OLU-TS002"), "timeseries not enabled")
+		s.writeError(w, http.StatusForbidden, xoluerr.Code("XOLU-TS002"), "timeseries not enabled")
 		return nil
 	}
 	tid := getTenantIDNumeric(r.Context())
 	if tid == 0 {
-		s.writeError(w, http.StatusNotFound, oluerr.Code("OLU-TS003"), fmt.Sprintf("tenant %s not found", tenantIDStr))
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not found", tenantIDStr))
 		return nil
 	}
 	if !s.tsManager.IsProvisioned(tid) {
-		s.writeError(w, http.StatusNotFound, oluerr.Code("OLU-TS003"), fmt.Sprintf("tenant %s not provisioned for timeseries", tenantIDStr))
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not provisioned for timeseries", tenantIDStr))
 		return nil
 	}
 	store, err := s.tsManager.StoreFor(tid)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.Code("OLU-TS013"), err.Error())
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS013"), err.Error())
 		return nil
 	}
 	return store
 }
 
-// parseTSTime parses an ISO 8601 timestamp string.
+// parseTSTime parses an ISO 8601 timestamp string into a UTC instant.
+//
+// The result is normalised to UTC. This does NOT change stored keys — the codec
+// encodes uint64(ts.UnixNano()), which is zone-invariant, so an input carrying an
+// offset (e.g. -03:00) already stored correctly. Normalisation makes the returned
+// time.Time consistent on read-back and in comparisons, matching xolu's UTC-instant
+// invariant (docs/TIME_HANDLING.md).
+//
+// NOTE (input policy): unlike cal's ot.Parse, this accepts a zone-naive string
+// (no Z, no offset) and interprets it as UTC, for backward compatibility with
+// existing ts clients. The divergence is recorded in docs/KNOWN_ISSUES.md; making
+// ts reject zone-naive input like cal does would be a breaking API change.
 func parseTSTime(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
 		t, err = time.Parse(time.RFC3339, s)
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid timestamp %q (OLU-TS005)", s)
+		return time.Time{}, fmt.Errorf("invalid timestamp %q (XOLU-TS005)", s)
 	}
-	if t.Before(time.Unix(0, 0)) {
-		return time.Time{}, fmt.Errorf("timestamp before Unix epoch (OLU-TS005)")
+	t = t.UTC()
+	if t.Before(time.Unix(0, 0).UTC()) {
+		return time.Time{}, fmt.Errorf("timestamp before Unix epoch (XOLU-TS005)")
 	}
 	return t, nil
 }
@@ -202,7 +214,7 @@ func parseInterval(s string) (time.Duration, error) {
 	case "7d":
 		return 7 * 24 * time.Hour, nil
 	}
-	return 0, fmt.Errorf("invalid interval %q (OLU-TS010): valid values are 1m 5m 15m 30m 1h 6h 12h 1d 7d", s)
+	return 0, fmt.Errorf("invalid interval %q (XOLU-TS010): valid values are 1m 5m 15m 30m 1h 6h 12h 1d 7d", s)
 }
 
 // parseDims parses a comma-separated list of uint64 dimension values.
@@ -266,29 +278,33 @@ func encodePayload(v any) []byte {
 	return b
 }
 
-// classifyTSError maps timeseries error messages to OLU-TS error codes.
+// classifyTSError maps timeseries error messages to XOLU-TS error codes.
 func classifyTSError(err error) string {
 	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "OLU-TS"):
-		// Error already carries a code; extract it.
-		for _, code := range []string{
-			"OLU-TS001", "OLU-TS002", "OLU-TS003", "OLU-TS004",
-			"OLU-TS005", "OLU-TS006", "OLU-TS007", "OLU-TS008",
-			"OLU-TS009", "OLU-TS010", "OLU-TS011", "OLU-TS012",
-			"OLU-TS013", "OLU-TS014", "OLU-TS015", "OLU-TS016",
-			"OLU-TS017", "OLU-TS018", "OLU-TS019",
-		} {
-			if strings.Contains(msg, code) {
-				return code
-			}
+	if !strings.Contains(msg, "XOLU-TS") {
+		return string(xoluerr.ErrTSInternal)
+	}
+	// Walk the full set of typed TS codes; return the first one found in the
+	// error message string. This is still string-based for errors produced by
+	// fmt.Errorf (which embed the code in the message), but the codes are now
+	// referenced via typed constants rather than bare literals.
+	for _, code := range []xoluerr.Code{
+		xoluerr.ErrTSNotAvailable, xoluerr.ErrTSNotEnabled, xoluerr.ErrTSNotProvisioned,
+		xoluerr.ErrTSInvalidTrigger, xoluerr.ErrTSInvalidTimestamp, xoluerr.ErrTSBatchTooLarge,
+		xoluerr.ErrTSMissingField, xoluerr.ErrTSInvalidAggFunc, xoluerr.ErrTSInvalidAggField,
+		xoluerr.ErrTSInvalidInterval, xoluerr.ErrTSRangeTooWide, xoluerr.ErrTSLimitExceeded,
+		xoluerr.ErrTSInternal, xoluerr.ErrTSRetentionFailed, xoluerr.ErrTSProvisionFailed,
+		xoluerr.ErrTSDimsImmutable, xoluerr.ErrTSNaNValue, xoluerr.ErrTSReservedID,
+		xoluerr.ErrTSBucketLimit,
+	} {
+		if strings.Contains(msg, string(code)) {
+			return string(code)
 		}
 	}
-	return "OLU-TS013"
+	return string(xoluerr.ErrTSInternal)
 }
 
 // --- Handlers ---
-
 
 // --- Limit helpers ---
 
@@ -345,11 +361,11 @@ func (s *Server) tsQueryLimits() tsLimits {
 func (s *Server) tsWriteJSON(w http.ResponseWriter, status int, data any, maxBytes int) bool {
 	encoded, err := json.Marshal(data)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.Code("OLU-TS013"), "failed to encode response")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS013"), "failed to encode response")
 		return false
 	}
 	if len(encoded) > maxBytes {
-		s.writeError(w, http.StatusRequestEntityTooLarge, oluerr.Code("OLU-TS013"),
+		s.writeError(w, http.StatusRequestEntityTooLarge, xoluerr.Code("XOLU-TS013"),
 			fmt.Sprintf("response too large: %d bytes (max %d)", len(encoded), maxBytes))
 		return false
 	}
@@ -364,17 +380,17 @@ func (s *Server) tsWriteJSON(w http.ResponseWriter, status int, data any, maxByt
 //	POST /api/v1/tenant/{tenant_id}/ts/provision
 func (s *Server) HandleTSProvision(w http.ResponseWriter, r *http.Request) {
 	if s.tsManager == nil {
-		s.writeError(w, http.StatusForbidden, oluerr.Code("OLU-TS002"), "timeseries not enabled")
+		s.writeError(w, http.StatusForbidden, xoluerr.Code("XOLU-TS002"), "timeseries not enabled")
 		return
 	}
 	tenantID := chi.URLParam(r, "tenant_id")
 	tid := getTenantIDNumeric(r.Context())
 	if tid == 0 {
-		s.writeError(w, http.StatusNotFound, oluerr.Code("OLU-TS003"), fmt.Sprintf("tenant %s not found", tenantID))
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not found", tenantID))
 		return
 	}
-	if err := s.tsManager.Provision(r.Context(), tid); err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.Code("OLU-TS015"), err.Error())
+	if err := s.tsManager.Provision(r.Context(), tid, tenantID); err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS015"), err.Error())
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, tsProvisionResponse{TenantID: tenantID, Timeseries: "enabled"})
@@ -390,11 +406,20 @@ func (s *Server) HandleTSDefineTimeline(w http.ResponseWriter, r *http.Request) 
 	}
 	var req tsDefineTimelineRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS013"), "invalid request body")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
 	if req.ID <= 0 || req.ID > int(timeseries.MaxTimelineID) {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS018"), fmt.Sprintf("invalid timeline ID %d", req.ID))
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, fmt.Sprintf("invalid timeline ID %d", req.ID))
+		return
+	}
+	// D-006: validate dims against [MinDims, MaxDims] on the raw int BEFORE the
+	// uint8 narrowing below. Otherwise an out-of-range value whose low byte
+	// lands in [1,5] (e.g. 257→1 … 261→5) is silently accepted and the timeline
+	// is created with a different dimension count than requested.
+	if req.Dims < int(timeseries.MinDims) || req.Dims > int(timeseries.MaxDims) {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"),
+			fmt.Sprintf("dims must be %d–%d, got %d", timeseries.MinDims, timeseries.MaxDims, req.Dims))
 		return
 	}
 	cfg := timeseries.TimelineConfig{
@@ -404,7 +429,7 @@ func (s *Server) HandleTSDefineTimeline(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := store.DefineTimeline(timeseries.TimelineID(req.ID), cfg); err != nil {
 		code := classifyTSError(err)
-		s.writeError(w, http.StatusConflict, oluerr.Code(code), err.Error())
+		s.writeError(w, http.StatusConflict, xoluerr.Code(code), err.Error())
 		return
 	}
 	cfg, _ = store.Timeline(timeseries.TimelineID(req.ID))
@@ -439,13 +464,13 @@ func (s *Server) HandleTSGetTimeline(w http.ResponseWriter, r *http.Request) {
 	tidStr := chi.URLParam(r, "timeline_id")
 	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
 	}
 	tid := timeseries.TimelineID(tidInt)
 	cfg, ok := store.Timeline(tid)
 	if !ok {
-		s.writeError(w, http.StatusNotFound, oluerr.Code("OLU-TS004"), fmt.Sprintf("timeline %d not defined", tidInt))
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("timeline %d not defined", tidInt))
 		return
 	}
 	s.writeJSON(w, http.StatusOK, timelineToResponse(tid, cfg))
@@ -462,12 +487,12 @@ func (s *Server) HandleTSUpdateTimeline(w http.ResponseWriter, r *http.Request) 
 	tidStr := chi.URLParam(r, "timeline_id")
 	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
 	}
 	var req tsDefineTimelineRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS013"), "invalid request body")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
 	tid := timeseries.TimelineID(tidInt)
@@ -478,12 +503,12 @@ func (s *Server) HandleTSUpdateTimeline(w http.ResponseWriter, r *http.Request) 
 	if err := store.UpdateTimeline(tid, cfg); err != nil {
 		code := classifyTSError(err)
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "OLU-TS004") {
+		if strings.Contains(err.Error(), "XOLU-TS004") {
 			status = http.StatusNotFound
-		} else if strings.Contains(err.Error(), "OLU-TS016") {
+		} else if strings.Contains(err.Error(), string(xoluerr.ErrTSDimsImmutable)) {
 			status = http.StatusConflict
 		}
-		s.writeError(w, status, oluerr.Code(code), err.Error())
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
 		return
 	}
 	cfg, _ = store.Timeline(tid)
@@ -500,12 +525,12 @@ func (s *Server) HandleTSAppend(w http.ResponseWriter, r *http.Request) {
 	}
 	var req tsAppendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS013"), "invalid request body")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
 	ts, err := parseTSTime(req.Time)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 	e := timeseries.Event{
@@ -517,7 +542,7 @@ func (s *Server) HandleTSAppend(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := store.Append(r.Context(), e); err != nil {
 		code := classifyTSError(err)
-		s.writeError(w, http.StatusBadRequest, oluerr.Code(code), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code(code), err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -533,12 +558,12 @@ func (s *Server) HandleTSBatchAppend(w http.ResponseWriter, r *http.Request) {
 	}
 	var req tsBatchAppendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS013"), "invalid request body")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
 	limits := s.tsQueryLimits()
 	if len(req.Events) > limits.maxBatchSize {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS006"),
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS006"),
 			fmt.Sprintf("batch size %d exceeds max %d", len(req.Events), limits.maxBatchSize))
 		return
 	}
@@ -546,7 +571,7 @@ func (s *Server) HandleTSBatchAppend(w http.ResponseWriter, r *http.Request) {
 	for i, re := range req.Events {
 		ts, err := parseTSTime(re.Time)
 		if err != nil {
-			s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), fmt.Sprintf("event[%d]: %s", i, err))
+			s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), fmt.Sprintf("event[%d]: %s", i, err))
 			return
 		}
 		events = append(events, timeseries.Event{
@@ -560,7 +585,7 @@ func (s *Server) HandleTSBatchAppend(w http.ResponseWriter, r *http.Request) {
 	accepted, err := store.AppendBatch(r.Context(), events, limits.maxBatchSize)
 	if err != nil {
 		code := classifyTSError(err)
-		s.writeError(w, http.StatusBadRequest, oluerr.Code(code), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code(code), err.Error())
 		return
 	}
 	s.writeJSON(w, http.StatusOK, tsBatchAppendResponse{
@@ -582,28 +607,28 @@ func (s *Server) HandleTSQueryRange(w http.ResponseWriter, r *http.Request) {
 
 	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 16)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "missing or invalid timeline parameter")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline parameter")
 		return
 	}
 	dims, err := parseDims(q.Get("dims"))
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS007"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS007"), err.Error())
 		return
 	}
 	from, err := parseTSTime(q.Get("from"))
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 	to, err := parseTSTime(q.Get("to"))
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 	limits := s.tsQueryLimits()
 
 	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS011"),
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS011"),
 			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
 		return
 	}
@@ -641,9 +666,9 @@ func (s *Server) HandleTSQueryRange(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadRequest
 		if ctx.Err() != nil {
 			status = http.StatusGatewayTimeout
-			code = "OLU-TS013"
+			code = "XOLU-TS013"
 		}
-		s.writeError(w, status, oluerr.Code(code), err.Error())
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
 		return
 	}
 	resp := tsRangeResponse{Count: uint64(len(events)), Events: make([]tsEventResponse, len(events))}
@@ -676,42 +701,42 @@ func (s *Server) HandleTSQueryRangePost(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var body struct {
-		Timeline uint64    `json:"timeline"`
-		Dims     []uint64  `json:"dims"`
-		From     string    `json:"from"`
-		To       string    `json:"to"`
-		Limit    int       `json:"limit"`
-		Order    string    `json:"order"`
+		Timeline uint64   `json:"timeline"`
+		Dims     []uint64 `json:"dims"`
+		From     string   `json:"from"`
+		To       string   `json:"to"`
+		Limit    int      `json:"limit"`
+		Order    string   `json:"order"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "invalid JSON body: "+err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "invalid JSON body: "+err.Error())
 		return
 	}
 
 	if body.Timeline == 0 || body.Timeline > 0xFFFF {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "missing or invalid timeline field")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline field")
 		return
 	}
 	if len(body.Dims) == 0 {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS007"), "dims must be a non-empty array")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS007"), "dims must be a non-empty array")
 		return
 	}
 
 	from, err := parseTSTime(body.From)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), "invalid from: "+err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), "invalid from: "+err.Error())
 		return
 	}
 	to, err := parseTSTime(body.To)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), "invalid to: "+err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), "invalid to: "+err.Error())
 		return
 	}
 
 	limits := s.tsQueryLimits()
 
 	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS011"),
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS011"),
 			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
 		return
 	}
@@ -747,9 +772,9 @@ func (s *Server) HandleTSQueryRangePost(w http.ResponseWriter, r *http.Request) 
 		status := http.StatusBadRequest
 		if ctx.Err() != nil {
 			status = http.StatusGatewayTimeout
-			code = "OLU-TS013"
+			code = "XOLU-TS013"
 		}
-		s.writeError(w, status, oluerr.Code(code), err.Error())
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
 		return
 	}
 	resp := tsRangeResponse{Count: uint64(len(events)), Events: make([]tsEventResponse, len(events))}
@@ -771,12 +796,12 @@ func (s *Server) HandleTSLatest(w http.ResponseWriter, r *http.Request) {
 
 	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 16)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), "missing or invalid timeline parameter")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline parameter")
 		return
 	}
 	dims, err := parseDims(q.Get("dims"))
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS007"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS007"), err.Error())
 		return
 	}
 	limits := s.tsQueryLimits()
@@ -817,9 +842,9 @@ func (s *Server) HandleTSLatest(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadRequest
 		if ctx.Err() != nil {
 			status = http.StatusGatewayTimeout
-			code = "OLU-TS013"
+			code = "XOLU-TS013"
 		}
-		s.writeError(w, status, oluerr.Code(code), err.Error())
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
 		return
 	}
 	resp := tsRangeResponse{Count: uint64(len(events)), Events: make([]tsEventResponse, len(events))}
@@ -839,17 +864,17 @@ func (s *Server) HandleTSAggregate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req tsAggregateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS013"), "invalid request body")
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
 	from, err := parseTSTime(req.From)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 	to, err := parseTSTime(req.To)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS005"), err.Error())
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 
@@ -857,7 +882,7 @@ func (s *Server) HandleTSAggregate(w http.ResponseWriter, r *http.Request) {
 	if req.Interval != "" {
 		interval, err = parseInterval(req.Interval)
 		if err != nil {
-			s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS010"), err.Error())
+			s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS010"), err.Error())
 			return
 		}
 	}
@@ -865,13 +890,27 @@ func (s *Server) HandleTSAggregate(w http.ResponseWriter, r *http.Request) {
 	limits := s.tsQueryLimits()
 
 	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS011"),
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS011"),
 			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
 	defer cancel()
+
+	// D-006: validate num_field against its range on the raw int BEFORE the
+	// uint8 narrowing below. Otherwise an out-of-range value whose low byte
+	// lands in [0,6] (e.g. 256→0, 262→6) silently aliases an in-range field
+	// instead of being rejected.
+	// D-006: validate num_field against its range on the raw int BEFORE the
+	// uint8 narrowing below. Otherwise an out-of-range value whose low byte
+	// lands in [0,6] (e.g. 256→0, 262→6) silently aliases an in-range field
+	// instead of being rejected.
+	if req.NumField < 0 || req.NumField > 6 {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSInvalidAggField,
+			fmt.Sprintf("num_field must be 0–6, got %d", req.NumField))
+		return
+	}
 
 	aq := timeseries.AggregateQuery{
 		Timeline:      timeseries.TimelineID(req.Timeline),
@@ -890,9 +929,9 @@ func (s *Server) HandleTSAggregate(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadRequest
 		if ctx.Err() != nil {
 			status = http.StatusGatewayTimeout
-			code = "OLU-TS013"
+			code = "XOLU-TS013"
 		}
-		s.writeError(w, status, oluerr.Code(code), err.Error())
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
 		return
 	}
 
@@ -959,7 +998,7 @@ func (s *Server) HandleTSStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := store.Stats(r.Context())
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.Code("OLU-TS013"), err.Error())
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS013"), err.Error())
 		return
 	}
 	s.writeJSON(w, http.StatusOK, tsStatsResponse{
@@ -980,18 +1019,18 @@ func (s *Server) HandleTSTimelineStats(w http.ResponseWriter, r *http.Request) {
 	tidStr := chi.URLParam(r, "timeline_id")
 	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, oluerr.Code("OLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
 	}
 	tid := timeseries.TimelineID(tidInt)
 	cfg, ok := store.Timeline(tid)
 	if !ok {
-		s.writeError(w, http.StatusNotFound, oluerr.Code("OLU-TS004"), fmt.Sprintf("timeline %d not defined", tidInt))
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("timeline %d not defined", tidInt))
 		return
 	}
 	stats, err := store.TimelineStats(r.Context(), tid)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, oluerr.Code("OLU-TS013"), err.Error())
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS013"), err.Error())
 		return
 	}
 	resp := tsTimelineStatsResponse{
@@ -1011,3 +1050,314 @@ func (s *Server) HandleTSTimelineStats(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
+// ---------------------------------------------------------------------------
+// Request / response types for the new endpoints
+// ---------------------------------------------------------------------------
+
+type tsPatchRetentionRequest struct {
+	DefaultRetentionDays int `json:"default_retention_days"`
+}
+
+type tsRangeAggregateRequest struct {
+	Timeline uint16   `json:"timeline"`
+	Dims     []uint64 `json:"dims"`
+	From     string   `json:"from"`
+	To       string   `json:"to"`
+}
+
+type tsRangeAggregateResponse struct {
+	Timeline uint16     `json:"timeline"`
+	Count    uint64     `json:"count"`
+	Fields   [7]bool    `json:"fields"`
+	Sums     [7]float64 `json:"sums"`
+	Avgs     [7]float64 `json:"avgs"`
+	Mins     [7]float64 `json:"mins"`
+	Maxs     [7]float64 `json:"maxs"`
+}
+
+type tsFullAggregateRequest struct {
+	Timeline       uint16    `json:"timeline"`
+	Dims           []uint64  `json:"dims"`
+	From           string    `json:"from"`
+	To             string    `json:"to"`
+	Quantiles      []float64 `json:"quantiles"`       // e.g. [0.5, 0.9, 0.99]
+	QuantileFields []uint8   `json:"quantile_fields"` // nil = all fields
+}
+
+// tsFullAggregateResponse mirrors RangeFullResult for JSON serialisation.
+// Quantiles[i] is the slice of quantile estimates for num field i, in the same
+// order as the request's Quantiles array. Nil when field i had no events or
+// was not requested. Fields, Sums, Avgs, Mins, Maxs follow the same
+// seven-element convention as tsRangeAggregateResponse.
+type tsFullAggregateResponse struct {
+	Timeline  uint16       `json:"timeline"`
+	Count     uint64       `json:"count"`
+	Fields    [7]bool      `json:"fields"`
+	Sums      [7]float64   `json:"sums"`
+	Avgs      [7]float64   `json:"avgs"`
+	Mins      [7]float64   `json:"mins"`
+	Maxs      [7]float64   `json:"maxs"`
+	Quantiles [7][]float64 `json:"quantiles"` // nil inner slice = not requested or no events
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v1/tenant/{tenant_id}/ts/retention
+//
+// Updates the store-level default retention for the tenant. Per-timeline
+// retention is updated via PATCH /ts/timelines/{timeline_id}.
+// ---------------------------------------------------------------------------
+
+func (s *Server) HandleTSPatchRetention(w http.ResponseWriter, r *http.Request) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return
+	}
+	var req tsPatchRetentionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "invalid request body")
+		return
+	}
+	if err := store.SetDefaultRetentionDays(req.DefaultRetentionDays); err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS013"),
+			fmt.Sprintf("failed to update retention: %s", err))
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"default_retention_days": req.DefaultRetentionDays,
+		"status":                 "updated",
+	})
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/tenant/{tenant_id}/ts/range_aggregate
+//
+// Computes count, sum, avg, min, max for all seven numeric fields in a single
+// Pebble scan pass. More efficient than multiple /aggregate calls when several
+// fields are needed. Does not support time bucketing; use /aggregate for that.
+// ---------------------------------------------------------------------------
+
+func (s *Server) HandleTSRangeAggregate(w http.ResponseWriter, r *http.Request) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return
+	}
+	var req tsRangeAggregateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "invalid request body")
+		return
+	}
+	from, err := parseTSTime(req.From)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
+		return
+	}
+	to, err := parseTSTime(req.To)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
+		return
+	}
+	limits := s.tsQueryLimits()
+	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS011"),
+			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
+	defer cancel()
+
+	res, err := store.RangeAggregate(ctx, timeseries.RangeAllQuery{
+		Timeline:      timeseries.TimelineID(req.Timeline),
+		Dims:          req.Dims,
+		From:          from,
+		To:            to,
+		MaxScanEvents: limits.maxScanEvents,
+	})
+	if err != nil {
+		code := classifyTSError(err)
+		status := http.StatusBadRequest
+		if ctx.Err() != nil {
+			status = http.StatusGatewayTimeout
+			code = "XOLU-TS013"
+		}
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
+		return
+	}
+	resp := tsRangeAggregateResponse{
+		Timeline: req.Timeline,
+		Count:    res.Count,
+		Fields:   res.Fields,
+		Sums:     res.Sums,
+		Avgs:     res.Avgs,
+		Mins:     res.Mins,
+		Maxs:     res.Maxs,
+	}
+	s.tsWriteJSON(w, http.StatusOK, resp, limits.maxRespBytes)
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/tenant/{tenant_id}/ts/full_aggregate
+//
+// Single-pass combination of exact statistics (sum/avg/min/max/count for all
+// seven fields) and approximate quantile estimates for selected fields.
+//
+// If quantiles is empty or absent, this is equivalent to /ts/range_aggregate
+// with no additional cost — no t-digest is allocated.
+//
+// quantile_fields selects which numeric fields (0–6) get quantile estimates.
+// If absent or null, quantiles are computed for all seven fields.
+// ---------------------------------------------------------------------------
+
+func (s *Server) HandleTSFullAggregate(w http.ResponseWriter, r *http.Request) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return
+	}
+	var req tsFullAggregateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "invalid request body")
+		return
+	}
+	// Validate quantile values.
+	for _, qv := range req.Quantiles {
+		if qv < 0 || qv > 1 {
+			s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS009"),
+				fmt.Sprintf("quantile %g out of range [0, 1]", qv))
+			return
+		}
+	}
+	from, err := parseTSTime(req.From)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
+		return
+	}
+	to, err := parseTSTime(req.To)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
+		return
+	}
+	limits := s.tsQueryLimits()
+	if to.Sub(from) > time.Duration(limits.maxRangeDays)*24*time.Hour {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS011"),
+			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
+	defer cancel()
+
+	res, err := store.RangeFullAggregate(ctx, timeseries.RangeFullQuery{
+		RangeAllQuery: timeseries.RangeAllQuery{
+			Timeline:      timeseries.TimelineID(req.Timeline),
+			Dims:          req.Dims,
+			From:          from,
+			To:            to,
+			MaxScanEvents: limits.maxScanEvents,
+		},
+		Quantiles:      req.Quantiles,
+		QuantileFields: req.QuantileFields,
+	})
+	if err != nil {
+		code := classifyTSError(err)
+		status := http.StatusBadRequest
+		if ctx.Err() != nil {
+			status = http.StatusGatewayTimeout
+			code = "XOLU-TS013"
+		}
+		s.writeError(w, status, xoluerr.Code(code), err.Error())
+		return
+	}
+	agg := res.Aggregate
+	resp := tsFullAggregateResponse{
+		Timeline:  req.Timeline,
+		Count:     agg.Count,
+		Fields:    agg.Fields,
+		Sums:      agg.Sums,
+		Avgs:      agg.Avgs,
+		Mins:      agg.Mins,
+		Maxs:      agg.Maxs,
+		Quantiles: res.Quantiles,
+	}
+	s.tsWriteJSON(w, http.StatusOK, resp, limits.maxRespBytes)
+}
+
+// --- Per-timeline sync configuration ---
+
+// tsSyncResponse is the body returned by GET /ts/timelines/{timeline_id}/sync.
+type tsSyncResponse struct {
+	TimelineID int  `json:"timeline_id"`
+	NoSync     bool `json:"nosync"`
+}
+
+func (s *Server) tsParseSyncTimeline(w http.ResponseWriter, r *http.Request) (timeseries.Store, timeseries.TimelineID, bool) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return nil, 0, false
+	}
+	tidInt, err := strconv.ParseUint(chi.URLParam(r, "timeline_id"), 10, 16)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"),
+			fmt.Sprintf("invalid timeline_id %q", chi.URLParam(r, "timeline_id")))
+		return nil, 0, false
+	}
+	tid := timeseries.TimelineID(tidInt)
+	if _, ok := store.Timeline(tid); !ok {
+		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS004"),
+			fmt.Sprintf("timeline %d not defined", tidInt))
+		return nil, 0, false
+	}
+	return store, tid, true
+}
+
+// HandleTSSyncGet returns the current nosync setting for a timeline.
+//
+//	GET /api/v1/tenant/{tenant_id}/ts/timelines/{timeline_id}/sync
+func (s *Server) HandleTSSyncGet(w http.ResponseWriter, r *http.Request) {
+	store, tid, ok := s.tsParseSyncTimeline(w, r)
+	if !ok {
+		return
+	}
+	cfg := store.WriteConfig(tid)
+	s.writeJSON(w, http.StatusOK, tsSyncResponse{
+		TimelineID: int(tid),
+		NoSync:     cfg.NoSync,
+	})
+}
+
+// HandleTSSyncOn restores synchronous write mode for a timeline (NoSync=false).
+// AppendBatch will again wait for WAL fsync before returning. This is the
+// default mode and provides crash durability.
+//
+//	POST /api/v1/tenant/{tenant_id}/ts/timelines/{timeline_id}/sync/on
+func (s *Server) HandleTSSyncOn(w http.ResponseWriter, r *http.Request) {
+	store, tid, ok := s.tsParseSyncTimeline(w, r)
+	if !ok {
+		return
+	}
+	cur := store.WriteConfig(tid)
+	cur.NoSync = false
+	if err := store.SetWriteConfig(tid, cur); err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrTSWriteConfigSaveFailed, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int(tid), NoSync: false})
+}
+
+// HandleTSSyncOff enables nosync mode for a timeline (NoSync=true).
+// AppendBatch will no longer wait for WAL fsync before returning. Data loss
+// is possible if the process crashes before the OS flushes the WAL to disk.
+// The loss window is bounded by the kernel dirty-page writeback interval,
+// typically under one second.
+//
+//	POST /api/v1/tenant/{tenant_id}/ts/timelines/{timeline_id}/sync/off
+func (s *Server) HandleTSSyncOff(w http.ResponseWriter, r *http.Request) {
+	store, tid, ok := s.tsParseSyncTimeline(w, r)
+	if !ok {
+		return
+	}
+	cur := store.WriteConfig(tid)
+	cur.NoSync = true
+	if err := store.SetWriteConfig(tid, cur); err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrTSWriteConfigSaveFailed, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int(tid), NoSync: true})
+}

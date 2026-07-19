@@ -35,7 +35,7 @@ func (c *noopCache) Get(_ context.Context, _ string) (interface{}, error) {
 func (c *noopCache) Set(_ context.Context, _ string, _ interface{}, _ time.Duration) error {
 	return nil
 }
-func (c *noopCache) Delete(_ context.Context, _ string) error       { return nil }
+func (c *noopCache) Delete(_ context.Context, _ string) error        { return nil }
 func (c *noopCache) DeletePattern(_ context.Context, _ string) error { return nil }
 func (c *noopCache) Exists(_ context.Context, _ string) (bool, error) {
 	return false, nil
@@ -56,6 +56,7 @@ func (v *noopValidator) GetSchema(_ string) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("no schema")
 }
 func (v *noopValidator) SaveSchema(_ string, _ map[string]interface{}) error { return nil }
+func (v *noopValidator) LoadedEntities() []string                            { return []string{} }
 
 var _ validation.Validator = (*noopValidator)(nil)
 
@@ -90,7 +91,7 @@ func newTestServerWithMode(t *testing.T, tenantMode string) *Server {
 
 	cfg := config.Default()
 	cfg.StorageType = "sqlite"
-	cfg.DBPath = dbPath
+	cfg.BaseDir = filepath.Dir(dbPath)
 	cfg.FullTextEnabled = true
 	cfg.GraphEnabled = false
 	cfg.AuthType = "none"
@@ -103,7 +104,7 @@ func newTestServerWithMode(t *testing.T, tenantMode string) *Server {
 
 	logger := zerolog.Nop()
 
-	s := New(cfg, baseStore, &noopCache{}, nil, nil, &noopValidator{}, logger)
+	s := New(cfg, baseStore, &noopCache{}, nil, &noopValidator{}, logger)
 
 	// Register two tenants
 	s.tenantRegistry.Register(context.Background(), "alpha", 1)

@@ -35,7 +35,7 @@ import (
 // nums[i] = float64(i * (j+1)) where j is the event index.
 func seedRangeAggStore(t *testing.T, n int) (Store, time.Time, time.Time) {
 	t.Helper()
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRangeAggregate_EmptyRange(t *testing.T) {
 
 func TestRangeAggregate_SparseFields(t *testing.T) {
 	// Events with only nums[0] and nums[2] present; fields 1,3-6 absent.
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func BenchmarkRangeAggregate(b *testing.B) {
 func benchSeedStore(b *testing.B) (Store, time.Time, time.Time) {
 	b.Helper()
 	b.StopTimer()
-	store, err := NewPebbleStore(b.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(b.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestRangeQuantile_EmptyRange(t *testing.T) {
 
 func seedQuantileStore(t *testing.T, n int) (Store, RangeNumQuery) {
 	t.Helper()
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

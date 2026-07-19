@@ -1,4 +1,4 @@
-# Olu Docker Compose with profiles for different configurations
+# Xolu Docker Compose with profiles for different configurations
 #
 # Usage:
 #   docker compose up                    # Basic: memory cache, no auth
@@ -14,50 +14,50 @@
 
 services:
   # ==========================================================================
-  # Basic Olu - memory cache, no auth
+  # Basic Xolu - memory cache, no auth
   # ==========================================================================
-  olu:
+  xolu:
     build: .
     ports:
       - "9090:9090"
     environment:
-      - OLU_HOST=0.0.0.0
-      - OLU_PORT=9090
-      - OLU_STORAGE_TYPE=jsonfile
-      - OLU_CACHE_TYPE=memory
-      - OLU_CACHE_TTL=300
-      - OLU_GRAPH_MODE=flat
-      - OLU_GRAPH_CYCLE_DETECTION=warn
-      - OLU_FULLTEXT_ENABLED=false
-      - OLU_CASCADING_DELETE=false
-      - OLU_AUTH_TYPE=none
-      - OLU_METRICS_ENABLED=true
-      - OLU_DEBUG=false
+      - XOLU_HOST=0.0.0.0
+      - XOLU_PORT=9090
+      - XOLU_STORAGE_TYPE=jsonfile
+      - XOLU_CACHE_TYPE=memory
+      - XOLU_CACHE_TTL=300
+      - XOLU_GRAPH_MODE=flat
+      - XOLU_GRAPH_CYCLE_DETECTION=warn
+      - XOLU_FULLTEXT_ENABLED=false
+      - XOLU_CASCADING_DELETE=false
+      - XOLU_AUTH_TYPE=none
+      - XOLU_METRICS_ENABLED=true
+      - XOLU_DEBUG=false
     volumes:
       - ./data:/app/data
       - ./schema:/app/schema
     restart: unless-stopped
 
   # ==========================================================================
-  # Olu with Redis cache
+  # Xolu with Redis cache
   # ==========================================================================
-  olu-redis:
+  xolu-redis:
     build: .
     ports:
       - "9090:9090"
     environment:
-      - OLU_HOST=0.0.0.0
-      - OLU_PORT=9090
-      - OLU_STORAGE_TYPE=jsonfile
-      - OLU_CACHE_TYPE=redis
-      - OLU_CACHE_TTL=300
-      - OLU_REDIS_HOST=redis
-      - OLU_REDIS_PORT=6379
-      - OLU_GRAPH_MODE=flat
-      - OLU_GRAPH_CYCLE_DETECTION=warn
-      - OLU_FULLTEXT_ENABLED=false
-      - OLU_AUTH_TYPE=none
-      - OLU_METRICS_ENABLED=true
+      - XOLU_HOST=0.0.0.0
+      - XOLU_PORT=9090
+      - XOLU_STORAGE_TYPE=jsonfile
+      - XOLU_CACHE_TYPE=redis
+      - XOLU_CACHE_TTL=300
+      - XOLU_REDIS_HOST=redis
+      - XOLU_REDIS_PORT=6379
+      - XOLU_GRAPH_MODE=flat
+      - XOLU_GRAPH_CYCLE_DETECTION=warn
+      - XOLU_FULLTEXT_ENABLED=false
+      - XOLU_AUTH_TYPE=none
+      - XOLU_METRICS_ENABLED=true
     volumes:
       - ./data:/app/data
       - ./schema:/app/schema
@@ -81,40 +81,40 @@ services:
       - test
 
   # ==========================================================================
-  # Olu with all features: Redis, SQLite+FTS, Auth, Rate Limiting, Metrics
+  # Xolu with all features: Redis, SQLite+FTS, Auth, Rate Limiting, Metrics
   # ==========================================================================
-  olu-full:
+  xolu-full:
     build: .
     ports:
       - "9090:9090"
     environment:
       # Server
-      - OLU_HOST=0.0.0.0
-      - OLU_PORT=9090
+      - XOLU_HOST=0.0.0.0
+      - XOLU_PORT=9090
       # Storage - SQLite with full-text search
-      - OLU_STORAGE_TYPE=sqlite
-      - OLU_DB_PATH=/app/data/olu.db
-      - OLU_FULLTEXT_ENABLED=true
+      - XOLU_STORAGE_TYPE=sqlite
+      - XOLU_DB_PATH=/app/data/xolu.db
+      - XOLU_FULLTEXT_ENABLED=true
       # Cache - Redis
-      - OLU_CACHE_TYPE=redis
-      - OLU_CACHE_TTL=300
-      - OLU_REDIS_HOST=redis
-      - OLU_REDIS_PORT=6379
+      - XOLU_CACHE_TYPE=redis
+      - XOLU_CACHE_TTL=300
+      - XOLU_REDIS_HOST=redis
+      - XOLU_REDIS_PORT=6379
       # Graph
-      - OLU_GRAPH_MODE=flat
-      - OLU_GRAPH_CYCLE_DETECTION=error
+      - XOLU_GRAPH_MODE=flat
+      - XOLU_GRAPH_CYCLE_DETECTION=error
       # Authentication - API keys (simpler to test than JWT)
-      - OLU_AUTH_TYPE=apikey
-      - OLU_API_KEYS=test-key-1,test-key-2,admin-key
+      - XOLU_AUTH_TYPE=apikey
+      - XOLU_API_KEYS=test-key-1,test-key-2,admin-key
       # Rate limiting
-      - OLU_RATE_LIMIT_ENABLED=true
-      - OLU_RATE_LIMIT_RATE=100
-      - OLU_RATE_LIMIT_WINDOW=60
-      - OLU_RATE_LIMIT_BY_KEY=true
+      - XOLU_RATE_LIMIT_ENABLED=true
+      - XOLU_RATE_LIMIT_RATE=100
+      - XOLU_RATE_LIMIT_WINDOW=60
+      - XOLU_RATE_LIMIT_BY_KEY=true
       # Metrics
-      - OLU_METRICS_ENABLED=true
+      - XOLU_METRICS_ENABLED=true
       # Multi-tenancy
-      - OLU_TENANT_MODE=path
+      - XOLU_TENANT_MODE=path
     volumes:
       - ./data:/app/data
       - ./schema:/app/schema
@@ -125,30 +125,30 @@ services:
       - full
 
   # ==========================================================================
-  # Olu configured for integration testing
+  # Xolu configured for integration testing
   # ==========================================================================
-  olu-test:
+  xolu-test:
     build: .
     ports:
       - "9090:9090"
     environment:
-      - OLU_HOST=0.0.0.0
-      - OLU_PORT=9090
-      - OLU_STORAGE_TYPE=sqlite
-      - OLU_DB_PATH=/app/data/test.db
-      - OLU_FULLTEXT_ENABLED=true
-      - OLU_CACHE_TYPE=redis
-      - OLU_REDIS_HOST=redis
-      - OLU_REDIS_PORT=6379
-      - OLU_GRAPH_MODE=flat
-      - OLU_AUTH_TYPE=apikey
-      - OLU_API_KEYS=test-key
-      - OLU_RATE_LIMIT_ENABLED=true
-      - OLU_RATE_LIMIT_RATE=100
-      - OLU_RATE_LIMIT_WINDOW=10
-      - OLU_METRICS_ENABLED=true
-      - OLU_TENANT_MODE=path
-      - OLU_DEBUG=true
+      - XOLU_HOST=0.0.0.0
+      - XOLU_PORT=9090
+      - XOLU_STORAGE_TYPE=sqlite
+      - XOLU_DB_PATH=/app/data/test.db
+      - XOLU_FULLTEXT_ENABLED=true
+      - XOLU_CACHE_TYPE=redis
+      - XOLU_REDIS_HOST=redis
+      - XOLU_REDIS_PORT=6379
+      - XOLU_GRAPH_MODE=flat
+      - XOLU_AUTH_TYPE=apikey
+      - XOLU_API_KEYS=test-key
+      - XOLU_RATE_LIMIT_ENABLED=true
+      - XOLU_RATE_LIMIT_RATE=100
+      - XOLU_RATE_LIMIT_WINDOW=10
+      - XOLU_METRICS_ENABLED=true
+      - XOLU_TENANT_MODE=path
+      - XOLU_DEBUG=true
     volumes:
       - test_data:/app/data
       - ./schema:/app/schema
@@ -163,23 +163,23 @@ services:
   test-runner:
     image: curlimages/curl:latest
     depends_on:
-      - olu-test
+      - xolu-test
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        echo "Waiting for olu-test to be ready..."
+        echo "Waiting for xolu-test to be ready..."
         sleep 3
         
         echo ""
         echo "========================================"
-        echo "Running Olu Integration Tests"
+        echo "Running Xolu Integration Tests"
         echo "========================================"
         
         PASS=0
         FAIL=0
         API_KEY="test-key"
-        BASE="http://olu-test:9090"
+        BASE="http://xolu-test:9090"
         
         # Helper function
         test_endpoint() {

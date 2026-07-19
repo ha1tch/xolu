@@ -33,9 +33,9 @@ type JoinSQL struct {
 //
 // SQL shape depends on whether each entity is adapted or blob-stored:
 //
-//   Both adapted:    SELECT a.<col>, b.<col> FROM <left> a JOIN <right> b ON ...
-//   Both blob:       SELECT a.data, b.data   FROM entities a JOIN entities b ON ...
-//   Mixed:           SELECT a.<col>, json_extract(b.data, '$.x') FROM <left> a JOIN entities b ON ...
+//	Both adapted:    SELECT a.<col>, b.<col> FROM <left> a JOIN <right> b ON ...
+//	Both blob:       SELECT a.data, b.data   FROM entities a JOIN entities b ON ...
+//	Mixed:           SELECT a.<col>, json_extract(b.data, '$.x') FROM <left> a JOIN entities b ON ...
 //
 // All field accesses use dialect methods — no literal json_extract strings.
 // All placeholders use dialect.Placeholder(n) — no literal ? or $N.
@@ -60,7 +60,7 @@ func GenerateJoinSQL(
 	}
 
 	// -- Resolve table names for each side --
-	leftTable, rightTable, err := resolveJoinTableNames(js, plan, store)
+	leftTable, rightTable, err := resolveJoinTableNames(js, plan, store, dialect)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,13 @@ func resolveJoinTableNames(
 	js *joinSpec,
 	plan QueryPlan,
 	store storage.AggregateQueryable,
+	dialect SQLDialect,
 ) (leftTable, rightTable string, err error) {
+	blobTable := "t0000_nodes"
+	if d, ok := dialect.(*SQLiteDialect); ok {
+		blobTable = d.nodesTable()
+	}
+
 	if plan.LeftAdapted {
 		name, ok := store.AdaptedTableName(js.LeftEntity)
 		if !ok {
@@ -163,7 +169,7 @@ func resolveJoinTableNames(
 		}
 		leftTable = name
 	} else {
-		leftTable = "entities"
+		leftTable = blobTable
 	}
 
 	if plan.RightAdapted {
@@ -173,7 +179,7 @@ func resolveJoinTableNames(
 		}
 		rightTable = name
 	} else {
-		rightTable = "entities"
+		rightTable = blobTable
 	}
 	return leftTable, rightTable, nil
 }
@@ -192,6 +198,16 @@ func generateJoinSelectColumns(
 ) (exprs []string, aliases []string, err error) {
 	for _, col := range stmt.Columns {
 		alias := joinColumnAlias(col)
+
+		// D-005 (alias surface): the alias is interpolated unquoted into
+		// `<expr> AS <alias>`. OQL parses with tsqlparser, which strips T-SQL
+		// delimiters from `AS [..]`/`AS ".."` and stores the raw inner text, so a
+		// crafted alias can close the column list and UNION-inject. Route the alias
+		// through the same allowlist the field references use; default aliases
+		// (field name or qualified field) satisfy it.
+		if err := validateFieldName(alias); err != nil {
+			return nil, nil, fmt.Errorf("SELECT column alias %q: %w", alias, err)
+		}
 
 		sqlExpr, genErr := generateJoinColumnExpr(col.Expression, js, plan, store, dialect, addArg)
 		if genErr != nil {
@@ -276,6 +292,18 @@ func joinFieldRef(
 	store storage.AggregateQueryable,
 	dialect SQLDialect,
 ) (string, error) {
+	// D-005: validate the field name before it can reach a json_extract path
+	// string in the blob branch. T-SQL delimited identifiers ([..] / "..") let
+	// arbitrary characters through the lexer as the raw Identifier.Value; without
+	// this guard a crafted field name breaks out of the json_extract literal and
+	// injects SQL (e.g. a UNION). The single-table path already validates via
+	// g.fieldPath -> validateFieldName; this brings the JOIN path to parity.
+	// The adapted branches below are independently safe (adaptedNativeColumn is a
+	// column-existence lookup), but validating here covers every branch uniformly.
+	if err := validateFieldName(field); err != nil {
+		return "", err
+	}
+
 	switch tableAlias {
 	case js.LeftAlias:
 		if plan.LeftAdapted {
@@ -286,7 +314,10 @@ func joinFieldRef(
 			return js.LeftAlias + "." + colName, nil
 		}
 		// Blob path: alias qualifies the data column inside the extraction expression.
-		return dialect.JSONFieldAliased(js.LeftAlias, field), nil
+		// "auto" is used because there is no literal context to infer from. A future
+		// PostgreSQL dialect will need schema type information to emit correct CASTs
+		// in JOIN ON and SELECT expressions.
+		return dialect.JSONFieldAliasedAs(js.LeftAlias, field, "auto"), nil
 
 	case js.RightAlias:
 		if plan.RightAdapted {
@@ -297,7 +328,7 @@ func joinFieldRef(
 			return js.RightAlias + "." + colName, nil
 		}
 		// Blob path: alias qualifies the data column inside the extraction expression.
-		return dialect.JSONFieldAliased(js.RightAlias, field), nil
+		return dialect.JSONFieldAliasedAs(js.RightAlias, field, "auto"), nil
 
 	default:
 		return "", fmt.Errorf("unknown table alias %q (expected %s or %s)",
@@ -347,8 +378,7 @@ func generateJoinWhereClause(
 	dialect SQLDialect,
 	addArg func(interface{}) string,
 ) (string, error) {
-	var translateField func(ast.Expression) (string, error)
-	translateField = func(e ast.Expression) (string, error) {
+	translateField := func(e ast.Expression) (string, error) {
 		switch f := e.(type) {
 		case *ast.QualifiedIdentifier:
 			return joinFieldRef(qualifiedTable(f), qualifiedField(f), js, plan, store, dialect)

@@ -222,3 +222,32 @@ func TestValidatorRejectsDeleteWithoutWhere(t *testing.T) {
 		}
 	}
 }
+
+// TestValidatorNamesSetOperator confirms the set-operation rejection names the
+// actual operator (UNION/INTERSECT/EXCEPT) rather than always saying "UNION".
+// Regression test for the TD-002 error-message fix.
+func TestValidatorNamesSetOperator(t *testing.T) {
+	v := NewValidator("/tmp/nonexistent")
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{"SELECT id FROM items UNION SELECT id FROM other", "UNION is not supported"},
+		{"SELECT id FROM items INTERSECT SELECT id FROM other", "INTERSECT is not supported"},
+		{"SELECT id FROM items EXCEPT SELECT id FROM other", "EXCEPT is not supported"},
+	}
+	for _, c := range cases {
+		program, _ := tsqlparser.Parse(c.query)
+		if len(program.Statements) != 1 {
+			t.Fatalf("parse %q: expected 1 statement, got %d", c.query, len(program.Statements))
+		}
+		err := v.Validate(program.Statements[0])
+		if err == nil {
+			t.Errorf("%q: expected rejection, got nil", c.query)
+			continue
+		}
+		if err.Error() != c.want {
+			t.Errorf("%q: want %q, got %q", c.query, c.want, err.Error())
+		}
+	}
+}

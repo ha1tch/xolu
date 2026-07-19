@@ -1,9 +1,9 @@
 # OQL API Documentation
 
-**Version:** 0.9.7  
+**Version:** 0.9.9  
 **Status:** Active
 
-OQL (Olu Query Language) provides SQL-compatible query and mutation capabilities for olu. It uses a subset of T-SQL syntax powered by the [tsqlparser](https://github.com/ha1tch/tsqlparser) library.
+OQL (Xolu Query Language) provides SQL-compatible query and mutation capabilities for xolu. It uses a subset of T-SQL syntax powered by the [tsqlparser](https://github.com/ha1tch/tsqlparser) library.
 
 ---
 
@@ -176,6 +176,13 @@ SELECT TOP 10 * FROM items ORDER BY value DESC
 SELECT DISTINCT status FROM items
 ```
 
+**Set operations are not supported.** `UNION`, `UNION ALL`, `INTERSECT`, and
+`EXCEPT` parse but are rejected at validation; a query using any of them fails
+with an error naming the operator (e.g. `INTERSECT is not supported`). To combine
+result sets, run separate queries and merge client-side. (Sulpher, the graph
+query language, does support `UNION` / `UNION ALL` — the two languages differ
+here.)
+
 ### INSERT
 
 ```sql
@@ -269,6 +276,10 @@ DELETE FROM items WHERE category_id = 5 AND last_value < '2024-01-01'
 
 ## JOIN Queries
 
+> **SQLite store only.** JOIN push-down requires `XOLU_STORAGE_TYPE=sqlite`.
+> Only two-table joins are supported; three-or-more-table joins and subquery
+> tables are rejected.
+
 OQL supports two-table joins when the store backend is SQLite. All four standard
 join types are pushed to SQLite as a single SQL statement — no application-side
 stitching.
@@ -355,8 +366,7 @@ INNER JOIN authors AS b ON a.author_id = b.id
 - **Simple ON condition.** The `ON` clause must be a single equality between
   two qualified identifiers. Compound conditions (`ON a.x = b.y AND a.z = b.w`)
   are not supported.
-- **SQLite store only.** JOIN push-down requires the SQLite backend. The
-  JSON-file backend does not support JOINs.
+- **SQLite store only.** JOIN push-down requires the SQLite backend.
 - **CROSS JOIN is not supported.** Use a filtered INNER JOIN instead.
 
 ### JOIN vs Sulpher
@@ -386,10 +396,10 @@ traversals, path finding, cycle detection, or multi-hop relationships.
 | GROUP BY, HAVING | ✓ Supported |
 | ORDER BY, TOP | ✓ Supported |
 | DISTINCT | ✓ Supported |
-| INNER JOIN | ✓ Supported (SQLite store only) |
-| LEFT JOIN | ✓ Supported (SQLite store only) |
-| RIGHT JOIN | ✓ Supported (SQLite store only) |
-| FULL OUTER JOIN | ✓ Supported (SQLite store only) |
+| INNER JOIN | ✓ Supported |
+| LEFT JOIN | ✓ Supported |
+| RIGHT JOIN | ✓ Supported |
+| FULL OUTER JOIN | ✓ Supported |
 | CROSS JOIN | ✗ Not supported |
 | Three-or-more-table joins | ✗ Not supported |
 | JOIN with subquery table | ✗ Not supported |
@@ -439,7 +449,7 @@ traversals, path finding, cycle detection, or multi-hop relationships.
 ### Analytics Query
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/oql/query \
+curl -X POST http://localhost:9090/api/v1/oql/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "SELECT category_id, COUNT(*) as count, AVG(value) as avg FROM items WHERE status = '\''active'\'' GROUP BY category_id ORDER BY count DESC"
@@ -449,7 +459,7 @@ curl -X POST http://localhost:8080/api/v1/oql/query \
 ### Bulk Update
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/oql/query \
+curl -X POST http://localhost:9090/api/v1/oql/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "UPDATE items SET status = '\''maintenance'\'' WHERE category_id = 5"
@@ -459,7 +469,7 @@ curl -X POST http://localhost:8080/api/v1/oql/query \
 ### Batch Insert
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/oql/query \
+curl -X POST http://localhost:9090/api/v1/oql/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "INSERT INTO items (category_id, status, value) VALUES (1, '\''active'\'', 23.5), (2, '\''active'\'', 24.1)"
@@ -470,15 +480,15 @@ curl -X POST http://localhost:8080/api/v1/oql/query \
 
 ```bash
 # Submit
-QUERY_ID=$(curl -s -X POST http://localhost:8080/api/v1/oql/query/async \
+QUERY_ID=$(curl -s -X POST http://localhost:9090/api/v1/oql/query/async \
   -H "Content-Type: application/json" \
   -d '{"query": "SELECT * FROM items"}' | jq -r '.query_id')
 
 # Poll status
-curl http://localhost:8080/api/v1/oql/query/$QUERY_ID
+curl http://localhost:9090/api/v1/oql/query/$QUERY_ID
 
 # Get result
-curl http://localhost:8080/api/v1/oql/query/$QUERY_ID/result
+curl http://localhost:9090/api/v1/oql/query/$QUERY_ID/result
 ```
 
 ---

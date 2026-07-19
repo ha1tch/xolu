@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/cache"
 	"github.com/ha1tch/xolu/pkg/config"
+	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/server"
 	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/xolu/pkg/validation"
@@ -33,7 +33,6 @@ func setupSQLiteGraphTestServer(t *testing.T) *TestServer {
 		Host:                  "localhost",
 		Port:                  0,
 		StorageType:           "sqlite",
-		DBPath:                dbPath,
 		BaseDir:               tmpDir,
 		Schema:                "test_schema",
 		SchemaDir:             filepath.Join(tmpDir, "test_schema"),
@@ -54,9 +53,7 @@ func setupSQLiteGraphTestServer(t *testing.T) *TestServer {
 		QueryMaxRows:          10000,
 		QueryMaxScanRows:      100000,
 		QueryMaxResponseBytes: 10485760,
-		GraphDataFile:         filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:        filepath.Join(tmpDir, "graph.index"),
-		GraphQueryTTL:         86400,
+		AsyncJobRetentionTTL:  86400,
 		MaxQueryDepth:         10,
 	}
 
@@ -76,7 +73,7 @@ func setupSQLiteGraphTestServer(t *testing.T) *TestServer {
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
 	g := graph.NewFlatGraph()
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{

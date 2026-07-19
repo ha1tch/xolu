@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,20 +31,6 @@ func TestSQLiteStore_ImplementsQueryable(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	if _, ok := interface{}(store).(Queryable); !ok {
 		t.Fatal("SQLiteStore should implement Queryable")
-	}
-}
-
-func TestJSONFileStore_DoesNotImplementQueryable(t *testing.T) {
-	// Create a minimal JSONFileStore to verify it does NOT satisfy Queryable
-	dir := t.TempDir()
-	store, err := NewJSONFileStore(dir, "test_schema")
-	if err != nil {
-		t.Fatalf("NewJSONFileStore: %v", err)
-	}
-	defer store.Close()
-
-	if _, ok := interface{}(store).(Queryable); ok {
-		t.Fatal("JSONFileStore should NOT implement Queryable")
 	}
 }
 
@@ -143,7 +130,7 @@ func TestSQLiteStore_QueryWithPlan_MatchesList(t *testing.T) {
 	}
 
 	planResults, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM entities WHERE entity_type = ? ORDER BY id",
+		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ? ORDER BY id",
 		[]interface{}{"items"},
 	)
 	if err != nil {
@@ -185,7 +172,7 @@ func TestSQLiteStore_QueryWithPlan_WithWhereClause(t *testing.T) {
 
 	// Push-down WHERE: status = 'active'
 	results, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM entities WHERE entity_type = ? AND json_extract(data, '$.status') = ?",
+		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ? AND json_extract(data, '$.status') = ?",
 		[]interface{}{"sensors", "active"},
 	)
 	if err != nil {
@@ -210,7 +197,7 @@ func TestSQLiteStore_QueryWithPlan_EmptyResult(t *testing.T) {
 	ctx := context.Background()
 
 	results, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM entities WHERE entity_type = ?",
+		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ?",
 		[]interface{}{"nonexistent"},
 	)
 	if err != nil {
@@ -229,31 +216,9 @@ func extractTestID(rec map[string]interface{}) interface{} {
 	return nil
 }
 
-// Verify JSONFileStore exists by trying to create one.
 // This test just ensures the type assertion test above is valid.
-func TestJSONFileStore_Exists(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewJSONFileStore(dir, "test_schema")
-	if err != nil {
-		t.Fatalf("NewJSONFileStore: %v", err)
-	}
-	defer store.Close()
 
-	// Sanity: can create and list
-	ctx := context.Background()
-	id, err := store.Create(ctx, "test", map[string]interface{}{"hello": "world"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if id == 0 {
-		t.Error("expected non-zero id")
-	}
-}
-
-// Check that JSONFileStore source file exists (sanity for the interface test)
 func init() {
-	// This will fail at compile time if JSONFileStore doesn't exist
-	var _ Store = (*JSONFileStore)(nil)
 }
 
 // Benchmark CountEntities - plan says <100µs

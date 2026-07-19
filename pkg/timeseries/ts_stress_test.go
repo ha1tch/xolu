@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	stressSmallEvents  = 5_000  // safe in-container count
-	stressWorkerCount  = 10
-	stressWorkerSecs   = 3
+	stressSmallEvents = 5_000 // safe in-container count
+	stressWorkerCount = 10
+	stressWorkerSecs  = 3
 )
 
 // --- Bulk creation ---
@@ -37,7 +37,7 @@ func TestTSStress_BulkAppend(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestTSStress_ConcurrentWorkers(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestTSStress_BulkQueries(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,9 +207,9 @@ func TestTSStress_BulkQueries(t *testing.T) {
 	}
 
 	const (
-		numD0    = 5
+		numD0          = 5
 		eventsPerCombo = 100
-		total    = numD0 * eventsPerCombo
+		total          = numD0 * eventsPerCombo
 	)
 
 	base := time.Unix(1_000_000, 0).UTC()
@@ -260,7 +260,7 @@ func TestTSStress_MixedWorkload_AppendAndPurge(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testStoreConfig()
 	cfg.DefaultRetentionDays = 1 // short retention
-	store, err := NewPebbleStore(dir, cfg, testPebbleConfig())
+	store, err := NewPebbleStore(dir, cfg, testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

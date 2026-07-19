@@ -42,11 +42,25 @@ func CompilePredicates(where ast.Expression) PredicateCompileResult {
 	var preds []jsonic.FieldPredicate
 	var residuals []ast.Expression
 
+	// Track which atoms are already claimed by a compiled predicate.
+	// If a second predicate targets the same field, push it to the residual
+	// Go-path rather than overwriting the atom entry in the PredicateSet —
+	// the PredicateSet atoms map is single-valued, so duplicate atoms cause
+	// the first predicate to be silently unseen and every row to be rejected.
+	seenAtoms := make(map[jsonic.Atom]bool)
+
 	// Flatten the AND chain and try to compile each term.
 	terms := flattenAND(where)
 	for _, term := range terms {
 		if fp, ok := compileTerm(term); ok {
-			preds = append(preds, fp)
+			if !seenAtoms[fp.Atom] {
+				seenAtoms[fp.Atom] = true
+				preds = append(preds, fp)
+			} else {
+				// Same field already has a compiled predicate; keep as residual
+				// so the Go-path evaluator applies both bounds correctly.
+				residuals = append(residuals, term)
+			}
 		} else {
 			residuals = append(residuals, term)
 		}

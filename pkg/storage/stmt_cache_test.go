@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -26,7 +27,7 @@ func TestStmtCacheBasic(t *testing.T) {
 	}
 
 	// First Get prepares and caches.
-	query := `SELECT COUNT(*) FROM entities WHERE tenant_id = ? AND entity_type = ?`
+	query := `SELECT COUNT(*) FROM ` + tenant.NodesTableName(0) + ` WHERE tenant_id = ? AND entity_type = ?`
 	stmt1, err := cache.Get(query)
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
@@ -57,8 +58,8 @@ func TestStmtCacheMultipleQueries(t *testing.T) {
 
 	cache := store.stmtCache
 
-	q1 := `SELECT data, _version FROM entities WHERE entity_type = ?`
-	q2 := `SELECT COUNT(*) FROM entities WHERE tenant_id = ? AND entity_type = ?`
+	q1 := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = ?`
+	q2 := `SELECT COUNT(*) FROM ` + tenant.NodesTableName(0) + ` WHERE tenant_id = ? AND entity_type = ?`
 
 	s1, err := cache.Get(q1)
 	if err != nil {
@@ -207,7 +208,7 @@ func TestStmtCacheConcurrency(t *testing.T) {
 	defer store.Close()
 
 	cache := store.stmtCache
-	q := `SELECT COUNT(*) FROM entities WHERE entity_type = ?`
+	q := `SELECT COUNT(*) FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = ?`
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 50)
@@ -259,7 +260,7 @@ func TestStmtCacheQueryWithPlan(t *testing.T) {
 		}
 	}
 
-	sql := `SELECT data, _version FROM entities WHERE entity_type = ? AND json_extract(data, '$.type') = ?`
+	sql := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = ? AND json_extract(data, '$.type') = ?`
 
 	// First call: prepares the statement.
 	results1, err := store.QueryWithPlan(ctx, sql, []interface{}{"devices", "sensor"})
@@ -341,7 +342,7 @@ func TestStmtCacheAggregateQuery(t *testing.T) {
 		})
 	}
 
-	sql := `SELECT json_extract(data, '$.category') AS category, COUNT(*) AS cnt FROM entities WHERE entity_type = ? GROUP BY json_extract(data, '$.category')`
+	sql := `SELECT json_extract(data, '$.category') AS category, COUNT(*) AS cnt FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = ? GROUP BY json_extract(data, '$.category')`
 	aliases := []string{"category", "cnt"}
 
 	results1, err := store.AggregateQuery(ctx, sql, []interface{}{"items"}, aliases)

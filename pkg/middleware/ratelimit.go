@@ -149,7 +149,7 @@ func RateLimitMiddleware(cfg *config.Config, limiter *RateLimiter) func(http.Han
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"error": map[string]interface{}{
-						"code":    "OLU-RL001",
+						"code":    "XOLU-RL001",
 						"message": "Rate limit exceeded",
 						"status":  http.StatusTooManyRequests,
 					},

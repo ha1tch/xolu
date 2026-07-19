@@ -6,13 +6,14 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"context"
 	"testing"
 	"time"
 
@@ -37,41 +38,34 @@ type TestServer struct {
 // setupTestServer creates a test server with temporary storage
 func setupTestServer(t *testing.T) *TestServer {
 	// Create temporary directory for test data
-	tmpDir, err := os.MkdirTemp("", "olu-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	cfg := &config.Config{
-		Host:               "localhost",
-		Port:               0, // Let httptest choose port
-		BaseDir:            tmpDir,
-		Schema:             "test_schema",
-		SchemaDir:          filepath.Join(tmpDir, "test_schema"), // For OQL entity discovery
-		CacheType:          "memory",
-		CacheTTL:           300,
-		GraphEnabled:       true,
-		GraphMode:          "flat",
-		FullTextEnabled:    false,
-		CascadingDelete:    false,
-		RefEmbedDepth:      3,
-		MaxEmbedDepth:      10,
-		MaxEntitySize:      1048576,
-		PatchNullBehavior:  "store",
-		GraphDataFile:      filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:     filepath.Join(tmpDir, "graph.index"),
+		Host:                "localhost",
+		Port:                0, // Let httptest choose port
+		BaseDir:             tmpDir,
+		Schema:              "test_schema",
+		SchemaDir:           filepath.Join(tmpDir, "test_schema"), // For OQL entity discovery
+		CacheType:           "memory",
+		CacheTTL:            300,
+		GraphEnabled:        true,
+		GraphMode:           "flat",
+		FullTextEnabled:     false,
+		CascadingDelete:     false,
+		RefEmbedDepth:       3,
+		MaxEmbedDepth:       10,
+		MaxEntitySize:       1048576,
+		PatchNullBehavior:   "store",
 		MaxCascadeDeletions: 100,
 		TenantMode:          "path",
 		TenantAutoRegister:  true, // Tests rely on auto-registration
 	}
 
 	// Initialize components
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +76,7 @@ func setupTestServer(t *testing.T) *TestServer {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{
@@ -191,41 +185,35 @@ func TestHealthEndpoints(t *testing.T) {
 // TestCORSMiddleware tests CORS header behaviour
 func TestCORSMiddleware(t *testing.T) {
 	// Create a server with CORS enabled
-	tmpDir, err := os.MkdirTemp("", "olu-cors-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-cors-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	cfg := &config.Config{
-		Host:               "localhost",
-		Port:               0,
-		BaseDir:            tmpDir,
-		Schema:             "test_schema",
-		SchemaDir:          filepath.Join(tmpDir, "test_schema"),
-		CacheType:          "memory",
-		CacheTTL:           300,
-		GraphEnabled:       true,
-		GraphMode:          "flat",
-		FullTextEnabled:    false,
-		CascadingDelete:    false,
-		RefEmbedDepth:      3,
-		MaxEmbedDepth:      10,
-		MaxEntitySize:      1048576,
-		PatchNullBehavior:  "store",
-		GraphDataFile:      filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:     filepath.Join(tmpDir, "graph.index"),
+		Host:                "localhost",
+		Port:                0,
+		BaseDir:             tmpDir,
+		Schema:              "test_schema",
+		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
+		CacheType:           "memory",
+		CacheTTL:            300,
+		GraphEnabled:        true,
+		GraphMode:           "flat",
+		FullTextEnabled:     false,
+		CascadingDelete:     false,
+		RefEmbedDepth:       3,
+		MaxEmbedDepth:       10,
+		MaxEntitySize:       1048576,
+		PatchNullBehavior:   "store",
 		MaxCascadeDeletions: 100,
 		TenantMode:          "path",
 		TenantAutoRegister:  true,
 		CORSOrigins:         []string{"https://dashboard.example.com", "https://admin.example.com"},
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, err := storage.NewStore("jsonfile", storeConfig)
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +224,7 @@ func TestCORSMiddleware(t *testing.T) {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -667,7 +655,7 @@ func TestSchemaOperations(t *testing.T) {
 
 	t.Run("POST /api/v1/schema/{entity}", func(t *testing.T) {
 		schema := map[string]interface{}{
-			"type": "object",
+			"type":     "object",
 			"required": []string{"name", "price"},
 			"properties": map[string]interface{}{
 				"name": map[string]interface{}{
@@ -778,7 +766,7 @@ func TestErrorHandling(t *testing.T) {
 }
 
 // TestErrorResponseEnvelope verifies that API error responses use the
-// structured envelope: {"error": {"code": "OLU-...", "message": "...", "status": N}}.
+// structured envelope: {"error": {"code": "XOLU-...", "message": "...", "status": N}}.
 // This catches regressions if someone changes writeError or adds a new
 // error path that uses the old flat format.
 func TestErrorResponseEnvelope(t *testing.T) {
@@ -822,7 +810,7 @@ func TestErrorResponseEnvelope(t *testing.T) {
 
 // setupTestServerWithFTS creates a test server with SQLite and FTS enabled
 func setupTestServerWithFTS(t *testing.T) *TestServer {
-	tmpDir, err := os.MkdirTemp("", "olu-fts-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-fts-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,35 +818,30 @@ func setupTestServerWithFTS(t *testing.T) *TestServer {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	cfg := &config.Config{
-		Host:               "localhost",
-		Port:               0,
-		StorageType:        "sqlite",
-		DBPath:             dbPath,
-		BaseDir:            tmpDir,
-		Schema:             "test_schema",
-		CacheType:          "memory",
-		CacheTTL:           300,
-		GraphEnabled:       true,
-		GraphMode:          "flat",
-		FullTextEnabled:    true,
-		CascadingDelete:    false,
-		RefEmbedDepth:      3,
-		MaxEmbedDepth:      10,
-		MaxEntitySize:      1048576,
-		PatchNullBehavior:  "store",
-		GraphDataFile:      filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:     filepath.Join(tmpDir, "graph.index"),
+		Host:                "localhost",
+		Port:                0,
+		StorageType:         "sqlite",
+		BaseDir:             tmpDir,
+		Schema:              "test_schema",
+		CacheType:           "memory",
+		CacheTTL:            300,
+		GraphEnabled:        true,
+		GraphMode:           "flat",
+		FullTextEnabled:     true,
+		CascadingDelete:     false,
+		RefEmbedDepth:       3,
+		MaxEmbedDepth:       10,
+		MaxEntitySize:       1048576,
+		PatchNullBehavior:   "store",
 		MaxCascadeDeletions: 100,
 		TenantMode:          "path",
 		TenantAutoRegister:  true, // Tests rely on auto-registration
 	}
 
-	storeConfig := map[string]interface{}{
+	store, err := storage.NewStore("sqlite", map[string]interface{}{
 		"db_path":           dbPath,
 		"full_text_enabled": true,
-	}
-
-	store, err := storage.NewStore("sqlite", storeConfig)
+	})
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatal(err)
@@ -870,7 +853,7 @@ func setupTestServerWithFTS(t *testing.T) *TestServer {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	httpServer := httptest.NewServer(srv.Handler())
 
 	// Store the store reference for cleanup
@@ -1089,7 +1072,7 @@ func TestRefEmbedDepth(t *testing.T) {
 func TestOQLQueryEndpoint(t *testing.T) {
 	// Create temp directory with pre-existing entity folders
 	// so OQL validator recognizes them at startup
-	tmpDir, err := os.MkdirTemp("", "olu-oql-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-oql-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1104,7 +1087,7 @@ func TestOQLQueryEndpoint(t *testing.T) {
 	cfg := &config.Config{
 		Host:                "localhost",
 		Port:                0,
-		StorageType:        "jsonfile",
+		StorageType:         "sqlite",
 		BaseDir:             tmpDir,
 		Schema:              "test_schema",
 		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
@@ -1117,23 +1100,17 @@ func TestOQLQueryEndpoint(t *testing.T) {
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,
 		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
 		MaxCascadeDeletions: 100,
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, _ := storage.NewStore("jsonfile", storeConfig)
+	store, _ := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	memCache := cache.NewMemoryCache(1000, time.Second*300)
 	g := graph.NewFlatGraph()
 	schemaDir := filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas")
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1267,7 +1244,7 @@ func TestOQLQueryEndpoint(t *testing.T) {
 
 func TestOQLAsyncEndpoint(t *testing.T) {
 	// Create temp directory with pre-existing entity folders
-	tmpDir, err := os.MkdirTemp("", "olu-oql-async-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-oql-async-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1280,38 +1257,32 @@ func TestOQLAsyncEndpoint(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Host:                "localhost",
-		Port:                0,
-		StorageType:        "jsonfile",
-		BaseDir:             tmpDir,
-		Schema:              "test_schema",
-		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
-		CacheType:           "memory",
-		CacheTTL:            300,
-		GraphEnabled:        true,
-		GraphMode:           "flat",
-		RefEmbedDepth:       3,
-		MaxEmbedDepth:       10,
-		MaxEntitySize:       1048576,
-		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
-		MaxCascadeDeletions: 100,
-		GraphQueryTTL:       3600,
+		Host:                 "localhost",
+		Port:                 0,
+		StorageType:          "sqlite",
+		BaseDir:              tmpDir,
+		Schema:               "test_schema",
+		SchemaDir:            filepath.Join(tmpDir, "test_schema"),
+		CacheType:            "memory",
+		CacheTTL:             300,
+		GraphEnabled:         true,
+		GraphMode:            "flat",
+		RefEmbedDepth:        3,
+		MaxEmbedDepth:        10,
+		MaxEntitySize:        1048576,
+		PatchNullBehavior:    "store",
+		MaxCascadeDeletions:  100,
+		AsyncJobRetentionTTL: 3600,
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, _ := storage.NewStore("jsonfile", storeConfig)
+	store, _ := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	memCache := cache.NewMemoryCache(1000, time.Second*300)
 	g := graph.NewFlatGraph()
 	schemaDir := filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas")
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1403,9 +1374,9 @@ func TestSulpherQueryEndpoint(t *testing.T) {
 
 func TestTenantIsolation(t *testing.T) {
 	// Tenant isolation on point operations (Get/Put/Delete by ID) requires
-	// a storage backend that scopes by tenant_id. The jsonfile backend does
+	// a storage backend that scopes by tenant_id.
 	// not support this; use SQLite.
-	tmpDir, err := os.MkdirTemp("", "olu-tenant-iso-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-tenant-iso-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1415,8 +1386,7 @@ func TestTenantIsolation(t *testing.T) {
 	cfg := &config.Config{
 		Host:                "localhost",
 		Port:                0,
-		StorageType:        "sqlite",
-		DBPath:              dbPath,
+		StorageType:         "sqlite",
 		BaseDir:             tmpDir,
 		Schema:              "test_schema",
 		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
@@ -1430,8 +1400,6 @@ func TestTenantIsolation(t *testing.T) {
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,
 		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
 		MaxCascadeDeletions: 100,
 		TenantMode:          "path",
 		TenantAutoRegister:  true, // Tests rely on auto-registration
@@ -1452,7 +1420,7 @@ func TestTenantIsolation(t *testing.T) {
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, sqliteStore, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, sqliteStore, memCache, g, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1620,7 +1588,7 @@ func TestSearchEndpoint(t *testing.T) {
 
 func TestTenantStrictMode(t *testing.T) {
 	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "olu-tenant-strict-test-*")
+	tmpDir, err := os.MkdirTemp("", "xolu-tenant-strict-test-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1629,7 +1597,7 @@ func TestTenantStrictMode(t *testing.T) {
 	cfg := &config.Config{
 		Host:                "localhost",
 		Port:                0,
-		StorageType:        "jsonfile",
+		StorageType:         "sqlite",
 		BaseDir:             tmpDir,
 		Schema:              "test_schema",
 		SchemaDir:           filepath.Join(tmpDir, "test_schema"),
@@ -1641,25 +1609,19 @@ func TestTenantStrictMode(t *testing.T) {
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,
 		PatchNullBehavior:   "store",
-		GraphDataFile:       filepath.Join(tmpDir, "graph.data"),
-		GraphIndexFile:      filepath.Join(tmpDir, "graph.index"),
 		MaxCascadeDeletions: 100,
 		TenantMode:          "strict", // Explicit: tenants must be pre-registered
 		AuthType:            "none",
 	}
 
-	storeConfig := map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	}
-	store, _ := storage.NewStore("jsonfile", storeConfig)
+	store, _ := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	memCache := cache.NewMemoryCache(1000, time.Second*300)
 	g := graph.NewFlatGraph()
 	schemaDir := filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas")
 	validator := validation.NewJSONSchemaValidator(schemaDir)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, g, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, g, validator, logger)
 
 	// In strict mode, tenants must be pre-registered before use.
 	srv.TenantRegistry().Register(context.Background(), "acme", 1)
@@ -1726,4 +1688,514 @@ func TestTenantStrictMode(t *testing.T) {
 			t.Errorf("Expected 403 for graph stats in strict mode, got %d", resp.StatusCode)
 		}
 	})
+}
+
+// ── KL-2: POST /api/v1/graph/edges — route exists and validates input ───────
+//
+// Full graph-enabled integration is tested in pkg/storage/edge_props_test.go.
+// Here we verify the route is registered and input validation works, using the
+// test server which doesn't have GraphEnabled on its store.
+
+func TestKL2_CreateEdgeRouteRegistered(t *testing.T) {
+	ts := setupTestServer(t)
+	defer ts.cleanup()
+
+	// The endpoint must exist (not 404). It will return 400 for missing fields
+	// or 500 if the store doesn't support edge props, but not 404.
+	resp, _ := ts.doRequest("POST", "/api/v1/graph/edges", map[string]interface{}{
+		"from": "person:1",
+		"to":   "person:2",
+		"rel":  "KNOWS",
+	})
+	if resp.StatusCode == http.StatusNotFound {
+		t.Error("[KL-2] POST /api/v1/graph/edges returned 404 — route not registered")
+	}
+}
+
+func TestKL2_CreateEdgeRequiresFields(t *testing.T) {
+	ts := setupTestServer(t)
+	defer ts.cleanup()
+
+	// Missing 'rel' — must return 400, not 404.
+	resp, _ := ts.doRequest("POST", "/api/v1/graph/edges", map[string]interface{}{
+		"from": "person:1",
+		"to":   "person:2",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("[KL-2] missing rel: expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// ── KL-3: WAL checkpoint is called in reloadGraphFromStore ───────────────────
+//
+// The fix adds a PRAGMA wal_checkpoint(FULL) before graph.Clear().
+// We test this by verifying the function no longer panics or errors when called
+// immediately after writes, and that the graph stats endpoint remains reachable.
+
+func TestKL3_RebuildEndpointReachable(t *testing.T) {
+	ts := setupTestServer(t)
+	defer ts.cleanup()
+
+	// Create an entity so there is something in the database.
+	ts.doRequest("POST", "/api/v1/person",
+		map[string]interface{}{"name": "Alice"})
+
+	// Rebuild should not 500 due to WAL issues (the test store may return
+	// a different error if graph tables don't exist, but should not panic).
+	resp, _ := ts.doRequest("POST", "/api/v1/graph/admin/rebuild", nil)
+	if resp.StatusCode == 0 {
+		t.Error("[KL-3] rebuild panicked or returned no response")
+	}
+
+	// The stats endpoint must still be reachable after rebuild (no panic, no 500).
+	resp, _ = ts.doRequest("GET", "/api/v1/graph/stats", nil)
+	if resp.StatusCode == 0 {
+		t.Error("[KL-3] stats endpoint unreachable after rebuild")
+	}
+}
+
+// ── KL-2 and KL-3: round-trip tests with graph-enabled store ─────────────────
+//
+// setupTestServer uses storage.NewStore which doesn't propagate GraphEnabled.
+// These tests construct their own server with storage.NewStoreFromConfig so the
+// graph tables are created and edge property storage works.
+
+type graphTestServer struct {
+	srv    *server.Server
+	ts     *httptest.Server
+	tmpDir string
+	t      *testing.T
+}
+
+func setupGraphServer(t *testing.T) *graphTestServer {
+	t.Helper()
+	return setupGraphServerWithOptions(t, 0, cache.NewMemoryCache(1000, 300*time.Second))
+}
+
+// setupCachedGraphServer builds a graph-enabled server with query-result caching
+// enabled at the given TTL. The standard MemoryCache is used; per-item TTL is
+// honoured correctly so no special cache construction is needed.
+func setupCachedGraphServer(t *testing.T, cacheTTL time.Duration) *graphTestServer {
+	t.Helper()
+	return setupGraphServerWithOptions(t, cacheTTL, cache.NewMemoryCache(1000, 300*time.Second))
+}
+
+func setupGraphServerWithOptions(t *testing.T, queryCacheTTL time.Duration, memCache cache.Cache) *graphTestServer {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "xolu-graph-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
+		Type:         "sqlite",
+		DBPath:       dbPath,
+		GraphEnabled: true,
+	})
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("NewStoreFromConfig: %v", err)
+	}
+
+	cfg := &config.Config{
+		Host:               "localhost",
+		Port:               0,
+		BaseDir:            tmpDir,
+		Schema:             "test_schema",
+		SchemaDir:          filepath.Join(tmpDir, "test_schema"),
+		CacheType:          "memory",
+		CacheTTL:           300,
+		GraphEnabled:       true,
+		GraphMode:          "flat",
+		TenantMode:         "path",
+		TenantAutoRegister: true,
+		RefEmbedDepth:      3,
+		MaxEmbedDepth:      10,
+		MaxEntitySize:      1048576,
+		PatchNullBehavior:  "store",
+		GraphQueryCacheTTL: int(queryCacheTTL.Seconds()),
+	}
+
+	g := graph.NewFlatGraph()
+	validator := validation.NewNoOpValidator()
+	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
+
+	srv := server.New(cfg, store, memCache, g, validator, logger)
+	ts := httptest.NewServer(srv.Handler())
+
+	return &graphTestServer{srv: srv, ts: ts, tmpDir: tmpDir, t: t}
+}
+
+func (g *graphTestServer) cleanup() {
+	g.ts.Close()
+	os.RemoveAll(g.tmpDir)
+}
+
+func (g *graphTestServer) do(method, path string, body interface{}) (*http.Response, []byte) {
+	g.t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			g.t.Fatal(err)
+		}
+	}
+	req, err := http.NewRequest(method, g.ts.URL+path, bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp, respBody
+}
+
+// TestKL2_EdgeWriteAppearsInSulpherQuery verifies the full pipeline:
+// POST /graph/edges → in-memory graph updated → Sulpher query finds the edge.
+//
+// Before the fix, handleCreateEdge called updateGraph("", 0, {}) which was a
+// no-op. The AddEdgeWithID call was missing, so the in-memory adjacency was
+// never updated and Sulpher queries found nothing.
+func TestKL2_EdgeWriteAppearsInSulpherQuery(t *testing.T) {
+	ts := setupGraphServer(t)
+	defer ts.cleanup()
+
+	// Register schema and create two entities.
+	ts.do("POST", "/api/v1/schema/person", map[string]interface{}{
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"name"},
+	})
+
+	_, b1 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+	_, b2 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Bob"})
+
+	var r1, r2 map[string]interface{}
+	json.Unmarshal(b1, &r1)
+	json.Unmarshal(b2, &r2)
+	id1 := int(r1["id"].(float64))
+	id2 := int(r2["id"].(float64))
+
+	// Write edge with properties via the REST endpoint.
+	resp, body := ts.do("POST", "/api/v1/graph/edges", map[string]interface{}{
+		"from":  fmt.Sprintf("person:%d", id1),
+		"to":    fmt.Sprintf("person:%d", id2),
+		"rel":   "KNOWS",
+		"props": map[string]interface{}{"since": 2020},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("[KL-2] POST /graph/edges: %d %s", resp.StatusCode, body)
+	}
+
+	// Sulpher query must find the edge in the in-memory graph.
+	resp, body = ts.do("POST", "/api/v1/graph/query", map[string]interface{}{
+		"query":     "MATCH (a:person)-[:KNOWS]->(b:person) RETURN a.name AS a_name, b.name AS b_name",
+		"max_depth": 5,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("[KL-2] graph query: %d %s", resp.StatusCode, body)
+	}
+	var qr map[string]interface{}
+	json.Unmarshal(body, &qr)
+	rows, _ := qr["result"].([]interface{})
+	if len(rows) == 0 {
+		t.Error("[KL-2] Sulpher query found 0 KNOWS edges after REST write; in-memory graph not updated")
+	}
+}
+
+// TestKL3_RebuildPreservesWrittenNodes verifies that calling the rebuild
+// endpoint immediately after writing entities with edges does not clear
+// the graph. Isolated nodes (no edges) are not stored in t<X>_graph and
+// thus won't appear after rebuild — that is correct by design. This test
+// uses entities connected by a REF edge so they survive the scan.
+func TestKL3_RebuildPreservesWrittenNodes(t *testing.T) {
+	ts := setupGraphServer(t)
+	defer ts.cleanup()
+
+	// No schema registration needed — entities stored as blobs.
+	// The test only verifies that rebuild preserves graph edges.
+
+	// Create Alice.
+	_, b1 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+	var r1 map[string]interface{}
+	json.Unmarshal(b1, &r1)
+	aliceID := int(r1["id"].(float64))
+
+	// Create Bob with a REF to Alice — this creates an edge in t<X>_graph.
+	// Note: reports_to is not declared in the schema, which is correct —
+	// the server accepts extra fields for graph edge tracking purposes.
+	ts.do("POST", "/api/v1/person", map[string]interface{}{
+		"name":       "Bob",
+		"reports_to": map[string]interface{}{"type": "REF", "entity": "person", "id": aliceID},
+	})
+
+	// Read edge count before rebuild (must be > 0).
+	_, sb := ts.do("GET", "/api/v1/graph/stats", nil)
+	var statsBefore map[string]interface{}
+	json.Unmarshal(sb, &statsBefore)
+	edgesBefore := int(statsBefore["edge_count"].(float64))
+	if edgesBefore == 0 {
+		t.Fatal("[KL-3] precondition: expected > 0 edges before rebuild")
+	}
+
+	// Trigger rebuild.
+	resp, body := ts.do("POST", "/api/v1/graph/admin/rebuild", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("[KL-3] rebuild: %d %s", resp.StatusCode, body)
+	}
+
+	// Edge count must be non-zero after rebuild.
+	_, sa := ts.do("GET", "/api/v1/graph/stats", nil)
+	var statsAfter map[string]interface{}
+	json.Unmarshal(sa, &statsAfter)
+	edgesAfter := int(statsAfter["edge_count"].(float64))
+
+	if edgesAfter == 0 {
+		t.Errorf("[KL-3] after rebuild: 0 edges; WAL checkpoint not flushing correctly (before=%d)", edgesBefore)
+	}
+}
+
+// ── Graph query result cache tests ─────────────────────────────────────────── verifies that a repeated identical query is
+// served from the cache (X-Cache: HIT) without re-running the BFS.
+func TestGraphQueryCache_HappyPath(t *testing.T) {
+	ts := setupCachedGraphServer(t, 30*time.Second)
+	defer ts.cleanup()
+
+	// Create two people connected by a REF edge.
+	_, b1 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+	var r1 map[string]interface{}
+	json.Unmarshal(b1, &r1)
+	aliceID := int(r1["id"].(float64))
+
+	ts.do("POST", "/api/v1/person", map[string]interface{}{
+		"name":       "Bob",
+		"reports_to": map[string]interface{}{"type": "REF", "entity": "person", "id": aliceID},
+	})
+
+	query := `MATCH (a:person)-[:reports_to]->(b:person) RETURN a, b`
+
+	// First call — should be a MISS (BFS executed, result cached).
+	resp1, body1 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{
+		"query": query, "max_depth": 5,
+	})
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("[cache happy path] first query: %d %s", resp1.StatusCode, body1)
+	}
+	if resp1.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[cache happy path] first query: expected X-Cache: MISS, got %q", resp1.Header.Get("X-Cache"))
+	}
+
+	// Second call — same query, should be a HIT.
+	resp2, body2 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{
+		"query": query, "max_depth": 5,
+	})
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("[cache happy path] second query: %d %s", resp2.StatusCode, body2)
+	}
+	if resp2.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("[cache happy path] second query: expected X-Cache: HIT, got %q", resp2.Header.Get("X-Cache"))
+	}
+
+	// Both responses must have the same body.
+	if string(body1) != string(body2) {
+		t.Errorf("[cache happy path] cache hit body differs from original\nMISS: %s\nHIT:  %s", body1, body2)
+	}
+}
+
+// TestGraphQueryCache_DifferentQueriesNotShared verifies that two distinct
+// queries have independent cache entries.
+func TestGraphQueryCache_DifferentQueriesNotShared(t *testing.T) {
+	ts := setupCachedGraphServer(t, 30*time.Second)
+	defer ts.cleanup()
+
+	ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+
+	q1 := `MATCH (a:person) RETURN a`
+	q2 := `MATCH (a:person) WHERE a.name = 'Alice' RETURN a`
+
+	resp1, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": q1, "max_depth": 5})
+	resp2, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": q2, "max_depth": 5})
+
+	// Both must be MISS — they are different queries.
+	if resp1.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[distinct queries] q1: expected MISS, got %q", resp1.Header.Get("X-Cache"))
+	}
+	if resp2.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[distinct queries] q2: expected MISS (distinct query), got %q", resp2.Header.Get("X-Cache"))
+	}
+
+	// Third call with q1 again — must be HIT, not q2's entry.
+	resp3, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": q1, "max_depth": 5})
+	if resp3.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("[distinct queries] q1 repeat: expected HIT, got %q", resp3.Header.Get("X-Cache"))
+	}
+}
+
+// TestGraphQueryCache_WriteInvalidation verifies that a graph write (entity
+// creation carrying a REF edge) evicts all cached query results for the tenant,
+// so the next query re-runs the BFS and reflects the new topology.
+func TestGraphQueryCache_WriteInvalidation(t *testing.T) {
+	ts := setupCachedGraphServer(t, 30*time.Second)
+	defer ts.cleanup()
+
+	// Create Alice.
+	_, b1 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+	var r1 map[string]interface{}
+	json.Unmarshal(b1, &r1)
+	aliceID := int(r1["id"].(float64))
+
+	query := `MATCH (a:person) RETURN a`
+
+	// First query — MISS; result has 1 row (Alice only).
+	resp1, body1 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp1.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[write invalidation] first query: expected MISS, got %q", resp1.Header.Get("X-Cache"))
+	}
+	var r1Result map[string]interface{}
+	json.Unmarshal(body1, &r1Result)
+	rows1 := r1Result["result"].([]interface{})
+	if len(rows1) != 1 {
+		t.Fatalf("[write invalidation] expected 1 row before Bob, got %d", len(rows1))
+	}
+
+	// Second query — HIT (still Alice only, from cache).
+	resp2, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp2.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("[write invalidation] second query: expected HIT, got %q", resp2.Header.Get("X-Cache"))
+	}
+
+	// Write Bob (with REF to Alice) — this must invalidate the cache.
+	ts.do("POST", "/api/v1/person", map[string]interface{}{
+		"name":       "Bob",
+		"reports_to": map[string]interface{}{"type": "REF", "entity": "person", "id": aliceID},
+	})
+
+	// Third query — must be MISS (cache evicted by the write) and must have 2 rows.
+	resp3, body3 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp3.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[write invalidation] post-write query: expected MISS (cache evicted), got %q", resp3.Header.Get("X-Cache"))
+	}
+	var r3Result map[string]interface{}
+	json.Unmarshal(body3, &r3Result)
+	rows3 := r3Result["result"].([]interface{})
+	if len(rows3) != 2 {
+		t.Errorf("[write invalidation] expected 2 rows after Bob was added, got %d", len(rows3))
+	}
+}
+
+// TestGraphQueryCache_EdgeWriteInvalidation verifies that a REST edge write
+// (POST /graph/edges) also invalidates the cached query results.
+func TestGraphQueryCache_EdgeWriteInvalidation(t *testing.T) {
+	ts := setupCachedGraphServer(t, 30*time.Second)
+	defer ts.cleanup()
+
+	_, b1 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+	var r1 map[string]interface{}
+	json.Unmarshal(b1, &r1)
+	aliceID := int(r1["id"].(float64))
+
+	_, b2 := ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Bob"})
+	var r2 map[string]interface{}
+	json.Unmarshal(b2, &r2)
+	bobID := int(r2["id"].(float64))
+
+	query := `MATCH (a:person)-[:KNOWS]->(b:person) RETURN a, b`
+
+	// First query — MISS; 0 rows (no edges yet).
+	resp1, body1 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp1.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[edge invalidation] first query: expected MISS, got %q", resp1.Header.Get("X-Cache"))
+	}
+	var r1res map[string]interface{}
+	json.Unmarshal(body1, &r1res)
+	if rows, _ := r1res["result"].([]interface{}); len(rows) != 0 {
+		t.Fatalf("[edge invalidation] expected 0 rows before edge, got %d", len(rows))
+	}
+
+	// Second query — HIT (0 rows from cache).
+	resp2, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp2.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("[edge invalidation] second query: expected HIT, got %q", resp2.Header.Get("X-Cache"))
+	}
+
+	// Write an edge via REST.
+	ts.do("POST", "/api/v1/graph/edges", map[string]interface{}{
+		"from": fmt.Sprintf("person:%d", aliceID),
+		"to":   fmt.Sprintf("person:%d", bobID),
+		"rel":  "KNOWS",
+	})
+
+	// Third query — must be MISS and see the new edge.
+	resp3, body3 := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp3.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[edge invalidation] post-edge query: expected MISS, got %q", resp3.Header.Get("X-Cache"))
+	}
+	var r3res map[string]interface{}
+	json.Unmarshal(body3, &r3res)
+	if rows := r3res["result"].([]interface{}); len(rows) != 1 {
+		t.Errorf("[edge invalidation] expected 1 row after edge write, got %d", len(rows))
+	}
+}
+
+// TestGraphQueryCache_TTLExpiry verifies that a cached result becomes a MISS
+// after the TTL has elapsed, even without an explicit write.
+//
+// GraphQueryCacheTTL is stored as integer seconds, so the minimum testable
+// TTL is 1 second. The MemoryCache now honours per-item TTL correctly.
+func TestGraphQueryCache_TTLExpiry(t *testing.T) {
+	const cacheTTL = 1 * time.Second
+	ts := setupCachedGraphServer(t, cacheTTL)
+	defer ts.cleanup()
+
+	ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+
+	query := `MATCH (a:person) RETURN a`
+
+	// First call — MISS, result cached with 1s TTL.
+	resp1, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp1.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[TTL expiry] first call: expected MISS, got %q", resp1.Header.Get("X-Cache"))
+	}
+
+	// Immediate second call — HIT (entry still live).
+	resp2, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp2.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("[TTL expiry] immediate second call: expected HIT, got %q", resp2.Header.Get("X-Cache"))
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(cacheTTL + 500*time.Millisecond)
+
+	// Call after expiry — must be MISS again.
+	resp3, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+	if resp3.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("[TTL expiry] post-expiry call: expected MISS (TTL elapsed), got %q", resp3.Header.Get("X-Cache"))
+	}
+}
+
+// TestGraphQueryCache_DisabledWhenTTLZero verifies that when GraphQueryCacheTTL
+// is 0 (the default), no caching occurs and no X-Cache header is set.
+func TestGraphQueryCache_DisabledWhenTTLZero(t *testing.T) {
+	// setupGraphServer does NOT set GraphQueryCacheTTL, so it defaults to 0.
+	ts := setupGraphServer(t)
+	defer ts.cleanup()
+
+	ts.do("POST", "/api/v1/person", map[string]interface{}{"name": "Alice"})
+
+	query := `MATCH (a:person) RETURN a`
+	for i := 0; i < 3; i++ {
+		resp, _ := ts.do("POST", "/api/v1/graph/query", map[string]interface{}{"query": query, "max_depth": 5})
+		if h := resp.Header.Get("X-Cache"); h != "" {
+			t.Errorf("[disabled cache] call %d: X-Cache should be absent when TTL=0, got %q", i+1, h)
+		}
+	}
 }

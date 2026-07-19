@@ -1,15 +1,20 @@
 # Adapted Tables for Schema-ful Entities
 
-**Version:** 0.1.0-draft
-**Author:** haitch &lt;h@ual.fi&gt;
-**Date:** February 2026
-**Status:** Design proposal
+**Version:** 1.0
+**Author:** haitch &lt;h@ual.li&gt;
+**Date:** February 2026 (implemented v0.9.0-rc11 through v0.9.9-rc14)
+**Status:** Implemented
 
 ---
 
+> **Naming note (v0.9.9-rc11–rc14):** Adapted node tables were renamed from
+> `olu_<entity>` to `t<XXXX>_ndata_<entity>` to match the per-tenant table
+> family convention. All DDL, CRUD, and index names use this scheme.
+> `AdaptedTableSpec.TenantID` drives `TableName()` automatically.
+
 ## 1. Problem Statement
 
-olu stores all entity data in a single `entities` table as serialised JSON in
+xolu stores all entity data in a single `entities` table as serialised JSON in
 a `data TEXT` column. Every field-level query operation — WHERE predicates,
 ORDER BY, aggregation — requires SQLite's `json_extract()` function to parse
 the blob at runtime, once per row, per field reference.
@@ -27,7 +32,7 @@ The blob layout's cost comes from two sources: `json_extract()` call overhead
 per row per field, and `json.Unmarshal` in Go to rehydrate results. Both are
 eliminated when fields are stored as native columns.
 
-For entity types with a declared JSON Schema, olu already knows the full type
+For entity types with a declared JSON Schema, xolu already knows the full type
 structure at startup. This document proposes using that knowledge to generate
 per-entity-type tables with native columns, while preserving the blob layout
 for schema-less entities.
@@ -36,7 +41,7 @@ for schema-less entities.
 ## 2. Design Goals
 
 1. **Schema-ful entities get native columns.** When a JSON Schema is present
-   for an entity type, olu creates a dedicated table (`olu_{entity}`) with one
+   for an entity type, xolu creates a dedicated table (`olu_{entity}`) with one
    column per declared property, typed to match the schema.
 
 2. **Schema-less entities are unchanged.** Entity types without a schema
@@ -92,7 +97,7 @@ ORDER BY clauses reference.
 
 ### 3.2 REF Fields
 
-olu's REF convention stores references as objects:
+xolu's REF convention stores references as objects:
 
 ```json
 {"type": "REF", "entity": "users", "id": 42}
@@ -135,7 +140,7 @@ Schema declaration for a REF field:
 
 ### 3.3 The Overflow Column
 
-When `additionalProperties` is not explicitly `false` in the schema (olu's
+When `additionalProperties` is not explicitly `false` in the schema (xolu's
 current default), entities may contain fields not declared in the schema.
 These must be stored somewhere.
 
@@ -609,7 +614,7 @@ CREATE TABLE IF NOT EXISTS table_schemas (
 );
 ```
 
-On startup, olu compares the in-memory schema's hash against the stored
+On startup, xolu compares the in-memory schema's hash against the stored
 hash. If they differ, it computes a diff (added/removed/changed columns)
 and applies the appropriate migration strategy (add-column fast path or
 full rebuild).
@@ -621,8 +626,8 @@ accidental schema changes:
 
 1. Schema changes are logged at WARN level with the diff.
 2. Destructive changes (remove, type change) require an explicit
-   confirmation flag: `OLU_SCHEMA_ALLOW_DESTRUCTIVE=true`. Without it,
-   olu logs an error and refuses to start if a destructive migration is
+   confirmation flag: `XOLU_SCHEMA_ALLOW_DESTRUCTIVE=true`. Without it,
+   xolu logs an error and refuses to start if a destructive migration is
    detected.
 3. The pre-migration table is exported as a backup (via the existing
    SQLite backup mechanism) before the rebuild begins.
@@ -632,7 +637,7 @@ accidental schema changes:
 
 ### 9.1 Table Creation
 
-When olu starts (or when a schema is registered at runtime via
+When xolu starts (or when a schema is registered at runtime via
 `POST /api/v1/schema/{entity}`):
 
 1. Check `table_schemas` for existing adapted table.
@@ -650,7 +655,7 @@ When olu starts (or when a schema is registered at runtime via
 ### 9.2 Data Migration from Blob to Adapted
 
 When an entity type transitions from schema-less to schema-ful (or when
-olu upgrades to a version with adapted table support):
+xolu upgrades to a version with adapted table support):
 
 1. Count rows in `entities WHERE entity_type = ?`.
 2. If zero: skip (the adapted table is ready for new data).
@@ -679,7 +684,7 @@ No changes to FTS are required.
 
 ### 10.1 Automatic Indexes
 
-When creating an adapted table, olu generates indexes based on schema
+When creating an adapted table, xolu generates indexes based on schema
 metadata:
 
 | Condition | Index created |
@@ -697,32 +702,32 @@ index scan over a table scan.
 
 ### 10.2 Manual Index Hints
 
-An optional `"x-olu-index"` extension in the JSON Schema property allows
+An optional `"x-xolu-index"` extension in the JSON Schema property allows
 explicit index control:
 
 ```json
 {
   "email": {
     "type": "string",
-    "x-olu-index": true
+    "x-xolu-index": true
   },
   "status": {
     "type": "string",
-    "x-olu-index": false
+    "x-xolu-index": false
   }
 }
 ```
 
-When present, `x-olu-index` overrides the automatic heuristics.
+When present, `x-xolu-index` overrides the automatic heuristics.
 
 ### 10.3 Composite Indexes
 
 Composite indexes (multi-column) are not generated automatically. They can
-be declared with a table-level `x-olu-indexes` extension:
+be declared with a table-level `x-xolu-indexes` extension:
 
 ```json
 {
-  "x-olu-indexes": [
+  "x-xolu-indexes": [
     {"columns": ["tenant_id", "status", "created_at"]}
   ]
 }
@@ -739,23 +744,23 @@ identifies.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLU_ADAPTED_TABLES` | `auto` | `auto`: use adapted tables for schema-ful entities. `off`: always use blob layout. `on`: require adapted tables (fail if schema is missing). |
-| `OLU_SCHEMA_ALLOW_DESTRUCTIVE` | `false` | Allow destructive schema migrations (column removal, type changes). |
+| `XOLU_ADAPTED_TABLES` | `auto` | `auto`: use adapted tables for schema-ful entities. `off`: always use blob layout. `on`: require adapted tables (fail if schema is missing). |
+| `XOLU_SCHEMA_ALLOW_DESTRUCTIVE` | `false` | Allow destructive schema migrations (column removal, type changes). |
 
 ### 11.2 Per-Entity Override
 
-The schema can include an `x-olu-storage` extension to override the global
+The schema can include an `x-xolu-storage` extension to override the global
 setting for a specific entity type:
 
 ```json
 {
-  "x-olu-storage": "blob",
+  "x-xolu-storage": "blob",
   "properties": { ... }
 }
 ```
 
 Valid values: `"adapted"` (force adapted), `"blob"` (force blob). If absent,
-the global `OLU_ADAPTED_TABLES` setting applies.
+the global `XOLU_ADAPTED_TABLES` setting applies.
 
 
 ## 12. Implementation Plan
@@ -818,7 +823,7 @@ schema hash tracking, startup reconciliation.
 2. Implement schema hash comparison on startup.
 3. Implement add-column fast path.
 4. Implement rebuild-and-swap for general case.
-5. Implement `OLU_SCHEMA_ALLOW_DESTRUCTIVE` guard.
+5. Implement `XOLU_SCHEMA_ALLOW_DESTRUCTIVE` guard.
 6. Tests: add field, remove field (with guard), type change, startup
    reconciliation.
 

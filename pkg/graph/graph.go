@@ -6,12 +6,21 @@ package graph
 
 import "errors"
 
+// PathDirection controls which edges are followed during path traversal.
+type PathDirection int
+
+const (
+	PathDirOutgoing PathDirection = iota // follow outgoing edges only (default)
+	PathDirIncoming                      // follow incoming edges only
+	PathDirAny                           // follow edges in either direction (undirected)
+)
+
 // Sentinel errors. Previously re-exported from pkg/graph/state; now defined
 // here directly after the removal of IndexedGraph and the state package.
 var (
-	ErrCycleDetected    = errors.New("adding this edge would create a cycle")
-	ErrCrossTenantEdge  = errors.New("edge endpoints belong to different tenants")
-	ErrMalformedNodeID  = errors.New("node ID contains '@' but is not a valid XXXX@-prefixed ID")
+	ErrCycleDetected   = errors.New("adding this edge would create a cycle")
+	ErrCrossTenantEdge = errors.New("edge endpoints belong to different tenants")
+	ErrMalformedNodeID = errors.New("node ID contains '@' but is not a valid XXXX@-prefixed ID")
 	// ErrEdgeAlreadyExists is returned by AddEdge when an edge from→to already
 	// exists with a *different* relationship label. The same pair with the same
 	// label is a no-op (idempotent); only label conflicts trigger this.
@@ -56,7 +65,7 @@ var (
 //     referenced by a REF field but never written to the store.
 //
 // The string value "__vode__" is intentionally non-colliding with any
-// valid olu entity type name (which may not contain underscores by convention).
+// valid xolu entity type name (which may not contain underscores by convention).
 // "Vode" is a domain-specific term; it is not an acronym and should not be
 // confused with REF, which is the *edge* pointing at a vode node.
 const NodeTypeVode = "__vode__"
@@ -69,6 +78,17 @@ type Graph interface {
 	AddNode(nodeID string, nodeType string) error
 	RemoveNode(nodeID string) error
 	AddEdge(from, to, relationship string) error
+	// AddEdgeWithProps is like AddEdge but signals that the edge carries
+	// property data. The graph layer records the edge; the storage layer
+	// assigns a surrogate edge ID and writes the property blob. A nil or
+	// empty props map is equivalent to calling AddEdge.
+	AddEdgeWithProps(from, to, relationship string, props map[string]interface{}) error
+	// AddEdgeWithID is used during graph hydration to restore a previously
+	// assigned surrogate edge ID into the in-memory adjacency map. It is
+	// equivalent to AddEdge but sets EdgeRef.ID so that relationship variable
+	// binding in Sulpher queries can surface the stored edge properties.
+	// edgeID = 0 means the edge has no property row (same semantics as AddEdge).
+	AddEdgeWithID(from, to, relationship string, edgeID int) error
 	RemoveEdge(from, to string) error
 	// CheckEdge runs the same pre-flight checks as AddEdge (cross-tenant guard,
 	// cycle detection) without modifying the graph. Returns nil if the edge
@@ -81,9 +101,22 @@ type Graph interface {
 	UpdateFromEntity(entity string, id int, data map[string]interface{}) error
 
 	// Traversal
-	GetNeighbors(nodeID string) (map[string]string, error)
-	GetIncomingEdges(nodeID string) (map[string]string, error)
+	// GetNeighbors returns the outgoing edges from nodeID as a map from
+	// neighbour node ID to EdgeRef. EdgeRef.Rel is the relationship label;
+	// EdgeRef.ID is the surrogate edge ID (0 when no property row exists).
+	GetNeighbors(nodeID string) (map[string]EdgeRef, error)
+	// GetIncomingEdges returns the incoming edges to nodeID as a map from
+	// source node ID to EdgeRef.
+	GetIncomingEdges(nodeID string) (map[string]EdgeRef, error)
 	FindPath(from, to string, maxDepth int) ([]string, error)
+	// FindPathDirected finds the shortest path respecting the given traversal
+	// direction. PathDirOutgoing follows outgoing edges (same as FindPath),
+	// PathDirIncoming follows incoming edges, PathDirAny follows both.
+	// Returns the path as ordered node IDs from source to destination.
+	FindPathDirected(from, to string, maxDepth int, dir PathDirection) ([]string, error)
+	// AllShortestPaths returns all paths of minimum length from from to to.
+	// Uses the same direction semantics as FindPathDirected.
+	AllShortestPaths(from, to string, maxDepth int, dir PathDirection) ([][]string, error)
 	PathExists(from, to string, maxDepth int) (bool, int, error)
 	// SharedOutNeighbors returns the nodes that both nodeA and nodeB point to
 	// via outgoing edges — i.e. shared out-neighbours in a directed graph.
@@ -125,8 +158,6 @@ type Graph interface {
 	GetNodesByTypeForTenant(tenantPrefix, entityType string) ([]string, error)
 
 	// Persistence
-	Save(filename string) error
-	Load(filename string) error
 	Clear() error
 }
 
@@ -134,7 +165,7 @@ type Graph interface {
 // wouldCreateCycle. It is exported so that callers (e.g. the startup
 // diagnostic print) can display the effective default without hard-coding it.
 // Override at runtime via FlatGraph.SetCycleCheckLimit or the
-// OLU_GRAPH_CYCLE_CHECK_LIMIT environment variable.
+// XOLU_GRAPH_CYCLE_CHECK_LIMIT environment variable.
 const DefaultCycleCheckLimit = 512
 
 // CycleCheckBudgetExceeded is the sentinel returned when wouldCreateCycle
@@ -144,7 +175,7 @@ const DefaultCycleCheckLimit = 512
 // large or dense graphs the default budget of DefaultCycleCheckLimit (512)
 // visited nodes may be exceeded by a legitimate (non-cyclic) edge addition.
 // The limit is configurable via FlatGraph.SetCycleCheckLimit or the
-// OLU_GRAPH_CYCLE_CHECK_LIMIT environment variable. This behaviour is
+// XOLU_GRAPH_CYCLE_CHECK_LIMIT environment variable. This behaviour is
 // documented here and in GRAPH_API.md so that callers can reason about it.
 //
 // Note: this constant is informational only — the code uses cycleCheckLimit
@@ -156,6 +187,15 @@ type Degree struct {
 	In    int `json:"in"`
 	Out   int `json:"out"`
 	Total int `json:"total"`
+}
+
+// EdgeRef identifies an outgoing edge from a traversal result.
+// Rel is the relationship label (always present).
+// ID is the surrogate edge ID assigned when the edge has a property row in
+// t<X>_edges or t<X>_edata_<label>; zero means no properties are stored.
+type EdgeRef struct {
+	Rel string
+	ID  int
 }
 
 type NodeInfo struct {

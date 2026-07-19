@@ -39,6 +39,21 @@ type Executor struct {
 	// doesn't need filtering (the store's List already returns scoped data),
 	// but the push-down path does (QueryWithPlan runs raw SQL).
 	sqlTenantID string
+
+	// seqIncrementor is an optional function wired in by the server when
+	// sequences (S5) are enabled. It atomically increments the named sequence
+	// for the given tenant and returns the new value. Nil when not available.
+	seqIncrementor func(tenantID uint16, name string) (int64, error)
+
+	// seqSession holds per-query session state for NEXT VALUE FOR / @CURRENT_VALUE.
+	// Reset at the start of each Execute call.
+	seqSession *seqSessionState
+
+	// genDispatcher is an optional function wired in by the server when
+	// stateful generators (S10) are enabled. It resolves a named generator
+	// (looked up in gen_definitions) for the given tenant and produces one
+	// value. Nil when not available, in which case @GEN returns nil.
+	genDispatcher func(tenantID uint16, name string) (string, error)
 }
 
 // QueryLimits holds server-enforced limits for query execution.
@@ -54,7 +69,14 @@ func NewExecutor(store storage.Store, sv SchemaValidator) *Executor {
 	var dialect SQLDialect
 	var planner *Planner
 	if _, ok := store.(storage.Queryable); ok {
-		dialect = &SQLiteDialect{} // Default — future backends provide their own dialect
+		d := &SQLiteDialect{}
+		// Populate the nodes table name from the store when it implements TableNamer.
+		// This ensures push-down queries target the correct per-tenant table
+		// (e.g. t0001_nodes) rather than the hardcoded "entities".
+		if tn, ok := store.(storage.TableNamer); ok {
+			d.NodesTable = tn.NodesTable()
+		}
+		dialect = d
 		planner = NewPlannerFromDialect(dialect)
 	} else {
 		planner = NewPlanner() // Fallback threshold; won't matter since push-down requires Queryable
@@ -80,8 +102,26 @@ func (e *Executor) SetProfile(profile *HardwareProfile) {
 	e.planner = NewPlannerWithProfile(e.dialect, profile)
 }
 
-// SetLimits configures query execution limits.
+// Default query limits applied when a configured value is zero or negative.
+// These mirror the documented config defaults (see pkg/config: QueryMaxRows,
+// QueryMaxScanRows) and follow the same use-time fallback pattern as the
+// timeseries handler's tsQueryLimits, so a missing or misconfigured bound (e.g.
+// XOLU_QUERY_MAX_SCAN_ROWS=0, or a Config built without DefaultConfig) can never
+// silently disable the limit and allow an unbounded in-memory scan/result.
+const (
+	defaultMaxRows     = 10000
+	defaultMaxScanRows = 100000
+)
+
+// SetLimits configures query execution limits. Non-positive values are replaced
+// with safe defaults so the executor never holds a limit-disabling zero.
 func (e *Executor) SetLimits(limits QueryLimits) {
+	if limits.MaxRows <= 0 {
+		limits.MaxRows = defaultMaxRows
+	}
+	if limits.MaxScanRows <= 0 {
+		limits.MaxScanRows = defaultMaxScanRows
+	}
 	e.limits = limits
 }
 
@@ -107,14 +147,26 @@ func (e *Executor) ExecuteWithStore(ctx context.Context, stmt ast.Statement, sto
 		}
 	}
 	// Create a temporary executor with the overridden store.
+	// A fresh Aggregator is allocated rather than sharing the parent's pointer:
+	// configureDecimalAggregation mutates Aggregator.decimalFields on every
+	// query, so sharing the pointer would produce a data race under concurrent
+	// requests. Aggregator is stateless between calls — configureDecimalAggregation
+	// resets it unconditionally — so a per-request allocation is both correct
+	// and cheap.
 	tmp := &Executor{
 		store:           store,
-		aggregator:      e.aggregator,
+		aggregator:      NewAggregator(),
 		schemaValidator: e.schemaValidator,
 		planner:         e.planner,
 		dialect:         e.dialect,
 		limits:          e.limits,
 		sqlTenantID:     sqlTenantID,
+		seqIncrementor:  e.seqIncrementor, // propagate sequence support
+		genDispatcher:   e.genDispatcher,  // propagate generator support
+	}
+	// Initialise a fresh sequence session for this tenant.
+	if cfg := store.Config(); tmp.seqIncrementor != nil {
+		tmp.seqSession = newSeqSessionState(cfg.TenantID)
 	}
 	// Pass empty tenantID: Go-path filtering is unnecessary because
 	// the store is already scoped. sqlTenantID handles the push-down path.
@@ -278,6 +330,48 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 	}
 
 	// Go path fallback: fetch all records, filter and sort in Go.
+	if !fetched {
+		// Stage 10: detect edge labels (FROM KNOWS) and route to the edge
+		// store path instead of the node store.
+		//
+		// Adapted edge labels (e.g. KNOWS with t<X>_edata_KNOWS) are handled
+		// transparently by List() which checks adapted.Get() first — no
+		// special routing needed.
+		//
+		// Blob-only edge labels (registered in t<X>_e_sch but no adapted
+		// table) must use ListEdges() to read from t<X>_edges.
+		//
+		// IsEdgeLabel distinguishes both cases from node entity types.
+		if el, ok := e.store.(storage.EdgeLister); ok {
+			if isEdge, checkErr := el.IsEdgeLabel(ctx, entity); checkErr == nil && isEdge {
+				// Resolve the canonical casing (OQL normalises to lowercase).
+				// List() needs the registry-cased name for adapted.Get() to work.
+				canonical := el.ResolveEdgeRelName(ctx, entity)
+
+				// Adapted path: List() routes via adapted.Get() to t<X>_edata_<label>.
+				// Blob path: ListEdges() reads from t<X>_edges.
+				// Try adapted first; if it returns nothing, fall through to blob.
+				records, err = e.store.List(ctx, canonical)
+				if err != nil || len(records) == 0 {
+					blobRecords, blobErr := el.ListEdges(ctx, entity)
+					if blobErr == nil && len(blobRecords) > 0 {
+						records = blobRecords
+						err = nil
+					}
+				}
+				if err != nil {
+					return nil, fmt.Errorf("failed to read edge label '%s': %w", entity, err)
+				}
+				// Apply WHERE in Go (no SQL push-down for edge queries yet).
+				if s.Where != nil {
+					records = e.filterRecords(records, s.Where)
+				}
+				scanned = len(records)
+				fetched = true
+			}
+		}
+	}
+
 	if !fetched {
 		// B4 path: if the store supports inline predicate filtering and the
 		// WHERE clause has compilable terms, push predicates into the
@@ -721,6 +815,9 @@ func (e *Executor) evalExpr(rec map[string]interface{}, expr ast.Expression) int
 			return val
 		}
 		return nil
+	case *ast.NextValueForExpression:
+		// S5: NEXT VALUE FOR sequence_name — increments once per row.
+		return e.evalNextValueFor(ex)
 	case *ast.InfixExpression:
 		// Arithmetic
 		left := e.evalExpr(rec, ex.Left)
@@ -739,6 +836,36 @@ func (e *Executor) evalExpr(rec map[string]interface{}, expr ast.Expression) int
 // Additionally, if a SELECT column has an alias (e.g., "as period"), the
 // result is also stored under that alias so that GROUP BY and ORDER BY
 // can reference it by name.
+//
+// --- Design note: NEXT VALUE FOR / GEN() session state (v2) ---
+//
+// When API v2 generators are implemented (S5 in the v2 development plan),
+// NEXT VALUE FOR and CURRENT VALUE FOR require per-execution state that
+// persists across rows but is scoped to a single query:
+//
+//   - NEXT VALUE FOR increments once per row in a multi-row SELECT result.
+//   - CURRENT VALUE FOR returns the session-local last value without
+//     incrementing; it must be called after NEXT VALUE FOR in the same
+//     query or it returns XOLU-GEN006.
+//
+// This state cannot live in the Executor struct (which is shared across
+// queries) nor in evalExpr's parameters (which are stateless). The correct
+// attachment point is a per-execution context passed into evalExpr and
+// projectColumns when sequence or generator functions are present in the
+// SELECT column list.
+//
+// Implementation approach when S5 is built:
+//  1. Detect NEXT VALUE FOR / GEN() nodes in the column list during
+//     materializeScalars (before the per-row loop).
+//  2. Allocate a querySessionState struct holding a map[seqName]int64
+//     for the current value per sequence and a seenFirst map for CURRENT
+//     VALUE FOR validation.
+//  3. Pass *querySessionState into evalExpr as an optional parameter
+//     (or via a closure) so the per-row increment is applied correctly.
+//  4. Execute the sequence INCREMENT in the same SQLite transaction
+//     as the row being projected when the query is part of a commit.
+//     When the query is a standalone SELECT, the increment is still
+//     durable but runs outside any caller transaction.
 func (e *Executor) materializeScalars(records []map[string]interface{}, columns []ast.SelectColumn, groupBy []ast.Expression) []map[string]interface{} {
 	// Collect scalar function expressions that need materialisation.
 	type scalarEntry struct {
@@ -787,9 +914,28 @@ func (e *Executor) materializeScalars(records []map[string]interface{}, columns 
 	// Evaluate each scalar on every record
 	for _, rec := range records {
 		for _, s := range unique {
-			val := EvalScalarFunction(s.expr, func(arg ast.Expression) interface{} {
-				return e.evalExpr(rec, arg)
-			})
+			var val interface{}
+			// xolu extension functions are @-prefixed. They must be evaluated on
+			// THIS executor (the per-query clone holding the tenant-scoped store)
+			// rather than via the global scalar map, whose closures capture the
+			// engine's base executor and so resolve the wrong (unscoped) tenant.
+			name := strings.ToUpper(exprToString(s.expr.Function))
+			switch name {
+			case "@GEN", "@SEQ":
+				args := make([]interface{}, len(s.expr.Arguments))
+				for i, arg := range s.expr.Arguments {
+					args[i] = e.evalExpr(rec, arg)
+				}
+				if name == "@GEN" {
+					val = e.evalGenValue(args)
+				} else {
+					val = e.evalSeqValue(args)
+				}
+			default:
+				val = EvalScalarFunction(s.expr, func(arg ast.Expression) interface{} {
+					return e.evalExpr(rec, arg)
+				})
+			}
 			rec[s.key] = val
 			// Also store under alias so GROUP BY / ORDER BY can find it by name
 			if s.alias != "" {

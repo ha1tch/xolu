@@ -22,7 +22,7 @@ type storeFactory func(dir string) (Store, error)
 
 // pebbleFactory is the driver for the current production backend.
 func pebbleFactory(dir string) (Store, error) {
-	return NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	return NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 }
 
 // TestContract_Pebble runs the full contract suite against PebbleStore.
@@ -191,7 +191,7 @@ func runContractSuite(t *testing.T, factory storeFactory) {
 		cfg := testStoreConfig()
 		cfg.DefaultRetentionDays = 0
 		dir := t.TempDir()
-		store2, err := NewPebbleStore(dir, cfg, testPebbleConfig())
+		store2, err := NewPebbleStore(dir, cfg, testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

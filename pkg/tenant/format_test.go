@@ -17,7 +17,7 @@ func TestGraphNodePrefix(t *testing.T) {
 		id   uint16
 		want string
 	}{
-		{0, ""},         // zero tenant: empty (single-tenant fallback)
+		{0, ""}, // zero tenant: empty (single-tenant fallback)
 		{1, "0001@"},
 		{2, "0002@"},
 		{255, "00FF@"},
@@ -71,12 +71,12 @@ func TestNodeIDPrefix(t *testing.T) {
 		{"0001@post:1", "0001@"},
 		{"FFFF@doc:1", "FFFF@"},
 		{"0000@x:1", "0000@"},
-		{"post:1", ""},        // no prefix
-		{"001@post:1", ""},    // only 3 hex digits
-		{"0001post:1", ""},    // missing @
-		{"000G@post:1", ""},   // G is not valid hex
-		{"000g@post:1", ""},   // lowercase g — not recognised
-		{"0001@", "0001@"},    // prefix only, no node payload
+		{"post:1", ""},      // no prefix
+		{"001@post:1", ""},  // only 3 hex digits
+		{"0001post:1", ""},  // missing @
+		{"000G@post:1", ""}, // G is not valid hex
+		{"000g@post:1", ""}, // lowercase g — not recognised
+		{"0001@", "0001@"},  // prefix only, no node payload
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -126,7 +126,7 @@ func TestStorageDirSegment(t *testing.T) {
 		id   uint16
 		want string
 	}{
-		{0, ""},        // zero: no segment
+		{0, ""}, // zero: no segment
 		{1, "t0001"},
 		{255, "t00FF"},
 		{256, "t0100"},
@@ -164,11 +164,11 @@ func TestGraphEdgesTableName(t *testing.T) {
 		id   uint16
 		want string
 	}{
-		{0, "graph_t0000"},
-		{1, "graph_t0001"},
-		{255, "graph_t00FF"},
-		{256, "graph_t0100"},
-		{0xFFFF, "graph_tFFFF"},
+		{0, "t0000_graph"},
+		{1, "t0001_graph"},
+		{255, "t00FF_graph"},
+		{256, "t0100_graph"},
+		{0xFFFF, "tFFFF_graph"},
 	}
 	for _, c := range cases {
 		got := GraphEdgesTableName(c.id)
@@ -188,7 +188,7 @@ func TestScopeKey(t *testing.T) {
 		key  string
 		want string
 	}{
-		{0, "post:list:1:10", "post:list:1:10"},    // zero: unchanged
+		{0, "post:list:1:10", "post:list:1:10"}, // zero: unchanged
 		{1, "post:list:1:10", "0001:post:list:1:10"},
 		{0xFFFF, "x", "FFFF:x"},
 		{0, "", ""},

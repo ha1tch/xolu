@@ -26,7 +26,7 @@ func TestRegistryPersist_SurvivesCloseReopen(t *testing.T) {
 
 	// Session 1: define three timelines, write one event to lock dims on #1.
 	func() {
-		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatalf("open session 1: %v", err)
 		}
@@ -62,7 +62,7 @@ func TestRegistryPersist_SurvivesCloseReopen(t *testing.T) {
 	}()
 
 	// Session 2: reopen and verify everything survived.
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("open session 2: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRegistryPersist_FirstWriteAtPersists(t *testing.T) {
 	writeTime := time.Unix(5_000_000, 0).UTC()
 
 	func() {
-		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestRegistryPersist_FirstWriteAtPersists(t *testing.T) {
 		})
 	}()
 
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestRegistryPersist_DimsImmutableAcrossSessions(t *testing.T) {
 
 	// Session 1: define dims=2, write one event.
 	func() {
-		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -156,7 +156,7 @@ func TestRegistryPersist_DimsImmutableAcrossSessions(t *testing.T) {
 	}()
 
 	// Session 2: attempt redefine with dims=3 — must fail.
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestRegistryPersist_DefaultRetentionPersists(t *testing.T) {
 	dir := t.TempDir()
 
 	func() {
-		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestRegistryPersist_DefaultRetentionPersists(t *testing.T) {
 		}
 	}()
 
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestRegistryPersist_DefaultRetentionPersists(t *testing.T) {
 func TestRegistryPersist_NoTmpFileAfterSave(t *testing.T) {
 	dir := t.TempDir()
 
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestRegistryPersist_EventDataSurvivesReopen(t *testing.T) {
 	ts := time.Unix(2_000_000, 0).UTC()
 
 	func() {
-		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+		store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -238,7 +238,7 @@ func TestRegistryPersist_EventDataSurvivesReopen(t *testing.T) {
 		})
 	}()
 
-	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(dir, testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

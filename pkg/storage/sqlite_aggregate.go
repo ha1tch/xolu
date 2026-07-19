@@ -21,7 +21,7 @@ func (s *SQLiteStore) AggregateQuery(ctx context.Context, sql string, args []int
 	if err != nil {
 		return nil, fmt.Errorf("aggregate query failed: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Build scan targets
 	ncols := len(aliases)

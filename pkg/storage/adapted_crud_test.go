@@ -13,8 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// setupAdaptedTestDB creates a temporary SQLite database with the
-// adapted_table_schemas metadata table and a test adapted table.
+// setupAdaptedTestDB creates a temporary SQLite database for adapted table tests.
+// The per-tenant schema registry (t<X>_n_sch) is created lazily by RegisterAdaptedTable.
 func setupAdaptedTestDB(t *testing.T) (*sql.DB, StorageDialect, func()) {
 	t.Helper()
 	tmpFile, err := os.CreateTemp("", "adapted_test_*.db")
@@ -93,7 +93,7 @@ func TestRegisterAdaptedTable_CreatesTableAndMetadata(t *testing.T) {
 		"required": []interface{}{"name", "email"},
 	}
 
-	err := RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect)
+	err := RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect, 0)
 	if err != nil {
 		t.Fatalf("RegisterAdaptedTable failed: %v", err)
 	}
@@ -101,16 +101,16 @@ func TestRegisterAdaptedTable_CreatesTableAndMetadata(t *testing.T) {
 	// Verify table exists
 	var tableName string
 	err = db.QueryRowContext(ctx,
-		"SELECT name FROM sqlite_master WHERE type='table' AND name='olu_users'",
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='t0000_ndata_users'",
 	).Scan(&tableName)
 	if err != nil {
 		t.Fatalf("adapted table not created: %v", err)
 	}
 
-	// Verify metadata recorded
+	// Verify metadata recorded in the per-tenant schema registry.
 	var hash string
 	err = db.QueryRowContext(ctx,
-		"SELECT schema_hash FROM adapted_table_schemas WHERE entity_type='users'",
+		"SELECT schema_hash FROM t0000_n_sch WHERE entity_type='users'",
 	).Scan(&hash)
 	if err != nil {
 		t.Fatalf("metadata not recorded: %v", err)
@@ -139,12 +139,12 @@ func TestRegisterAdaptedTable_IdempotentSameSchema(t *testing.T) {
 	}
 
 	// First registration
-	if err := RegisterAdaptedTable(ctx, db, registry, "things", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "things", schema, dialect, 0); err != nil {
 		t.Fatalf("first registration failed: %v", err)
 	}
 
 	// Second registration with same schema should succeed (no-op)
-	if err := RegisterAdaptedTable(ctx, db, registry, "things", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "things", schema, dialect, 0); err != nil {
 		t.Fatalf("idempotent registration failed: %v", err)
 	}
 }
@@ -168,12 +168,12 @@ func TestRegisterAdaptedTable_DetectsSchemaChange(t *testing.T) {
 		},
 	}
 
-	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema1, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema1, dialect, 0); err != nil {
 		t.Fatalf("first registration failed: %v", err)
 	}
 
 	// Changed schema should succeed via automatic migration (add column).
-	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema2, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema2, dialect, 0); err != nil {
 		t.Fatalf("migration should succeed for added column, got: %v", err)
 	}
 
@@ -196,7 +196,7 @@ func TestRegisterAdaptedTable_DetectsSchemaChange(t *testing.T) {
 			"email": map[string]interface{}{"type": "string"},
 		},
 	}
-	err := RegisterAdaptedTable(ctx, db, registry, "users", schema3, dialect)
+	err := RegisterAdaptedTable(ctx, db, registry, "users", schema3, dialect, 0)
 	if err == nil {
 		t.Fatal("expected error for incompatible type change, got nil")
 	}
@@ -224,12 +224,12 @@ func TestLoadAdaptedRegistry_RoundTrip(t *testing.T) {
 		"required": []interface{}{"name"},
 	}
 
-	if err := RegisterAdaptedTable(ctx, db, registry1, "players", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry1, "players", schema, dialect, 0); err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
 	// Load into a fresh registry (simulates restart)
-	registry2, err := LoadAdaptedRegistry(ctx, db)
+	registry2, err := LoadAdaptedRegistry(ctx, db, 0)
 	if err != nil {
 		t.Fatalf("LoadAdaptedRegistry failed: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestLoadAdaptedRegistry_EmptyDB(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	registry, err := LoadAdaptedRegistry(ctx, db)
+	registry, err := LoadAdaptedRegistry(ctx, db, 0)
 	if err != nil {
 		t.Fatalf("LoadAdaptedRegistry on empty DB failed: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestAdaptedCRUD_CreateAndGet(t *testing.T) {
 		"required": []interface{}{"name"},
 	}
 
-	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect, 0); err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
@@ -302,7 +302,7 @@ func TestAdaptedCRUD_CreateAndGet(t *testing.T) {
 		"score": float64(99.5),
 	}
 
-	if err := adaptedCreate(ctx, tx, spec, dialect, 0, 1, data); err != nil {
+	if err := adaptedCreate(ctx, tx, spec, dialect, 1, data); err != nil {
 		t.Fatalf("adaptedCreate failed: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -310,7 +310,7 @@ func TestAdaptedCRUD_CreateAndGet(t *testing.T) {
 	}
 
 	// Get
-	result, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	result, err := adaptedGet(ctx, db, spec, dialect, 1)
 	if err != nil {
 		t.Fatalf("adaptedGet failed: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestAdaptedCRUD_CreateWithOverflow(t *testing.T) {
 		},
 	}
 
-	if err := RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0); err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
@@ -347,17 +347,17 @@ func TestAdaptedCRUD_CreateWithOverflow(t *testing.T) {
 	tx, _ := db.BeginTx(ctx, nil)
 
 	data := map[string]interface{}{
-		"name":  "Widget",
-		"color": "blue",    // overflow
+		"name":   "Widget",
+		"color":  "blue",       // overflow
 		"weight": float64(1.5), // overflow
 	}
 
-	if err := adaptedCreate(ctx, tx, spec, dialect, 0, 1, data); err != nil {
+	if err := adaptedCreate(ctx, tx, spec, dialect, 1, data); err != nil {
 		t.Fatalf("create with overflow failed: %v", err)
 	}
 	tx.Commit()
 
-	result, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	result, err := adaptedGet(ctx, db, spec, dialect, 1)
 	if err != nil {
 		t.Fatalf("get failed: %v", err)
 	}
@@ -387,19 +387,19 @@ func TestAdaptedCRUD_Update(t *testing.T) {
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "users", schema, dialect, 0)
 	spec := registry.Get("users")
 
 	// Create
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{
+	adaptedCreate(ctx, tx, spec, dialect, 1, map[string]interface{}{
 		"name": "Alice", "age": float64(30),
 	})
 	tx.Commit()
 
 	// Update
 	tx, _ = db.BeginTx(ctx, nil)
-	err := adaptedUpdate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{
+	err := adaptedUpdate(ctx, tx, spec, dialect, 1, map[string]interface{}{
 		"name": "Alice B.", "age": float64(31),
 	}, 0, false)
 	if err != nil {
@@ -407,7 +407,7 @@ func TestAdaptedCRUD_Update(t *testing.T) {
 	}
 	tx.Commit()
 
-	result, _ := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	result, _ := adaptedGet(ctx, db, spec, dialect, 1)
 	if result["name"] != "Alice B." {
 		t.Errorf("name = %v, want 'Alice B.'", result["name"])
 	}
@@ -429,16 +429,16 @@ func TestAdaptedCRUD_UpdateWithVersionCheck(t *testing.T) {
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0)
 	spec := registry.Get("items")
 
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "A"})
+	adaptedCreate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "A"})
 	tx.Commit()
 
 	// Update with correct version
 	tx, _ = db.BeginTx(ctx, nil)
-	err := adaptedUpdate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "B"}, 1, true)
+	err := adaptedUpdate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "B"}, 1, true)
 	if err != nil {
 		t.Fatalf("update with correct version failed: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestAdaptedCRUD_UpdateWithVersionCheck(t *testing.T) {
 
 	// Update with wrong version
 	tx, _ = db.BeginTx(ctx, nil)
-	err = adaptedUpdate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "C"}, 1, true)
+	err = adaptedUpdate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "C"}, 1, true)
 	if err != ErrConflict {
 		t.Errorf("expected ErrConflict, got %v", err)
 	}
@@ -466,29 +466,29 @@ func TestAdaptedCRUD_Delete(t *testing.T) {
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0)
 	spec := registry.Get("items")
 
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "A"})
+	adaptedCreate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "A"})
 	tx.Commit()
 
 	// Delete
 	tx, _ = db.BeginTx(ctx, nil)
-	if err := adaptedDelete(ctx, tx, spec, dialect, 0, 1); err != nil {
+	if err := adaptedDelete(ctx, tx, spec, dialect, 1); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	tx.Commit()
 
 	// Verify gone
-	_, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	_, err := adaptedGet(ctx, db, spec, dialect, 1)
 	if err != ErrNotFound {
 		t.Errorf("expected ErrNotFound after delete, got %v", err)
 	}
 
 	// Delete non-existent
 	tx, _ = db.BeginTx(ctx, nil)
-	err = adaptedDelete(ctx, tx, spec, dialect, 0, 999)
+	err = adaptedDelete(ctx, tx, spec, dialect, 999)
 	if err != ErrNotFound {
 		t.Errorf("expected ErrNotFound for missing entity, got %v", err)
 	}
@@ -508,17 +508,17 @@ func TestAdaptedCRUD_List(t *testing.T) {
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0)
 	spec := registry.Get("items")
 
 	// Insert 3 items
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "A"})
-	adaptedCreate(ctx, tx, spec, dialect, 0, 2, map[string]interface{}{"name": "B"})
-	adaptedCreate(ctx, tx, spec, dialect, 0, 3, map[string]interface{}{"name": "C"})
+	adaptedCreate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "A"})
+	adaptedCreate(ctx, tx, spec, dialect, 2, map[string]interface{}{"name": "B"})
+	adaptedCreate(ctx, tx, spec, dialect, 3, map[string]interface{}{"name": "C"})
 	tx.Commit()
 
-	results, err := adaptedList(ctx, db, spec, dialect, 0)
+	results, err := adaptedList(ctx, db, spec, dialect)
 	if err != nil {
 		t.Fatalf("list failed: %v", err)
 	}
@@ -547,17 +547,17 @@ func TestAdaptedCRUD_Exists(t *testing.T) {
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect, 0)
 	spec := registry.Get("items")
 
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "A"})
+	adaptedCreate(ctx, tx, spec, dialect, 1, map[string]interface{}{"name": "A"})
 	tx.Commit()
 
-	if !adaptedExists(ctx, db, spec, dialect, 0, 1) {
+	if !adaptedExists(ctx, db, spec, dialect, 1) {
 		t.Error("exists should return true for existing entity")
 	}
-	if adaptedExists(ctx, db, spec, dialect, 0, 999) {
+	if adaptedExists(ctx, db, spec, dialect, 999) {
 		t.Error("exists should return false for non-existent entity")
 	}
 }
@@ -580,7 +580,7 @@ func TestAdaptedCRUD_REFRoundTrip(t *testing.T) {
 		"required": []interface{}{"title", "author"},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "articles", schema, dialect)
+	RegisterAdaptedTable(ctx, db, registry, "articles", schema, dialect, 0)
 	spec := registry.Get("articles")
 
 	tx, _ := db.BeginTx(ctx, nil)
@@ -592,10 +592,10 @@ func TestAdaptedCRUD_REFRoundTrip(t *testing.T) {
 			"id":     float64(42),
 		},
 	}
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, data)
+	adaptedCreate(ctx, tx, spec, dialect, 1, data)
 	tx.Commit()
 
-	result, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	result, err := adaptedGet(ctx, db, spec, dialect, 1)
 	if err != nil {
 		t.Fatalf("get failed: %v", err)
 	}
@@ -617,58 +617,96 @@ func TestAdaptedCRUD_REFRoundTrip(t *testing.T) {
 }
 
 func TestAdaptedCRUD_TenantIsolation(t *testing.T) {
+	// Verifies that two tenants with the same entity name get independent
+	// schema registry rows (in t0000_n_sch and t0001_n_sch respectively)
+	// and independent adapted tables (t0000_ndata_items, t0001_ndata_items).
+	// This is the Stage 2 acceptance test for the per-tenant schema registry.
 	db, dialect, cleanup := setupAdaptedTestDB(t)
 	defer cleanup()
 
 	ctx := context.Background()
-	registry := NewAdaptedRegistry()
-
 	schema := map[string]interface{}{
 		"properties": map[string]interface{}{
 			"name": map[string]interface{}{"type": "string"},
 		},
 	}
 
-	RegisterAdaptedTable(ctx, db, registry, "items", schema, dialect)
-	spec := registry.Get("items")
+	// Register "items" for tenant 0 — creates t0000_n_sch + t0000_ndata_items.
+	registry0 := NewAdaptedRegistry()
+	if err := RegisterAdaptedTable(ctx, db, registry0, "items", schema, dialect, 0); err != nil {
+		t.Fatalf("register tenant 0: %v", err)
+	}
+	spec0 := registry0.Get("items")
+	if spec0 == nil {
+		t.Fatal("spec0 nil after RegisterAdaptedTable")
+	}
+	if spec0.TenantID != 0 {
+		t.Errorf("spec0.TenantID = %d, want 0", spec0.TenantID)
+	}
+	if spec0.TableName() != "t0000_ndata_items" {
+		t.Errorf("spec0.TableName() = %q, want t0000_ndata_items", spec0.TableName())
+	}
 
-	// Insert into tenant 0 and tenant 1
+	// Register "items" for tenant 1 — must create t0001_n_sch + t0001_ndata_items
+	// independently, without hitting tenant 0's registry entry.
+	registry1 := NewAdaptedRegistry()
+	if err := RegisterAdaptedTable(ctx, db, registry1, "items", schema, dialect, 1); err != nil {
+		t.Fatalf("register tenant 1: %v", err)
+	}
+	spec1 := registry1.Get("items")
+	if spec1 == nil {
+		t.Fatal("spec1 nil after RegisterAdaptedTable")
+	}
+	if spec1.TenantID != 1 {
+		t.Errorf("spec1.TenantID = %d, want 1", spec1.TenantID)
+	}
+	if spec1.TableName() != "t0001_ndata_items" {
+		t.Errorf("spec1.TableName() = %q, want t0001_ndata_items", spec1.TableName())
+	}
+
+	// Insert one item into each tenant's table and verify isolation.
 	tx, _ := db.BeginTx(ctx, nil)
-	adaptedCreate(ctx, tx, spec, dialect, 0, 1, map[string]interface{}{"name": "T0-Item"})
-	adaptedCreate(ctx, tx, spec, dialect, 1, 1, map[string]interface{}{"name": "T1-Item"})
+	if err := adaptedCreate(ctx, tx, spec0, dialect, 1, map[string]interface{}{"name": "T0-Item"}); err != nil {
+		t.Fatalf("insert tenant 0: %v", err)
+	}
+	if err := adaptedCreate(ctx, tx, spec1, dialect, 1, map[string]interface{}{"name": "T1-Item"}); err != nil {
+		t.Fatalf("insert tenant 1: %v", err)
+	}
 	tx.Commit()
 
-	// Tenant 0 should see only its item
-	results, _ := adaptedList(ctx, db, spec, dialect, 0)
-	if len(results) != 1 {
-		t.Fatalf("tenant 0: got %d results, want 1", len(results))
-	}
-	if results[0]["name"] != "T0-Item" {
-		t.Errorf("tenant 0 item name = %v, want T0-Item", results[0]["name"])
+	results0, _ := adaptedList(ctx, db, spec0, dialect)
+	if len(results0) != 1 || results0[0]["name"] != "T0-Item" {
+		t.Errorf("tenant 0: got %v, want [{name: T0-Item}]", results0)
 	}
 
-	// Tenant 1 should see only its item
-	results, _ = adaptedList(ctx, db, spec, dialect, 1)
-	if len(results) != 1 {
-		t.Fatalf("tenant 1: got %d results, want 1", len(results))
-	}
-	if results[0]["name"] != "T1-Item" {
-		t.Errorf("tenant 1 item name = %v, want T1-Item", results[0]["name"])
+	results1, _ := adaptedList(ctx, db, spec1, dialect)
+	if len(results1) != 1 || results1[0]["name"] != "T1-Item" {
+		t.Errorf("tenant 1: got %v, want [{name: T1-Item}]", results1)
 	}
 
-	// Cross-tenant get should fail
-	_, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	// Verify that LoadAdaptedRegistry for each tenant only sees its own entity.
+	loaded0, err := LoadAdaptedRegistry(ctx, db, 0)
 	if err != nil {
-		t.Errorf("tenant 0 get own item failed: %v", err)
+		t.Fatalf("LoadAdaptedRegistry tenant 0: %v", err)
+	}
+	if loaded0.Get("items") == nil {
+		t.Error("LoadAdaptedRegistry tenant 0: items not found")
 	}
 
-	// Tenant 0 get tenant 1's id=1 (same table, different tenant)
-	r, err := adaptedGet(ctx, db, spec, dialect, 1, 1)
+	loaded1, err := LoadAdaptedRegistry(ctx, db, 1)
 	if err != nil {
-		t.Fatalf("cross-tenant get failed: %v", err)
+		t.Fatalf("LoadAdaptedRegistry tenant 1: %v", err)
 	}
-	if r["name"] != "T1-Item" {
-		t.Errorf("cross-tenant result = %v, want T1-Item", r["name"])
+	if loaded1.Get("items") == nil {
+		t.Error("LoadAdaptedRegistry tenant 1: items not found")
+	}
+
+	// Cross-check: loaded specs carry the correct table names.
+	if s := loaded0.Get("items"); s.TableName() != "t0000_ndata_items" {
+		t.Errorf("loaded0 TableName = %q, want t0000_ndata_items", s.TableName())
+	}
+	if s := loaded1.Get("items"); s.TableName() != "t0001_ndata_items" {
+		t.Errorf("loaded1 TableName = %q, want t0001_ndata_items", s.TableName())
 	}
 }
 
@@ -701,7 +739,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := RegisterAdaptedTable(ctx, db, registry, "invoices", schema, dialect); err != nil {
+	if err := RegisterAdaptedTable(ctx, db, registry, "invoices", schema, dialect, 0); err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
@@ -745,7 +783,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 			"unit_price":  tt.unitPrice,
 		}
 
-		if err := adaptedCreate(ctx, tx, spec, dialect, 0, tt.id, data); err != nil {
+		if err := adaptedCreate(ctx, tx, spec, dialect, tt.id, data); err != nil {
 			tx.Rollback()
 			t.Fatalf("create id=%d failed: %v", tt.id, err)
 		}
@@ -754,7 +792,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 		}
 
 		// Read back
-		result, err := adaptedGet(ctx, db, spec, dialect, 0, tt.id)
+		result, err := adaptedGet(ctx, db, spec, dialect, tt.id)
 		if err != nil {
 			t.Fatalf("get id=%d failed: %v", tt.id, err)
 		}
@@ -769,7 +807,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 
 	// Verify that the raw SQLite values are scaled integers
 	var rawAmount int64
-	err := db.QueryRowContext(ctx, "SELECT amount FROM olu_invoices WHERE id = 1 AND tenant_id = 0").Scan(&rawAmount)
+	err := db.QueryRowContext(ctx, "SELECT amount FROM t0000_ndata_invoices WHERE id = 1").Scan(&rawAmount)
 	if err != nil {
 		t.Fatalf("raw query failed: %v", err)
 	}
@@ -778,7 +816,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 	}
 
 	// Verify negative raw value
-	err = db.QueryRowContext(ctx, "SELECT amount FROM olu_invoices WHERE id = 2 AND tenant_id = 0").Scan(&rawAmount)
+	err = db.QueryRowContext(ctx, "SELECT amount FROM t0000_ndata_invoices WHERE id = 2").Scan(&rawAmount)
 	if err != nil {
 		t.Fatalf("raw query negative failed: %v", err)
 	}
@@ -787,7 +825,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 	}
 
 	// Verify SQLite ordering is correct (ascending by amount)
-	rows, err := db.QueryContext(ctx, "SELECT id FROM olu_invoices WHERE tenant_id = 0 ORDER BY amount ASC")
+	rows, err := db.QueryContext(ctx, "SELECT id FROM t0000_ndata_invoices ORDER BY amount ASC")
 	if err != nil {
 		t.Fatalf("order query failed: %v", err)
 	}
@@ -824,13 +862,13 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 		"amount":      "-999.99",
 		"unit_price":  "50.0000",
 	}
-	if err := adaptedUpdate(ctx, tx, spec, dialect, 0, 1, updateData, 1, true); err != nil {
+	if err := adaptedUpdate(ctx, tx, spec, dialect, 1, updateData, 1, true); err != nil {
 		tx.Rollback()
 		t.Fatalf("update failed: %v", err)
 	}
 	tx.Commit()
 
-	result, err := adaptedGet(ctx, db, spec, dialect, 0, 1)
+	result, err := adaptedGet(ctx, db, spec, dialect, 1)
 	if err != nil {
 		t.Fatalf("get after update failed: %v", err)
 	}
@@ -839,7 +877,7 @@ func TestAdaptedCRUD_DecimalRoundTrip(t *testing.T) {
 	}
 
 	// List should return all with denormalised decimals
-	all, err := adaptedList(ctx, db, spec, dialect, 0)
+	all, err := adaptedList(ctx, db, spec, dialect)
 	if err != nil {
 		t.Fatalf("list failed: %v", err)
 	}

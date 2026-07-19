@@ -73,9 +73,10 @@ type StorageDialect interface {
 	// ExistsSQL generates an EXISTS check for a single row.
 	ExistsSQL(spec *AdaptedTableSpec) string
 
-	// MetadataTableSQL generates the DDL for the adapted_table_schemas
-	// metadata table.
-	MetadataTableSQL() string
+	// NodeSchemaTableSQL generates the DDL for the per-tenant node schema
+	// registry table (t<X>_n_sch). Called lazily on first RegisterAdaptedTable
+	// for a given tenant, not at store startup.
+	NodeSchemaTableSQL(tenantID uint16) string
 
 	// NormaliseDecimal transforms a validated decimal string into the
 	// storage representation for this backend. SQLite scales to int64.

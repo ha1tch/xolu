@@ -1,7 +1,7 @@
-# olu Fleet Architecture
+# xolu Fleet Architecture
 
 **Version:** 0.2.2-draft
-**Author:** haitch <h@ual.fi>
+**Author:** haitch <h@ual.li>
 **Date:** February 2026
 **Status:** Design proposal (post-review revision)
 
@@ -35,10 +35,10 @@
 
 ## 1. Design Philosophy
 
-olu is a single-binary, SQLite-backed document store. Its operational strength
+xolu is a single-binary, SQLite-backed document store. Its operational strength
 is simplicity: one process, one file, no external dependencies. The fleet
 architecture preserves this property at the instance level while adding
-coordination at the edges. Each olu instance remains sovereign over its data.
+coordination at the edges. Each xolu instance remains sovereign over its data.
 No instance shares a SQLite file with another. No instance participates in
 consensus or distributed transactions.
 
@@ -50,7 +50,7 @@ The guiding constraints are:
 
 - **No distributed state.** Each hot instance owns its tenants' data completely.
   A tenant lives on exactly one hot instance at a time.
-- **Privilege separation.** The main olu binary can create tenants but never
+- **Privilege separation.** The main xolu binary can create tenants but never
   remove, disable, or archive them. Destructive operations exist only in the
   admin binary, which is compiled separately and runs on demand.
 - **Failure independence.** The failure of any single component (hot instance,
@@ -66,7 +66,7 @@ The guiding constraints are:
 
 ### 2.1 Tenant Modes
 
-olu supports two tenant modes, configured via `TenantMode` in the instance
+xolu supports two tenant modes, configured via `TenantMode` in the instance
 configuration:
 
 | Mode | Non-tenant routes | Tenant routes | Registration |
@@ -83,7 +83,7 @@ tenant — both tenants may independently have an entity with `id=1`.
 
 Tenant 0 is the unscoped store used by non-tenant routes (`/api/v1/{entity}`).
 It is its own isolated scope, not a privileged cross-tenant view. There is no
-API path in the main olu binary that aggregates data across tenants.
+API path in the main xolu binary that aggregates data across tenants.
 
 **Tenant 0 in fleet deployments.** In a multi-instance fleet, Tenant 0 is local
 to each hot instance — it is not replicated, routed through the gateway, or
@@ -282,7 +282,7 @@ CREATE TABLE retention_policies (
                     --               storage on every write (~50-200ms).
     archive_format  TEXT NOT NULL DEFAULT 'parquet',
                     -- "parquet" : Columnar, compact, efficient for analytics.
-                    --             Not directly queryable by olu. Best when
+                    --             Not directly queryable by xolu. Best when
                     --             historical queries are rare.
                     -- "sqlite"  : Directly attachable by the admin binary via
                     --             ATTACH DATABASE. Full OQL query capability
@@ -318,13 +318,13 @@ CREATE INDEX idx_audit_by_target
 
 | Process | tenants | placements | policies | audit_log | instances |
 |---------|---------|-----------|----------|-----------|-----------|
-| Main olu (strict) | Read | Read | Read | — | — |
-| Main olu (path) | Read + insert | Read | Read | — | — |
+| Main xolu (strict) | Read | Read | Read | — | — |
+| Main xolu (path) | Read + insert | Read | Read | — | — |
 | Admin binary | Full CRUD | Full CRUD | Full CRUD | Insert | Full CRUD |
 | Cleanup job | Read | Read | Read | Insert | — |
 | Gateway | Read | Read | — | — | Read |
 
-The main olu binary can create tenant rows (in `path` mode) but never
+The main xolu binary can create tenant rows (in `path` mode) but never
 update their status, delete them, or modify placements. This asymmetry is
 deliberate: creation is low-risk and should be frictionless; state transitions
 and destruction are high-risk and go through the admin path.
@@ -524,7 +524,7 @@ the lock is per-tenant, not global.
                 ┌─────────────────┼─────────────────┐
                 │                 │                  │
          ┌──────┴──────┐  ┌──────┴──────┐  ┌───────┴───────┐
-         │  olu hot A  │  │  olu hot B  │  │   olu admin   │
+         │  xolu hot A  │  │  xolu hot B  │  │   xolu admin   │
          │  (region 1) │  │  (region 2) │  │  (on demand)  │
          └──────┬──────┘  └──────┬──────┘  └───────┬───────┘
                 │                │                  │
@@ -558,7 +558,7 @@ with corresponding monitoring and redundancy.
 
 For high availability, deploy two gateway instances behind a load balancer.
 
-**Hot instances.** Standard olu binaries running in `strict` mode. Each hot
+**Hot instances.** Standard xolu binaries running in `strict` mode. Each hot
 instance serves a subset of tenants. A tenant is assigned to exactly one hot
 instance at a time (its "primary placement"). Hot instances have no knowledge
 of each other.
@@ -571,7 +571,7 @@ operations (archival, tenant migration, fleet-wide queries).
 
 **Archive storage.** Object storage (S3, MinIO, local filesystem) holding
 frozen tenant data in compressed, partitioned files. Archive storage is
-write-once, read-rarely. It is not an olu instance — it's a durable blob
+write-once, read-rarely. It is not an xolu instance — it's a durable blob
 store.
 
 ### 4.2 Request Flow
@@ -650,7 +650,7 @@ The admin binary is compiled with the `admin` build tag:
 
 ```makefile
 build:
-    go build -o olu ./cmd/olu
+    go build -o xolu ./cmd/xolu
 
 build-iolu:
     go build -tags admin -o iolu ./cmd/iolu
@@ -664,7 +664,7 @@ Code guarded by `//go:build admin` includes:
 - Instance management (register, decommission, health monitoring).
 - Registry write operations.
 
-The main olu binary does not contain this code. The attack surface for
+The main xolu binary does not contain this code. The attack surface for
 cross-tenant data access does not exist if the binary isn't compiled.
 
 ### 5.2 Operations
@@ -733,7 +733,7 @@ that is actively queried and written to. The retention period is governed by
 the retention policy for each tenant and entity type.
 
 For tenants with timeseries storage provisioned, hot storage also includes a
-per-tenant Pebble data directory under `{OLU_BASE_DIR}/ts/t{XXXX}/`. The
+per-tenant Pebble data directory under `{XOLU_BASE_DIR}/ts/t{XXXX}/`. The
 timeseries store supports per-timeline retention policies with a store-level
 default (default 90 days), independent of entity retention.
 See TIMESERIES_DESIGN_V3.md for details.
@@ -775,7 +775,7 @@ exist in a verified archive).
 ### 6.3 Archive Storage Layout
 
 ```
-s3://olu-archive/
+s3://xolu-archive/
   acme/
     assets/
       2025-12.parquet.zst
@@ -796,7 +796,7 @@ restoration without scanning the archive files themselves.
 
 ### 6.4 Querying Archived Data
 
-Archived data is not directly queryable through the normal olu API. The
+Archived data is not directly queryable through the normal xolu API. The
 query path depends on the archive format chosen in the retention policy.
 
 **SQLite archives (recommended when historical queries are frequent):**
@@ -824,17 +824,17 @@ trend analysis.
 **Parquet archives (recommended when storage efficiency is the priority):**
 
 Parquet files are compact and efficient for bulk analytics but are not
-directly queryable by olu's OQL engine. Two access paths are available:
+directly queryable by xolu's OQL engine. Two access paths are available:
 
-1. **Temporary olu instance.** The admin binary loads the Parquet data into
-   a temporary SQLite database, starts a read-only olu instance, executes
+1. **Temporary xolu instance.** The admin binary loads the Parquet data into
+   a temporary SQLite database, starts a read-only xolu instance, executes
    the query, and destroys the temporary instance. This is transparent to
    the operator but slower than the ATTACH path.
 
 2. **External analytics tools.** Parquet files can be queried directly by
    tools such as DuckDB, Apache Spark, or pandas. This is appropriate when
    the archive data feeds into an existing analytics pipeline rather than
-   being queried through olu.
+   being queried through xolu.
 
 **JSON Lines archives (for portability):**
 
@@ -1105,39 +1105,39 @@ become valuable as the fleet grows:
 server:
   host: 0.0.0.0
   port: 8443
-  tls_cert: /etc/olu/server.crt
-  tls_key: /etc/olu/server.key
+  tls_cert: /etc/xolu/server.crt
+  tls_key: /etc/xolu/server.key
 
 storage:
   type: sqlite
-  db_path: /var/lib/olu/data.db
+  db_path: /var/lib/xolu/data.db
 
 tenant:
   mode: strict
-  registry_path: /var/lib/olu/registry.db
+  registry_path: /var/lib/xolu/registry.db
   registry_readonly: true
   registry_refresh_interval: 10s  # how often to check for placement changes
   epoch_check: true               # reject requests if local epoch is stale
 
 backup:
   litestream:
-    data_db: s3://olu-backup/hot-a/data
-    registry_db: s3://olu-backup/shared/registry
+    data_db: s3://xolu-backup/hot-a/data
+    registry_db: s3://xolu-backup/shared/registry
 ```
 
 ### 10.2 Admin Binary
 
 ```yaml
 registry:
-  path: /var/lib/olu/registry.db
+  path: /var/lib/xolu/registry.db
   readonly: false
   lock_staleness_timeout: 30m     # break advisory locks older than this
 
 archive:
   default_format: parquet         # parquet | sqlite | jsonl
   compression: zstd
-  base_path: s3://olu-archive/
-  temp_dir: /tmp/olu-archive      # for downloading archive files during queries
+  base_path: s3://xolu-archive/
+  temp_dir: /tmp/xolu-archive      # for downloading archive files during queries
 
 durability:
   default: async                  # async | confirmed (per-tenant override in policy)
@@ -1160,11 +1160,11 @@ audit:
 ```yaml
 listen:
   address: 0.0.0.0:443
-  tls_cert: /etc/olu/gateway.crt
-  tls_key: /etc/olu/gateway.key
+  tls_cert: /etc/xolu/gateway.crt
+  tls_key: /etc/xolu/gateway.key
 
 registry:
-  path: /var/lib/olu/registry.db
+  path: /var/lib/xolu/registry.db
   refresh_interval: 10s
   self_register: true             # register this gateway in the instances table
   instance_name: gateway-1        # name for self-registration (must be unique)
@@ -1180,7 +1180,7 @@ routing:
 cache_invalidation:
   enabled: true
   listen: 127.0.0.1:9091         # internal only; never exposed to DMZ
-  admin_token_env: OLU_ADMIN_TOKEN
+  admin_token_env: XOLU_ADMIN_TOKEN
 
 health_check:
   interval: 5s
@@ -1188,5 +1188,5 @@ health_check:
   unhealthy_threshold: 3
 
 upstream:
-  tls_ca: /etc/olu/internal-ca.crt
+  tls_ca: /etc/xolu/internal-ca.crt
 ```

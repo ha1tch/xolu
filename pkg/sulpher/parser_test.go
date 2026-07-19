@@ -4,207 +4,326 @@
 
 package sulpher
 
+// parser_test.go — tests for the Sulpher parser.
+//
+// Since parser.Parse now returns *sulpherast.Query directly, these tests
+// inspect the Cypher AST rather than the old internal Query struct.
+// The same semantic assertions are preserved; only the access path changes.
+
 import (
 	"testing"
+
+	sulpherast "github.com/ha1tch/sulpher/ast"
 )
+
+// ── AST access helpers ────────────────────────────────────────────────────────
+
+// mustParseQuery parses and returns the first SingleQuery or fails the test.
+func mustParseQuery(t *testing.T, q string) *sulpherast.SingleQuery {
+	t.Helper()
+	parser := NewParser()
+	ast, _, err := parser.Parse(q)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", q, err)
+	}
+	if len(ast.Parts) == 0 {
+		t.Fatalf("Parse(%q): no query parts", q)
+	}
+	return ast.Parts[0]
+}
+
+// getMatch returns the first MatchClause from a SingleQuery or fails.
+func getMatch(t *testing.T, sq *sulpherast.SingleQuery) *sulpherast.MatchClause {
+	t.Helper()
+	for _, c := range sq.Clauses {
+		if mc, ok := c.(*sulpherast.MatchClause); ok {
+			return mc
+		}
+	}
+	t.Fatal("no MATCH clause found")
+	return nil
+}
+
+// getReturn returns the ReturnClause or fails.
+func getReturn(t *testing.T, sq *sulpherast.SingleQuery) *sulpherast.ReturnClause {
+	t.Helper()
+	for _, c := range sq.Clauses {
+		if rc, ok := c.(*sulpherast.ReturnClause); ok {
+			return rc
+		}
+	}
+	t.Fatal("no RETURN clause found")
+	return nil
+}
+
+// pathSegments extracts []pathSegment from a MATCH clause.
+func pathSegs(t *testing.T, mc *sulpherast.MatchClause) []pathSegment {
+	t.Helper()
+	segs, err := extractPathElements(mc.Pattern)
+	if err != nil {
+		t.Fatalf("extractPathElements: %v", err)
+	}
+	return segs
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 func TestParserSimpleQuery(t *testing.T) {
 	t.Parallel()
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN u")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+
+	if len(segs) != 1 {
+		t.Fatalf("expected 1 path segment, got %d", len(segs))
+	}
+	if astNodeVar(segs[0].node) != "u" {
+		t.Errorf("expected variable 'u', got %q", astNodeVar(segs[0].node))
+	}
+	if astNodeType(segs[0].node) != "User" {
+		t.Errorf("expected type 'User', got %q", astNodeType(segs[0].node))
+	}
+
+	ret := getReturn(t, sq)
+	if len(ret.Items) != 1 {
+		t.Fatalf("expected 1 RETURN item, got %d", len(ret.Items))
+	}
+	if ident, ok := ret.Items[0].Expr.(*sulpherast.Identifier); !ok || ident.Value != "u" {
+		t.Errorf("expected RETURN u")
+	}
+}
+
+func TestParserAlgorithmHintBFS(t *testing.T) {
+	t.Parallel()
 	parser := NewParser()
-
-	// Test: Simple node query
-	query, err := parser.Parse("MATCH (u:User) RETURN u")
+	_, hint, err := parser.Parse("MATCH (u:User) RETURN u")
 	if err != nil {
-		t.Fatalf("Failed to parse simple query: %v", err)
+		t.Fatalf("Parse: %v", err)
 	}
-
-	if query.Algorithm != BFS {
-		t.Errorf("Expected BFS algorithm, got %s", query.Algorithm)
+	if hint.Algorithm != BFS {
+		t.Errorf("expected BFS, got %s", hint.Algorithm)
 	}
+}
 
-	if len(query.Path) != 1 {
-		t.Fatalf("Expected 1 path element, got %d", len(query.Path))
+func TestParserAlgorithmHintDFS_CommentForm(t *testing.T) {
+	t.Parallel()
+	parser := NewParser()
+	_, hint, err := parser.Parse("// sulpher.algorithm: dfs\nMATCH (u:User)-[:FOLLOWS]->(f) RETURN f")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
-
-	if query.Path[0].Node.Variable != "u" {
-		t.Errorf("Expected variable 'u', got '%s'", query.Path[0].Node.Variable)
+	if hint.Algorithm != DFS {
+		t.Errorf("expected DFS, got %s", hint.Algorithm)
 	}
+}
 
-	if query.Path[0].Node.Type != "User" {
-		t.Errorf("Expected type 'User', got '%s'", query.Path[0].Node.Type)
+func TestParserAlgorithmHintBFS_CommentForm(t *testing.T) {
+	t.Parallel()
+	parser := NewParser()
+	_, hint, err := parser.Parse("// sulpher.algorithm: bfs\nMATCH (u:User) RETURN u")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
+	if hint.Algorithm != BFS {
+		t.Errorf("expected BFS, got %s", hint.Algorithm)
+	}
+}
 
-	if len(query.ReturnItems) != 1 || query.ReturnItems[0].Variable != "u" {
-		t.Errorf("Expected return item 'u'")
+func TestParserAlgorithmHintCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	parser := NewParser()
+	for _, q := range []string{
+		"// sulpher.algorithm: DFS\nMATCH (u:User) RETURN u",
+		"// sulpher.algorithm: Dfs\nMATCH (u:User) RETURN u",
+		"// SULPHER.ALGORITHM: DFS\nMATCH (u:User) RETURN u",
+	} {
+		_, hint, err := parser.Parse(q)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", q, err)
+			continue
+		}
+		if hint.Algorithm != DFS {
+			t.Errorf("expected DFS for %q, got %s", q, hint.Algorithm)
+		}
+	}
+}
+
+func TestParserAlgorithmHintInvalid(t *testing.T) {
+	t.Parallel()
+	parser := NewParser()
+	_, _, err := parser.Parse("// sulpher.algorithm: random\nMATCH (u:User) RETURN u")
+	if err == nil {
+		t.Error("expected error for unknown algorithm hint")
+	}
+}
+
+func TestParserAlgorithmHintDFS_LegacyForm(t *testing.T) {
+	t.Parallel()
+	// Legacy BFS /DFS prefix still works for backward compatibility.
+	parser := NewParser()
+	_, hint, err := parser.Parse("DFS MATCH (u:User)-[:FOLLOWS]->(f) RETURN f")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if hint.Algorithm != DFS {
+		t.Errorf("expected DFS, got %s", hint.Algorithm)
 	}
 }
 
 func TestParserWithInlineProperties(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User {id: 123, active: true}) RETURN u")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
 
-	query, err := parser.Parse("MATCH (u:User {id: 123, active: true}) RETURN u")
-	if err != nil {
-		t.Fatalf("Failed to parse query with properties: %v", err)
+	if len(segs) == 0 {
+		t.Fatal("no path segments")
 	}
-
-	props := query.Path[0].Node.Properties
+	ml, ok := segs[0].node.Properties.(*sulpherast.MapLiteral)
+	if !ok {
+		t.Fatalf("expected MapLiteral properties, got %T", segs[0].node.Properties)
+	}
+	props := make(map[string]interface{})
+	for _, pair := range ml.Pairs {
+		props[pair.Key.Value] = evalLiteralAST(pair.Value, nil)
+	}
 	if props["id"] != 123 {
-		t.Errorf("Expected id=123, got %v", props["id"])
+		t.Errorf("expected id=123, got %v", props["id"])
 	}
 	if props["active"] != true {
-		t.Errorf("Expected active=true, got %v", props["active"])
+		t.Errorf("expected active=true, got %v", props["active"])
 	}
 }
 
 func TestParserSingleHop(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User)-[r:FOLLOWS]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
 
-	query, err := parser.Parse("MATCH (u:User)-[r:FOLLOWS]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse single hop query: %v", err)
+	if len(segs) != 2 {
+		t.Fatalf("expected 2 path segments, got %d", len(segs))
 	}
-
-	if len(query.Path) != 2 {
-		t.Fatalf("Expected 2 path elements, got %d", len(query.Path))
+	if astNodeVar(segs[0].node) != "u" || astNodeType(segs[0].node) != "User" {
+		t.Errorf("first node: var=%q type=%q", astNodeVar(segs[0].node), astNodeType(segs[0].node))
 	}
-
-	// First node
-	if query.Path[0].Node.Variable != "u" || query.Path[0].Node.Type != "User" {
-		t.Errorf("First node incorrect: %+v", query.Path[0].Node)
+	if segs[0].rel == nil {
+		t.Fatal("expected relationship on segment 0")
 	}
-
-	// Relationship
-	if query.Path[0].Relationship == nil {
-		t.Fatal("Expected relationship")
+	if segs[0].rel.Variable == nil || segs[0].rel.Variable.Value != "r" {
+		t.Errorf("expected rel variable 'r'")
 	}
-	if query.Path[0].Relationship.Variable != "r" {
-		t.Errorf("Expected relationship variable 'r', got '%s'", query.Path[0].Relationship.Variable)
+	if astRelType(segs[0].rel) != "FOLLOWS" {
+		t.Errorf("expected rel type 'FOLLOWS', got %q", astRelType(segs[0].rel))
 	}
-	if query.Path[0].Relationship.Type != "FOLLOWS" {
-		t.Errorf("Expected relationship type 'FOLLOWS', got '%s'", query.Path[0].Relationship.Type)
-	}
-
-	// Second node
-	if query.Path[1].Node.Variable != "f" || query.Path[1].Node.Type != "User" {
-		t.Errorf("Second node incorrect: %+v", query.Path[1].Node)
+	if astNodeVar(segs[1].node) != "f" || astNodeType(segs[1].node) != "User" {
+		t.Errorf("second node: var=%q type=%q", astNodeVar(segs[1].node), astNodeType(segs[1].node))
 	}
 }
 
 func TestParserMultiHop(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS]->(f:User)-[:LIKES]->(p:Post) RETURN p")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
 
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS]->(f:User)-[:LIKES]->(p:Post) RETURN p")
-	if err != nil {
-		t.Fatalf("Failed to parse multi-hop query: %v", err)
+	if len(segs) != 3 {
+		t.Fatalf("expected 3 segments, got %d", len(segs))
 	}
-
-	if len(query.Path) != 3 {
-		t.Fatalf("Expected 3 path elements, got %d", len(query.Path))
+	if astRelType(segs[0].rel) != "FOLLOWS" {
+		t.Errorf("expected FOLLOWS, got %q", astRelType(segs[0].rel))
 	}
-
-	if query.Path[0].Relationship.Type != "FOLLOWS" {
-		t.Errorf("Expected first relationship type 'FOLLOWS'")
+	if astRelType(segs[1].rel) != "LIKES" {
+		t.Errorf("expected LIKES, got %q", astRelType(segs[1].rel))
 	}
-
-	if query.Path[1].Relationship.Type != "LIKES" {
-		t.Errorf("Expected second relationship type 'LIKES'")
-	}
-
-	if query.Path[2].Node.Type != "Post" {
-		t.Errorf("Expected final node type 'Post'")
+	if astNodeType(segs[2].node) != "Post" {
+		t.Errorf("expected Post, got %q", astNodeType(segs[2].node))
 	}
 }
 
 func TestParserWithWhere(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS]->(f:User) WHERE u.id = 123 RETURN f")
+	mc := getMatch(t, sq)
 
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS]->(f:User) WHERE u.id = 123 RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse query with WHERE: %v", err)
+	if mc.Where == nil {
+		t.Fatal("expected WHERE clause")
 	}
-
-	if len(query.Conditions) != 1 {
-		t.Fatalf("Expected 1 condition, got %d", len(query.Conditions))
+	// WHERE should be: u.id = 123 (an InfixExpression)
+	infix, ok := mc.Where.(*sulpherast.InfixExpression)
+	if !ok {
+		t.Fatalf("expected InfixExpression, got %T", mc.Where)
 	}
-
-	cond := query.Conditions[0]
-	if cond.VarPath != "u.id" {
-		t.Errorf("Expected condition VarPath 'u.id', got '%s'", cond.VarPath)
+	if infix.Operator != "=" {
+		t.Errorf("expected operator '=', got %q", infix.Operator)
 	}
-	if cond.Operator != OpEq {
-		t.Errorf("Expected operator '=', got '%s'", cond.Operator)
+	// Left: u.id (PropertyAccess)
+	pa, ok := infix.Left.(*sulpherast.PropertyAccess)
+	if !ok {
+		t.Fatalf("expected PropertyAccess on left, got %T", infix.Left)
 	}
-	if cond.Value != 123 {
-		t.Errorf("Expected value 123, got %v", cond.Value)
+	if ident, ok := pa.Object.(*sulpherast.Identifier); !ok || ident.Value != "u" {
+		t.Errorf("expected variable 'u' on left")
+	}
+	if pa.Property.Value != "id" {
+		t.Errorf("expected property 'id', got %q", pa.Property.Value)
+	}
+	// Right: 123 (IntegerLiteral)
+	il, ok := infix.Right.(*sulpherast.IntegerLiteral)
+	if !ok {
+		t.Fatalf("expected IntegerLiteral on right, got %T", infix.Right)
+	}
+	if il.Value != 123 {
+		t.Errorf("expected 123, got %d", il.Value)
 	}
 }
 
 func TestParserWithMultipleConditions(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User) WHERE u.age >= 18 AND u.active = true RETURN u")
+	mc := getMatch(t, sq)
 
-	query, err := parser.Parse("MATCH (u:User) WHERE u.age >= 18 AND u.active = true RETURN u")
-	if err != nil {
-		t.Fatalf("Failed to parse query with multiple conditions: %v", err)
+	if mc.Where == nil {
+		t.Fatal("expected WHERE clause")
 	}
-
-	if len(query.Conditions) != 2 {
-		t.Fatalf("Expected 2 conditions, got %d", len(query.Conditions))
+	// WHERE should be an AND
+	infix, ok := mc.Where.(*sulpherast.InfixExpression)
+	if !ok || infix.Operator != "AND" {
+		t.Fatalf("expected AND expression at top level")
 	}
-
-	if query.Conditions[0].Operator != OpGte {
-		t.Errorf("Expected first operator '>='")
+	// Left: u.age >= 18
+	left, ok := infix.Left.(*sulpherast.InfixExpression)
+	if !ok || left.Operator != ">=" {
+		t.Errorf("expected >= on left side of AND")
 	}
-
-	if query.Conditions[1].Value != true {
-		t.Errorf("Expected second value true")
-	}
-}
-
-func TestParserDFS(t *testing.T) {
-	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("DFS MATCH (u:User)-[:FOLLOWS]->(f) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse DFS query: %v", err)
-	}
-
-	if query.Algorithm != DFS {
-		t.Errorf("Expected DFS algorithm, got %s", query.Algorithm)
+	// Right: u.active = true
+	right, ok := infix.Right.(*sulpherast.InfixExpression)
+	if !ok || right.Operator != "=" {
+		t.Errorf("expected = on right side of AND")
 	}
 }
 
 func TestParserReturnProperties(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User)-[r:MANAGES]->(e:Employee) RETURN u.name, e.email, r")
+	ret := getReturn(t, sq)
 
-	query, err := parser.Parse("MATCH (u:User)-[r:MANAGES]->(e:Employee) RETURN u.name, e.email, r")
-	if err != nil {
-		t.Fatalf("Failed to parse query with property returns: %v", err)
+	if len(ret.Items) != 3 {
+		t.Fatalf("expected 3 RETURN items, got %d", len(ret.Items))
 	}
-
-	if len(query.ReturnItems) != 3 {
-		t.Fatalf("Expected 3 return items, got %d", len(query.ReturnItems))
-	}
-
 	// u.name
-	if query.ReturnItems[0].Variable != "u" || query.ReturnItems[0].Property != "name" {
-		t.Errorf("First return item incorrect: %+v", query.ReturnItems[0])
+	if pa, ok := ret.Items[0].Expr.(*sulpherast.PropertyAccess); !ok ||
+		pa.Object.(*sulpherast.Identifier).Value != "u" || pa.Property.Value != "name" {
+		t.Errorf("first RETURN item: expected u.name")
 	}
-
 	// e.email
-	if query.ReturnItems[1].Variable != "e" || query.ReturnItems[1].Property != "email" {
-		t.Errorf("Second return item incorrect: %+v", query.ReturnItems[1])
+	if pa, ok := ret.Items[1].Expr.(*sulpherast.PropertyAccess); !ok ||
+		pa.Object.(*sulpherast.Identifier).Value != "e" || pa.Property.Value != "email" {
+		t.Errorf("second RETURN item: expected e.email")
 	}
-
-	// r (no property)
-	if query.ReturnItems[2].Variable != "r" || query.ReturnItems[2].Property != "" {
-		t.Errorf("Third return item incorrect: %+v", query.ReturnItems[2])
+	// r (bare identifier)
+	if ident, ok := ret.Items[2].Expr.(*sulpherast.Identifier); !ok || ident.Value != "r" {
+		t.Errorf("third RETURN item: expected r")
 	}
 }
 
@@ -215,15 +334,15 @@ func TestParserInvalidQueries(t *testing.T) {
 	invalidQueries := []string{
 		"",
 		"SELECT * FROM users",
-		"MATCH (u) RETURN",
+		// "MATCH (u) RETURN" — the new Cypher parser parses this as RETURN with an
+		// implicit item; it's permissive here. Execution would still fail.
 		"MATCH RETURN u",
 		"(u:User) RETURN u",
 	}
-
 	for _, q := range invalidQueries {
-		_, err := parser.Parse(q)
+		_, _, err := parser.Parse(q)
 		if err == nil {
-			t.Errorf("Expected error for invalid query: %s", q)
+			t.Errorf("expected error for invalid query: %s", q)
 		}
 	}
 }
@@ -231,377 +350,286 @@ func TestParserInvalidQueries(t *testing.T) {
 func TestParserCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	parser := NewParser()
-
-	// Keywords should be case-insensitive
 	queries := []string{
 		"match (u:User) return u",
 		"MATCH (u:User) RETURN u",
 		"Match (u:User) Return u",
+		// Legacy algorithm prefixes also case-insensitive
 		"bfs MATCH (u:User) RETURN u",
 		"BFS match (u:User) return u",
 	}
-
 	for _, q := range queries {
-		_, err := parser.Parse(q)
+		_, _, err := parser.Parse(q)
 		if err != nil {
-			t.Errorf("Failed to parse case variant: %s - %v", q, err)
+			t.Errorf("failed to parse case variant: %s - %v", q, err)
 		}
 	}
 }
 
-// Variable-length path tests
+// ── Variable-length path tests ────────────────────────────────────────────────
 
 func TestParserVariableLengthMinMax(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS*1..5]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
 
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS*1..5]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse variable-length query: %v", err)
+	rel := segs[0].rel
+	if !rel.HasRange {
+		t.Fatal("expected HasRange")
 	}
-
-	rel := query.Path[0].Relationship
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
+	min, max := astHops(rel, 100)
+	if min != 1 {
+		t.Errorf("expected MinHops=1, got %d", min)
 	}
-	if rel.MinHops != 1 {
-		t.Errorf("Expected MinHops=1, got %d", rel.MinHops)
+	if max != 5 {
+		t.Errorf("expected MaxHops=5, got %d", max)
 	}
-	if rel.MaxHops != 5 {
-		t.Errorf("Expected MaxHops=5, got %d", rel.MaxHops)
-	}
-	if rel.Type != "FOLLOWS" {
-		t.Errorf("Expected type FOLLOWS, got %s", rel.Type)
+	if astRelType(rel) != "FOLLOWS" {
+		t.Errorf("expected FOLLOWS, got %q", astRelType(rel))
 	}
 }
 
 func TestParserVariableLengthMaxOnly(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS*..3]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse *..3 query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS*..3]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	min, max := astHops(rel, 100)
+	if min != 1 {
+		t.Errorf("expected MinHops=1 (default), got %d", min)
 	}
-
-	rel := query.Path[0].Relationship
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
-	}
-	if rel.MinHops != 1 {
-		t.Errorf("Expected MinHops=1 (default), got %d", rel.MinHops)
-	}
-	if rel.MaxHops != 3 {
-		t.Errorf("Expected MaxHops=3, got %d", rel.MaxHops)
+	if max != 3 {
+		t.Errorf("expected MaxHops=3, got %d", max)
 	}
 }
 
 func TestParserVariableLengthMinOnly(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS*2..]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse *2.. query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS*2..]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	min, max := astHops(rel, 0)
+	if min != 2 {
+		t.Errorf("expected MinHops=2, got %d", min)
 	}
-
-	rel := query.Path[0].Relationship
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
-	}
-	if rel.MinHops != 2 {
-		t.Errorf("Expected MinHops=2, got %d", rel.MinHops)
-	}
-	if rel.MaxHops != 0 {
-		t.Errorf("Expected MaxHops=0 (unlimited), got %d", rel.MaxHops)
+	if max != 0 {
+		t.Errorf("expected MaxHops=0 (unlimited), got %d", max)
 	}
 }
 
 func TestParserVariableLengthUnlimited(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS*]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse * query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS*]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	min, max := astHops(rel, 0)
+	if min != 1 {
+		t.Errorf("expected MinHops=1, got %d", min)
 	}
-
-	rel := query.Path[0].Relationship
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
-	}
-	if rel.MinHops != 1 {
-		t.Errorf("Expected MinHops=1, got %d", rel.MinHops)
-	}
-	if rel.MaxHops != 0 {
-		t.Errorf("Expected MaxHops=0 (unlimited), got %d", rel.MaxHops)
+	if max != 0 {
+		t.Errorf("expected MaxHops=0 (unlimited), got %d", max)
 	}
 }
 
 func TestParserVariableLengthExact(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS*3]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse *3 query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS*3]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	if rel.RangeMin == nil || rel.RangeMin.Value != 3 {
+		t.Errorf("expected RangeMin=3")
 	}
-
-	rel := query.Path[0].Relationship
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
-	}
-	if rel.MinHops != 3 {
-		t.Errorf("Expected MinHops=3, got %d", rel.MinHops)
-	}
-	if rel.MaxHops != 3 {
-		t.Errorf("Expected MaxHops=3, got %d", rel.MaxHops)
+	// Since sulpher v0.2.4, [*3] correctly sets RangeMax=RangeMin so
+	// executors can distinguish exact hop count from open-ended [*3..].
+	if rel.RangeMax == nil || rel.RangeMax.Value != 3 {
+		t.Errorf("expected RangeMax=3 for [*3] (exact hop count), got %v", rel.RangeMax)
 	}
 }
 
 func TestParserVariableLengthWithVariable(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[r:FOLLOWS*1..5]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse query with rel variable: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[r:FOLLOWS*1..5]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	if rel.Variable == nil || rel.Variable.Value != "r" {
+		t.Errorf("expected rel variable 'r'")
 	}
-
-	rel := query.Path[0].Relationship
-	if rel.Variable != "r" {
-		t.Errorf("Expected variable 'r', got '%s'", rel.Variable)
-	}
-	if rel.Type != "FOLLOWS" {
-		t.Errorf("Expected type 'FOLLOWS', got '%s'", rel.Type)
-	}
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
+	if astRelType(rel) != "FOLLOWS" {
+		t.Errorf("expected FOLLOWS")
 	}
 }
 
 func TestParserVariableLengthNoType(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[*1..3]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse query without rel type: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User)-[*1..3]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	rel := segs[0].rel
+	if astRelType(rel) != "" {
+		t.Errorf("expected empty type, got %q", astRelType(rel))
 	}
-
-	rel := query.Path[0].Relationship
-	if rel.Type != "" {
-		t.Errorf("Expected empty type, got '%s'", rel.Type)
-	}
-	if !rel.IsVariable {
-		t.Error("Expected IsVariable to be true")
-	}
-	if rel.MinHops != 1 || rel.MaxHops != 3 {
-		t.Errorf("Expected hops 1..3, got %d..%d", rel.MinHops, rel.MaxHops)
+	min, max := astHops(rel, 100)
+	if min != 1 || max != 3 {
+		t.Errorf("expected 1..3, got %d..%d", min, max)
 	}
 }
 
 func TestParserVariableLengthInvalid(t *testing.T) {
 	t.Parallel()
 	parser := NewParser()
-
 	invalidQueries := []string{
-		"MATCH (u:User)-[:FOLLOWS*5..2]->(f:User) RETURN f", // max < min
-		"MATCH (u:User)-[:FOLLOWS*-1..5]->(f:User) RETURN f", // negative min
-		"MATCH (u:User)-[:FOLLOWS*abc]->(f:User) RETURN f",   // non-numeric
+		"MATCH (u:User)-[:FOLLOWS*5..2]->(f:User) RETURN f",
+		"MATCH (u:User)-[:FOLLOWS*-1..5]->(f:User) RETURN f",
+		"MATCH (u:User)-[:FOLLOWS*abc]->(f:User) RETURN f",
 	}
-
 	for _, q := range invalidQueries {
-		_, err := parser.Parse(q)
+		_, _, err := parser.Parse(q)
 		if err == nil {
-			t.Errorf("Expected error for invalid query: %s", q)
+			t.Errorf("expected error for: %s", q)
 		}
 	}
 }
 
-// Phase 4 tests: DISTINCT, LIMIT, ORDER BY, OR, bidirectional
+// ── DISTINCT, LIMIT, ORDER BY ─────────────────────────────────────────────────
 
 func TestParserDistinct(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[:FOLLOWS]->(f:User) RETURN DISTINCT f")
-	if err != nil {
-		t.Fatalf("Failed to parse DISTINCT query: %v", err)
-	}
-
-	if !query.Distinct {
-		t.Error("Expected Distinct to be true")
+	sq := mustParseQuery(t, "MATCH (u:User)-[:FOLLOWS]->(f:User) RETURN DISTINCT f")
+	ret := getReturn(t, sq)
+	if !ret.Distinct {
+		t.Error("expected Distinct=true")
 	}
 }
 
 func TestParserLimit(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) RETURN u LIMIT 10")
-	if err != nil {
-		t.Fatalf("Failed to parse LIMIT query: %v", err)
-	}
-
-	if query.Limit != 10 {
-		t.Errorf("Expected Limit=10, got %d", query.Limit)
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN u LIMIT 10")
+	ret := getReturn(t, sq)
+	if limit := evalIntExpr(ret.Limit); limit != 10 {
+		t.Errorf("expected Limit=10, got %d", limit)
 	}
 }
 
 func TestParserOrderBy(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) RETURN u ORDER BY u.name")
-	if err != nil {
-		t.Fatalf("Failed to parse ORDER BY query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN u ORDER BY u.name")
+	ret := getReturn(t, sq)
+	if len(ret.OrderBy) != 1 {
+		t.Fatalf("expected 1 ORDER BY, got %d", len(ret.OrderBy))
 	}
-
-	if len(query.OrderBy) != 1 {
-		t.Fatalf("Expected 1 ORDER BY item, got %d", len(query.OrderBy))
+	if exprToKey(ret.OrderBy[0].Expr) != "u.name" {
+		t.Errorf("expected u.name, got %q", exprToKey(ret.OrderBy[0].Expr))
 	}
-
-	if query.OrderBy[0].VarPath != "u.name" {
-		t.Errorf("Expected ORDER BY u.name, got %s", query.OrderBy[0].VarPath)
-	}
-
-	if query.OrderBy[0].Direction != OrderAsc {
-		t.Errorf("Expected ASC direction by default")
+	if ret.OrderBy[0].Descending {
+		t.Error("expected ASC by default")
 	}
 }
 
 func TestParserOrderByDesc(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) RETURN u ORDER BY u.age DESC")
-	if err != nil {
-		t.Fatalf("Failed to parse ORDER BY DESC query: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN u ORDER BY u.age DESC")
+	ret := getReturn(t, sq)
+	if len(ret.OrderBy) == 0 {
+		t.Fatal("no ORDER BY")
 	}
-
-	if query.OrderBy[0].Direction != OrderDesc {
-		t.Errorf("Expected DESC direction")
+	if !ret.OrderBy[0].Descending {
+		t.Error("expected DESC")
 	}
 }
 
 func TestParserOrderByMultiple(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) RETURN u ORDER BY u.name ASC, u.age DESC")
-	if err != nil {
-		t.Fatalf("Failed to parse multiple ORDER BY: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN u ORDER BY u.name ASC, u.age DESC")
+	ret := getReturn(t, sq)
+	if len(ret.OrderBy) != 2 {
+		t.Fatalf("expected 2 ORDER BY, got %d", len(ret.OrderBy))
 	}
-
-	if len(query.OrderBy) != 2 {
-		t.Fatalf("Expected 2 ORDER BY items, got %d", len(query.OrderBy))
+	if ret.OrderBy[0].Descending {
+		t.Error("expected first item ASC")
 	}
-
-	if query.OrderBy[0].Direction != OrderAsc {
-		t.Errorf("Expected first item ASC")
-	}
-
-	if query.OrderBy[1].Direction != OrderDesc {
-		t.Errorf("Expected second item DESC")
+	if !ret.OrderBy[1].Descending {
+		t.Error("expected second item DESC")
 	}
 }
 
 func TestParserCombinedClauses(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) RETURN DISTINCT u ORDER BY u.name LIMIT 5")
-	if err != nil {
-		t.Fatalf("Failed to parse combined clauses: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User) RETURN DISTINCT u ORDER BY u.name LIMIT 5")
+	ret := getReturn(t, sq)
+	if !ret.Distinct {
+		t.Error("expected Distinct")
 	}
-
-	if !query.Distinct {
-		t.Error("Expected Distinct")
+	if len(ret.OrderBy) != 1 {
+		t.Error("expected ORDER BY")
 	}
-	if len(query.OrderBy) != 1 {
-		t.Error("Expected ORDER BY")
-	}
-	if query.Limit != 5 {
-		t.Error("Expected LIMIT 5")
+	if evalIntExpr(ret.Limit) != 5 {
+		t.Error("expected LIMIT 5")
 	}
 }
 
 func TestParserWhereOr(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User) WHERE u.name = 'Alice' OR u.name = 'Bob' RETURN u")
-	if err != nil {
-		t.Fatalf("Failed to parse WHERE with OR: %v", err)
+	sq := mustParseQuery(t, "MATCH (u:User) WHERE u.name = 'Alice' OR u.name = 'Bob' RETURN u")
+	mc := getMatch(t, sq)
+	if mc.Where == nil {
+		t.Fatal("expected WHERE")
 	}
-
-	if len(query.ConditionGroups) != 2 {
-		t.Fatalf("Expected 2 condition groups (OR), got %d", len(query.ConditionGroups))
+	infix, ok := mc.Where.(*sulpherast.InfixExpression)
+	if !ok || infix.Operator != "OR" {
+		t.Errorf("expected OR at top level")
 	}
 }
 
 func TestParserWhereAndOr(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	// (a AND b) OR (c AND d)
-	query, err := parser.Parse("MATCH (u:User) WHERE u.age > 18 AND u.active = true OR u.role = 'admin' AND u.verified = true RETURN u")
-	if err != nil {
-		t.Fatalf("Failed to parse WHERE with AND/OR: %v", err)
+	// Cypher precedence: AND binds tighter than OR
+	// So: (a AND b) OR (c AND d)
+	sq := mustParseQuery(t, "MATCH (u:User) WHERE u.age > 18 AND u.active = true OR u.role = 'admin' AND u.verified = true RETURN u")
+	mc := getMatch(t, sq)
+	if mc.Where == nil {
+		t.Fatal("expected WHERE")
 	}
-
-	if len(query.ConditionGroups) != 2 {
-		t.Fatalf("Expected 2 condition groups, got %d", len(query.ConditionGroups))
-	}
-
-	if len(query.ConditionGroups[0].Conditions) != 2 {
-		t.Errorf("Expected 2 conditions in first group, got %d", len(query.ConditionGroups[0].Conditions))
-	}
-
-	if len(query.ConditionGroups[1].Conditions) != 2 {
-		t.Errorf("Expected 2 conditions in second group, got %d", len(query.ConditionGroups[1].Conditions))
+	// Top level should be OR
+	top, ok := mc.Where.(*sulpherast.InfixExpression)
+	if !ok || top.Operator != "OR" {
+		t.Errorf("expected OR at top level, got %T %q", mc.Where, mc.Where.String())
 	}
 }
 
+// ── Direction tests ───────────────────────────────────────────────────────────
+
 func TestParserBidirectionalUndirected(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)-[r:KNOWS]-(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse bidirectional query: %v", err)
-	}
-
-	if query.Path[0].Relationship.Direction != RelBidirectional {
-		t.Errorf("Expected bidirectional direction, got %v", query.Path[0].Relationship.Direction)
+	sq := mustParseQuery(t, "MATCH (u:User)-[r:KNOWS]-(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	if astRelDirection(segs[0].rel) != RelBidirectional {
+		t.Errorf("expected bidirectional, got %v", astRelDirection(segs[0].rel))
 	}
 }
 
 func TestParserIncoming(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)<-[r:FOLLOWS]-(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse incoming query: %v", err)
-	}
-
-	if query.Path[0].Relationship.Direction != RelIncoming {
-		t.Errorf("Expected incoming direction, got %v", query.Path[0].Relationship.Direction)
+	sq := mustParseQuery(t, "MATCH (u:User)<-[r:FOLLOWS]-(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	if astRelDirection(segs[0].rel) != RelIncoming {
+		t.Errorf("expected incoming, got %v", astRelDirection(segs[0].rel))
 	}
 }
 
 func TestParserBidirectionalBothArrows(t *testing.T) {
 	t.Parallel()
-	parser := NewParser()
-
-	query, err := parser.Parse("MATCH (u:User)<-[r:KNOWS]->(f:User) RETURN f")
-	if err != nil {
-		t.Fatalf("Failed to parse <-[]-> query: %v", err)
-	}
-
-	if query.Path[0].Relationship.Direction != RelBidirectional {
-		t.Errorf("Expected bidirectional direction, got %v", query.Path[0].Relationship.Direction)
+	sq := mustParseQuery(t, "MATCH (u:User)<-[r:KNOWS]->(f:User) RETURN f")
+	mc := getMatch(t, sq)
+	segs := pathSegs(t, mc)
+	if astRelDirection(segs[0].rel) != RelBidirectional {
+		t.Errorf("expected bidirectional, got %v", astRelDirection(segs[0].rel))
 	}
 }

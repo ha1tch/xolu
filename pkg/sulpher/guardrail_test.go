@@ -39,12 +39,12 @@ func TestGuardrail_VisitedNodeLimit(t *testing.T) {
 		MaxResults:      1000,
 	})
 
-	query, err := NewParser().Parse("MATCH (a:items)-[:next]->(b:items) RETURN a, b")
+	query, hint, err := NewParser().Parse("MATCH (a:items)-[:next]->(b:items) RETURN a, b")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = executor.Execute(context.Background(), query)
+	_, err = executor.Execute(context.Background(), query, hint)
 	if err == nil {
 		t.Fatal("expected visited-node limit error, got nil")
 	}
@@ -72,12 +72,12 @@ func TestGuardrail_ResultLimit(t *testing.T) {
 	})
 
 	// Query that matches all start nodes and expands
-	query, err := NewParser().Parse("MATCH (a:items)-[:has]->(b:items) RETURN a, b")
+	query, hint, err := NewParser().Parse("MATCH (a:items)-[:has]->(b:items) RETURN a, b")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = executor.Execute(context.Background(), query)
+	_, err = executor.Execute(context.Background(), query, hint)
 	if err == nil {
 		t.Fatal("expected result limit error, got nil")
 	}
@@ -97,7 +97,7 @@ func TestGuardrail_TimeoutCancelsTraversal(t *testing.T) {
 		MaxResults:      1000000,
 	})
 
-	query, err := NewParser().Parse("MATCH (a:items)-[:next*]->(b:items) RETURN a, b")
+	query, hint, err := NewParser().Parse("MATCH (a:items)-[:next*]->(b:items) RETURN a, b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestGuardrail_TimeoutCancelsTraversal(t *testing.T) {
 	defer cancel()
 	time.Sleep(1 * time.Millisecond) // Ensure deadline has passed
 
-	_, err = executor.Execute(ctx, query)
+	_, err = executor.Execute(ctx, query, hint)
 	if err == nil {
 		// The query might complete before the context check fires on
 		// small graphs. That's acceptable — the test verifies the
@@ -130,12 +130,12 @@ func TestGuardrail_UnderLimits(t *testing.T) {
 		MaxResults:      100,
 	})
 
-	query, err := NewParser().Parse("MATCH (a:items)-[:next]->(b:items) RETURN a, b")
+	query, hint, err := NewParser().Parse("MATCH (a:items)-[:next]->(b:items) RETURN a, b")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := executor.Execute(context.Background(), query)
+	result, err := executor.Execute(context.Background(), query, hint)
 	if err != nil {
 		t.Fatalf("under-limit query failed: %v", err)
 	}

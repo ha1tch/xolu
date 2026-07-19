@@ -159,17 +159,17 @@ func TestMetrics_PrometheusFormat(t *testing.T) {
 
 	// Check for expected metrics
 	expectedMetrics := []string{
-		"olu_uptime_seconds",
-		"olu_requests_total",
-		"olu_requests_by_status_total",
-		"olu_request_errors_total",
-		"olu_active_requests",
-		"olu_request_duration_seconds_bucket",
-		"olu_request_duration_seconds_sum",
-		"olu_request_duration_seconds_count",
-		"olu_entity_operations_total",
-		"olu_cache_total",
-		"olu_queries_total",
+		"xolu_uptime_seconds",
+		"xolu_requests_total",
+		"xolu_requests_by_status_total",
+		"xolu_request_errors_total",
+		"xolu_active_requests",
+		"xolu_request_duration_seconds_bucket",
+		"xolu_request_duration_seconds_sum",
+		"xolu_request_duration_seconds_count",
+		"xolu_entity_operations_total",
+		"xolu_cache_total",
+		"xolu_queries_total",
 	}
 
 	for _, metric := range expectedMetrics {
@@ -284,5 +284,95 @@ func TestMetrics_DisabledInConfig(t *testing.T) {
 
 	if m != nil {
 		t.Error("Metrics should be nil when disabled")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Blob store Prometheus metrics (xolu_blob_*)
+// ---------------------------------------------------------------------------
+
+func TestMetrics_BlobEnabled_EmitsGauges(t *testing.T) {
+	m := NewMetrics()
+
+	snap := m.GetSnapshot()
+	snap.BlobEnabled = true
+	snap.BlobBlobCount = 42
+	snap.BlobKeyCount = 100
+	snap.BlobBytes = 1048576
+	snap.BlobTenants = 3
+
+	output := m.PrometheusFormatSnapshot(snap)
+
+	cases := []struct {
+		metric string
+		value  string
+	}{
+		{"xolu_blob_blobs", "42"},
+		{"xolu_blob_keys", "100"},
+		{"xolu_blob_bytes", "1048576"},
+		{"xolu_blob_tenants", "3"},
+	}
+	for _, tc := range cases {
+		if !strings.Contains(output, tc.metric) {
+			t.Errorf("expected metric %q in output", tc.metric)
+		}
+		if !strings.Contains(output, tc.value) {
+			t.Errorf("expected value %q for metric %q in output", tc.value, tc.metric)
+		}
+	}
+
+	// Verify HELP and TYPE lines are present for each gauge.
+	for _, metric := range []string{"xolu_blob_blobs", "xolu_blob_keys", "xolu_blob_bytes", "xolu_blob_tenants"} {
+		if !strings.Contains(output, "# HELP "+metric) {
+			t.Errorf("missing HELP line for %q", metric)
+		}
+		if !strings.Contains(output, "# TYPE "+metric+" gauge") {
+			t.Errorf("missing TYPE gauge line for %q", metric)
+		}
+	}
+}
+
+func TestMetrics_BlobDisabled_OmitsGauges(t *testing.T) {
+	m := NewMetrics()
+
+	// BlobEnabled defaults to false — blob gauges must not appear.
+	snap := m.GetSnapshot()
+	// snap.BlobEnabled is false by default.
+
+	output := m.PrometheusFormatSnapshot(snap)
+
+	for _, metric := range []string{"xolu_blob_blobs", "xolu_blob_keys", "xolu_blob_bytes", "xolu_blob_tenants"} {
+		if strings.Contains(output, metric) {
+			t.Errorf("metric %q must not appear when BlobEnabled=false", metric)
+		}
+	}
+}
+
+func TestMetrics_BlobEnabled_ZeroValues(t *testing.T) {
+	// BlobEnabled=true but all counts zero — gauges must still be emitted
+	// (they convey meaningful state: blob store is up but empty).
+	m := NewMetrics()
+
+	snap := m.GetSnapshot()
+	snap.BlobEnabled = true
+	// BlobBlobCount, BlobKeyCount, BlobBytes, BlobTenants all zero by default.
+
+	output := m.PrometheusFormatSnapshot(snap)
+
+	for _, metric := range []string{"xolu_blob_blobs", "xolu_blob_keys", "xolu_blob_bytes", "xolu_blob_tenants"} {
+		if !strings.Contains(output, metric) {
+			t.Errorf("metric %q must be emitted even when zero (BlobEnabled=true)", metric)
+		}
+	}
+	// Each gauge should be zero.
+	for _, want := range []string{
+		"xolu_blob_blobs 0",
+		"xolu_blob_keys 0",
+		"xolu_blob_bytes 0",
+		"xolu_blob_tenants 0",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected %q in output", want)
+		}
 	}
 }

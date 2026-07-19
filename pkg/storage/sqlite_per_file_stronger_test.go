@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -314,9 +315,9 @@ func TestPerFile_CommitRoundTrip(t *testing.T) {
 
 // TestPerFile_SequencePrimaryKeyConstraint verifies the per-file schema's
 // composite PRIMARY KEY (entity_type, id) semantics:
-//  - Same (entity_type, id) → constraint violation
-//  - Different entity_type, same id → no conflict
-//  - Different id, same entity_type → no conflict
+//   - Same (entity_type, id) → constraint violation
+//   - Different entity_type, same id → no conflict
+//   - Different id, same entity_type → no conflict
 func TestPerFile_SequencePrimaryKeyConstraint(t *testing.T) {
 	dir := t.TempDir()
 	store := newPerFileStore(t, filepath.Join(dir, "pk.db"), 1)
@@ -327,7 +328,7 @@ func TestPerFile_SequencePrimaryKeyConstraint(t *testing.T) {
 
 	insert := func(entityType string, id int) error {
 		_, err := db.ExecContext(ctx,
-			`INSERT INTO entities (entity_type, id, data, _version) VALUES (?, ?, ?, 1)`,
+			`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, 1)`,
 			entityType, id, fmt.Sprintf(`{"id":%d}`, id))
 		return err
 	}
@@ -357,26 +358,26 @@ func TestPerFile_SequencePrimaryKeyConstraint(t *testing.T) {
 
 	// Verify three distinct rows exist
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+tenant.NodesTableName(1)+``).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 3 {
 		t.Errorf("row count: want 3, got %d", count)
 	}
 
-	// Also verify entity_sequences has no tenant_id column via a raw insert
+	// Also verify `+tenant.NodeSeqTableName(1)+` has no tenant_id column via a raw insert
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO entity_sequences (entity_type, next_id) VALUES (?, ?)`,
+		`INSERT INTO `+tenant.NodeSeqTableName(1)+` (entity_type, next_id) VALUES (?, ?)`,
 		"probe", 1)
 	if err != nil {
-		t.Errorf("entity_sequences insert without tenant_id: %v", err)
+		t.Errorf(tenant.NodeSeqTableName(1)+" insert without tenant_id: %v", err)
 	}
 	// Duplicate primary key in sequences table should also fail
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO entity_sequences (entity_type, next_id) VALUES (?, ?)`,
+		`INSERT INTO `+tenant.NodeSeqTableName(1)+` (entity_type, next_id) VALUES (?, ?)`,
 		"probe", 2)
 	if err == nil {
-		t.Error("duplicate entity_sequences PK: expected failure, got nil")
+		t.Error("duplicate " + tenant.NodeSeqTableName(1) + " PK: expected failure, got nil")
 	}
 }
 
@@ -392,7 +393,7 @@ func TestPerFile_GraphIntegrityAndRebuild(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Use tenantID=1 so the graph table is graph_t0001
+	// Use tenantID=1 so the graph table is t0001_graph
 	store := newPerFileStoreWithGraph(t, filepath.Join(dir, "graph.db"), 1)
 	defer store.Close()
 
@@ -433,7 +434,7 @@ func TestPerFile_GraphIntegrityAndRebuild(t *testing.T) {
 
 	// Delete all edges manually then RebuildGraph — should restore all 3
 	db := store.DB()
-	tbl := "graph_t0001"
+	tbl := "t0001_graph"
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", tbl)); err != nil {
 		t.Fatalf("DELETE graph edges: %v", err)
 	}
@@ -519,7 +520,7 @@ func TestPerFile_AdaptedHasExtra(t *testing.T) {
 
 	// Verify adapted table has no tenant_id column
 	var tenantColCount int
-	rows, err := store.DB().QueryContext(ctx, "PRAGMA table_info(olu_tag)")
+	rows, err := store.DB().QueryContext(ctx, "PRAGMA table_info(t0001_ndata_tag)")
 	if err != nil {
 		t.Fatalf("PRAGMA: %v", err)
 	}
@@ -536,6 +537,6 @@ func TestPerFile_AdaptedHasExtra(t *testing.T) {
 		}
 	}
 	if tenantColCount > 0 {
-		t.Error("olu_tag: unexpected tenant_id column in per-file adapted table")
+		t.Error("t0001_ndata_tag: unexpected tenant_id column in per-file adapted table")
 	}
 }

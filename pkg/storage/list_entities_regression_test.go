@@ -15,7 +15,7 @@ import (
 // entirely. Adapted entities live in their own tables (olu_<name>) and have
 // no rows in the entities table, so a plain
 //
-//	SELECT DISTINCT entity_type FROM entities
+//	SELECT DISTINCT entity_type FROM " + tenant.NodesTableName(0) + "
 //
 // returns nothing for them. The OQL validator calls ListEntities to check
 // entity existence; the old behaviour caused JOIN queries targeting adapted

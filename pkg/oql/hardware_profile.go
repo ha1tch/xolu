@@ -57,7 +57,7 @@ var (
 
 	// ProfileVPS targets small cloud instances (1-2 vCPU, 2-8 GB RAM, SSD).
 	// Shared CPU with noisy neighbours. This is the default and most common
-	// deployment target for self-hosted olu instances.
+	// deployment target for self-hosted xolu instances.
 	ProfileVPS = HardwareProfile{
 		Name:                 "vps",
 		BlobPushThreshold:    50,
@@ -159,7 +159,7 @@ func (qc QueryComplexity) Threshold(profile *HardwareProfile) int {
 //
 // This is a static analysis — no database access required. The
 // estimation assumes single-column indexes on each adapted column
-// (which is what olu creates by default).
+// (which is what xolu creates by default).
 //
 // The signals detected:
 //

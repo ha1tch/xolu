@@ -27,7 +27,7 @@ func testPebbleConfig() PebbleConfig {
 
 func mustOpenStore(t *testing.T) Store {
 	t.Helper()
-	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), testStoreConfig(), testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -206,9 +206,9 @@ func TestStore_QueryRange_PartialPrefix_TimeFilter(t *testing.T) {
 		inRange bool
 	}{
 		{1, base.Add(60 * time.Minute), true},   // d1=1, inside
-		{1, base.Add(120 * time.Minute), false},  // d1=1, after To
-		{5, base.Add(10 * time.Minute), false},   // d1=5, before From
-		{5, base.Add(60 * time.Minute), true},    // d1=5, inside
+		{1, base.Add(120 * time.Minute), false}, // d1=1, after To
+		{5, base.Add(10 * time.Minute), false},  // d1=5, before From
+		{5, base.Add(60 * time.Minute), true},   // d1=5, inside
 	}
 	for _, e := range events {
 		if err := store.Append(ctx, Event{
@@ -244,7 +244,7 @@ func TestStore_QueryRange_PartialPrefix_TimeFilter(t *testing.T) {
 func TestStore_Purge_MultiDimTimeline(t *testing.T) {
 	cfg := testStoreConfig()
 	cfg.DefaultRetentionDays = 0 // no store-level default
-	store, err := NewPebbleStore(t.TempDir(), cfg, testPebbleConfig())
+	store, err := NewPebbleStore(t.TempDir(), cfg, testPebbleConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestStore_Purge_MultiDimTimeline(t *testing.T) {
 
 	ctx := context.Background()
 	now := time.Now().UTC()
-	old := now.Add(-10 * 24 * time.Hour) // 10 days ago — should be purged
+	old := now.Add(-10 * 24 * time.Hour)   // 10 days ago — should be purged
 	recent := now.Add(-1 * 24 * time.Hour) // 1 day ago — should stay
 
 	// Write old events at d1=1 and d1=2 (different dimension values).
@@ -269,7 +269,7 @@ func TestStore_Purge_MultiDimTimeline(t *testing.T) {
 	}{
 		{1, old, false},
 		{1, recent, true},
-		{2, old, false},    // Bug 1: purge used to miss this after seeing recent at d1=1
+		{2, old, false}, // Bug 1: purge used to miss this after seeing recent at d1=1
 		{2, recent, true},
 	}
 	for _, e := range toWrite {

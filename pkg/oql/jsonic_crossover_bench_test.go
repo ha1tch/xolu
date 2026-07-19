@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"math"
 	"testing"
 
@@ -232,7 +233,7 @@ func benchJsonicRowCount(b *testing.B, n int) {
 	store.DB().Exec("PRAGMA synchronous=OFF")
 	store.DB().Exec("PRAGMA journal_mode=MEMORY")
 	tx, _ := store.DB().BeginTx(ctx, nil)
-	ins, _ := tx.Prepare(`INSERT INTO entities (tenant_id, entity_type, id, data) VALUES (0, 'things', ?, ?)`)
+	ins, _ := tx.Prepare(`INSERT INTO ` + tenant.NodesTableName(0) + ` (entity_type, id, data) VALUES ('things', ?, ?)`)
 	for i := 0; i < n; i++ {
 		data := fmt.Sprintf(
 			`{"id":%d,"code":"T-%04d","status":"%s","value":%.1f,"floor":%d,"zone":"z%d","tag1":"aaa","tag2":"bbb"}`,
@@ -241,8 +242,8 @@ func benchJsonicRowCount(b *testing.B, n int) {
 		ins.Exec(i+1, data)
 	}
 	ins.Close()
-	tx.Exec(`INSERT INTO entity_sequences (tenant_id, entity_type, next_id) VALUES (0, 'things', ?)
-		ON CONFLICT(tenant_id, entity_type) DO UPDATE SET next_id = ?`, n, n)
+	tx.Exec(`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('things', ?)
+		ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, n, n)
 	tx.Commit()
 
 	// GoFields executor: FieldQueryable only, no push-down

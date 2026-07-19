@@ -264,7 +264,7 @@ func TestAggregatePushDown(t *testing.T) {
 }
 
 func TestAggregatePushDown_Benchmark(t *testing.T) {
-if testing.Short() {
+	if testing.Short() {
 		t.Skip("skipping benchmark in -short mode")
 	}
 

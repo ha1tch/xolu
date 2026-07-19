@@ -117,8 +117,8 @@ func TestShardedMemoryCache_ShardCount(t *testing.T) {
 		{-1, 16}, // default
 		{1, 1},
 		{2, 2},
-		{3, 4},   // rounded up
-		{5, 8},   // rounded up
+		{3, 4}, // rounded up
+		{5, 8}, // rounded up
 		{16, 16},
 		{17, 32}, // rounded up
 	}
@@ -142,10 +142,7 @@ func TestShardedMemoryCache_Distribution(t *testing.T) {
 	// Count keys per shard by checking each shard's Len
 	nonEmpty := 0
 	for _, shard := range c.shards {
-		shard.mu.RLock()
-		n := shard.cache.Len()
-		shard.mu.RUnlock()
-		if n > 0 {
+		if shard.Len() > 0 {
 			nonEmpty++
 		}
 	}

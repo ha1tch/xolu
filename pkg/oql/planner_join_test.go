@@ -6,6 +6,7 @@ package oql
 
 import (
 	"context"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"testing"
 
 	"github.com/ha1tch/xolu/pkg/storage"
@@ -100,8 +101,8 @@ func newMockJoinStore(leftEntity string, leftAdapted bool, rightEntity string, r
 		rightEntity: rightAdapted,
 	}
 	tableNames := map[string]string{
-		leftEntity:  "olu_" + leftEntity,
-		rightEntity: "olu_" + rightEntity,
+		leftEntity:  tenant.AdaptedNodeTableName(0, leftEntity),
+		rightEntity: tenant.AdaptedNodeTableName(0, rightEntity),
 	}
 	columnInfos := map[string]map[string]string{
 		leftEntity:  {"id": "id", "author_id": "author_id", "title": "title", "status": "status", "name": "name"},
@@ -402,9 +403,9 @@ func TestIsJoinConditionPushable(t *testing.T) {
 
 func TestIsJoinWherePushable(t *testing.T) {
 	cases := []struct {
-		name      string
-		sql       string
-		pushable  bool
+		name     string
+		sql      string
+		pushable bool
 	}{
 		{
 			name:     "qualified field comparison",
@@ -445,5 +446,3 @@ func TestIsJoinWherePushable(t *testing.T) {
 		})
 	}
 }
-
-

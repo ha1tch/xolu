@@ -20,7 +20,7 @@ import (
 // runs without panicking, and exits cleanly when Stop is called.
 func TestRetentionWorker_StartStop(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig()), testStoreConfig())
+	mgr, err := NewManager(dir, NewPebbleStoreFactory(testPebbleConfig(), nil), testStoreConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestRetentionWorker_StartStop(t *testing.T) {
 // events are purged while a no-expiry timeline is untouched.
 func TestRetentionWorker_SweepDeletesExpired(t *testing.T) {
 	baseDir := t.TempDir()
-	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig()), testStoreConfig())
+	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig(), nil), testStoreConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestRetentionWorker_SweepDeletesExpired(t *testing.T) {
 	ctx := context.Background()
 
 	// Provision tenant 1.
-	if err := mgr.Provision(ctx, 1); err != nil {
+	if err := mgr.Provision(ctx, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	store, err := mgr.StoreFor(1)
@@ -126,14 +126,14 @@ func TestRetentionWorker_SweepDeletesExpired(t *testing.T) {
 // (within the retention window) are never deleted by a sweep.
 func TestRetentionWorker_SweepDoesNotDeleteRecent(t *testing.T) {
 	baseDir := t.TempDir()
-	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig()), testStoreConfig())
+	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig(), nil), testStoreConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mgr.Close()
 
 	ctx := context.Background()
-	if err := mgr.Provision(ctx, 1); err != nil {
+	if err := mgr.Provision(ctx, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	store, _ := mgr.StoreFor(1)
@@ -171,7 +171,7 @@ func TestRetentionWorker_SweepDoesNotDeleteRecent(t *testing.T) {
 // does not panic (channel double-close guard).
 func TestRetentionWorker_MultipleStops(t *testing.T) {
 	baseDir := t.TempDir()
-	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig()), testStoreConfig())
+	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig(), nil), testStoreConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,14 +204,14 @@ func TestRetentionWorker_MultipleStops(t *testing.T) {
 // Run under -race.
 func TestRetentionWorker_ConcurrentSweepAndAppend(t *testing.T) {
 	baseDir := t.TempDir()
-	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig()), testStoreConfig())
+	mgr, err := NewManager(baseDir, NewPebbleStoreFactory(testPebbleConfig(), nil), testStoreConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mgr.Close()
 
 	ctx := context.Background()
-	if err := mgr.Provision(ctx, 1); err != nil {
+	if err := mgr.Provision(ctx, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	store, _ := mgr.StoreFor(1)

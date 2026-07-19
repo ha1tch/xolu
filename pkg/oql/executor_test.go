@@ -45,6 +45,20 @@ func (m *mockStore) Get(ctx context.Context, entity string, id int) (map[string]
 	return nil, nil
 }
 
+func (m *mockStore) GetMany(ctx context.Context, entity string, ids []int) (map[int]map[string]interface{}, error) {
+	want := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	results := make(map[int]map[string]interface{})
+	for _, r := range m.data[entity] {
+		if id, ok := r["id"].(int); ok && want[id] {
+			results[id] = r
+		}
+	}
+	return results, nil
+}
+
 func (m *mockStore) Update(ctx context.Context, entity string, id int, data map[string]interface{}) error {
 	records := m.data[entity]
 	for i, r := range records {
@@ -121,28 +135,28 @@ func setupTestEngine(t *testing.T) (*Engine, *mockStore, string) {
 	// Create test data
 	store.Create(ctx, "items", map[string]interface{}{
 		"category_id": float64(1),
-		"status":  "active",
-		"value": float64(23.5),
+		"status":      "active",
+		"value":       float64(23.5),
 	})
 	store.Create(ctx, "items", map[string]interface{}{
 		"category_id": float64(1),
-		"status":  "active",
-		"value": float64(24.1),
+		"status":      "active",
+		"value":       float64(24.1),
 	})
 	store.Create(ctx, "items", map[string]interface{}{
 		"category_id": float64(2),
-		"status":  "inactive",
-		"value": float64(0),
+		"status":      "inactive",
+		"value":       float64(0),
 	})
 	store.Create(ctx, "items", map[string]interface{}{
 		"category_id": float64(2),
-		"status":  "active",
-		"value": float64(25.0),
+		"status":      "active",
+		"value":       float64(25.0),
 	})
 	store.Create(ctx, "items", map[string]interface{}{
 		"category_id": float64(3),
-		"status":  "active",
-		"value": float64(22.0),
+		"status":      "active",
+		"value":       float64(22.0),
 	})
 
 	// Create temp schema directory with items entity
@@ -709,7 +723,7 @@ func TestEngineInsertWithREF(t *testing.T) {
 
 	// Single REF
 	result, err := engine.Execute(ctx,
-		`INSERT INTO post (title, author_ref) VALUES ('Getting started with olu', @REF('author', 1))`)
+		`INSERT INTO post (title, author_ref) VALUES ('Getting started with xolu', @REF('author', 1))`)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -726,7 +740,7 @@ func TestEngineInsertWithREF(t *testing.T) {
 	}
 	post := posts[0]
 
-	if post["title"] != "Getting started with olu" {
+	if post["title"] != "Getting started with xolu" {
 		t.Errorf("unexpected title: %v", post["title"])
 	}
 

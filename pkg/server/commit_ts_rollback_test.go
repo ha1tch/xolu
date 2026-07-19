@@ -23,7 +23,7 @@ package server_test
 //  5. Asserts the TS event is NOT readable from Pebble.
 //  6. Asserts the entity state is unchanged (still at the pre-stale version).
 //
-// The OLU-CM016 double-failure path (DeleteKeys also fails) requires injecting
+// The XOLU-CM016 double-failure path (DeleteKeys also fails) requires injecting
 // a failing Store into the unexported tsManager field, which is typed as
 // *timeseries.DefaultManager (not the Manager interface).  That injection point
 // does not exist yet.  The test is noted below as a TODO; the fix is to widen
@@ -279,5 +279,5 @@ func TestCommitTS_SuccessfulCommit_EventPersists(t *testing.T) {
 //   3. Implement a failingStore that delegates Append/AppendBatch normally but
 //      returns a sentinel error from DeleteKeys.
 //
-// Until then, OLU-CM016 is covered by code review and the structured log
+// Until then, XOLU-CM016 is covered by code review and the structured log
 // message emitted by handleCommit in that branch.

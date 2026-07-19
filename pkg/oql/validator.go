@@ -73,7 +73,7 @@ func (v *Validator) loadEntitiesFromStore() {
 	if v.entityChecker == nil {
 		return
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -81,7 +81,7 @@ func (v *Validator) loadEntitiesFromStore() {
 	if err != nil {
 		return
 	}
-	
+
 	for _, entity := range entities {
 		v.entities[entity] = true
 	}
@@ -106,12 +106,12 @@ func (v *Validator) RefreshEntities() {
 func (v *Validator) EntityExists(name string) bool {
 	// Normalize name (lowercase, remove brackets/quotes)
 	name = normalizeEntityName(name)
-	
+
 	// Check cache first
 	if v.entities[name] {
 		return true
 	}
-	
+
 	// Entity not in cache - refresh and retry
 	// This handles dynamically created entity types
 	v.RefreshEntities()
@@ -139,6 +139,16 @@ func (v *Validator) validateSelect(s *ast.SelectStatement) error {
 		return fmt.Errorf("FROM clause required")
 	}
 
+	// Reject unsupported set operations early — a structural feature rejection
+	// that should be reported regardless of whether the referenced tables exist.
+	if s.Union != nil {
+		op := s.Union.Type
+		if op == "" {
+			op = "UNION"
+		}
+		return fmt.Errorf("%s is not supported", op)
+	}
+
 	if len(s.From.Tables) != 1 {
 		return fmt.Errorf("OQL supports single table queries only")
 	}
@@ -159,11 +169,6 @@ func (v *Validator) validateSelect(s *ast.SelectStatement) error {
 
 	default:
 		return fmt.Errorf("invalid table reference")
-	}
-
-	// Validate no unsupported features
-	if s.Union != nil {
-		return fmt.Errorf("UNION is not supported")
 	}
 
 	// Validate columns reference valid fields (optional - could defer to runtime)

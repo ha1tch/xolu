@@ -141,11 +141,11 @@ func TestDFS_VariableLengthStar_FindsAllReachable(t *testing.T) {
 	parser := NewParser()
 
 	// MATCH (a:chain)-[*]->(b:chain) — any number of hops.
-	q, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
+	q, hint, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	result, err := e.Execute(context.Background(), q)
+	result, err := e.Execute(context.Background(), q, hint)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -161,11 +161,11 @@ func TestDFS_VariableLengthExact_CorrectHops(t *testing.T) {
 	parser := NewParser()
 
 	// Exactly 2 hops from a: should find c.
-	q, err := parser.Parse("MATCH (a:chain)-[*2]->(b:chain) RETURN b")
+	q, hint, err := parser.Parse("MATCH (a:chain)-[*2]->(b:chain) RETURN b")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	result, err := e.Execute(context.Background(), q)
+	result, err := e.Execute(context.Background(), q, hint)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -180,11 +180,11 @@ func TestDFS_VariableLengthRange(t *testing.T) {
 	e := NewExecutor(g, 10)
 	parser := NewParser()
 
-	q, err := parser.Parse("MATCH (a:chain)-[*1..3]->(b:chain) RETURN b")
+	q, hint, err := parser.Parse("MATCH (a:chain)-[*1..3]->(b:chain) RETURN b")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	result, err := e.Execute(context.Background(), q)
+	result, err := e.Execute(context.Background(), q, hint)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestDFS_ContextCancellation(t *testing.T) {
 	e := NewExecutor(g, 10)
 	parser := NewParser()
 
-	q, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
+	q, hint, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestDFS_ContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	// Should not panic or hang with cancelled context.
-	_, _ = e.Execute(ctx, q)
+	_, _ = e.Execute(ctx, q, hint)
 }
 
 func TestDFS_MaxVisitedNodes_Respected(t *testing.T) {
@@ -216,20 +216,20 @@ func TestDFS_MaxVisitedNodes_Respected(t *testing.T) {
 	e.SetLimits(GraphLimits{MaxVisitedNodes: 1})
 	parser := NewParser()
 
-	q, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
+	q, hint, err := parser.Parse("MATCH (a:chain)-[*]->(b:chain) RETURN b")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	// With MaxVisitedNodes=1, traversal should either return an error or
 	// return fewer results than the full graph. Both outcomes are valid.
-	result, execErr := e.Execute(context.Background(), q)
+	result, execErr := e.Execute(context.Background(), q, hint)
 	if execErr != nil {
 		// Error is expected and acceptable — limit was enforced.
 		return
 	}
 	// If no error, results should be capped.
 	fullE := NewExecutor(g, 10)
-	fullResult, _ := fullE.Execute(context.Background(), q)
+	fullResult, _ := fullE.Execute(context.Background(), q, hint)
 	if len(result.Data) >= len(fullResult.Data) {
 		t.Error("capped traversal should return fewer results than uncapped")
 	}
@@ -250,11 +250,11 @@ func TestApplyConditions_FiltersByType(t *testing.T) {
 	parser := NewParser()
 
 	// WHERE u.type = 'users' — filters by the synthesized "type" field.
-	q, err := parser.Parse("MATCH (u) WHERE u.type = 'users' RETURN u")
+	q, hint, err := parser.Parse("MATCH (u) WHERE u.type = 'users' RETURN u")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	result, err := e.Execute(context.Background(), q)
+	result, err := e.Execute(context.Background(), q, hint)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -274,11 +274,11 @@ func TestApplyConditions_Inequality(t *testing.T) {
 	e := NewExecutor(g, 5)
 	parser := NewParser()
 
-	q, err := parser.Parse("MATCH (u) WHERE u.type != 'posts' RETURN u")
+	q, hint, err := parser.Parse("MATCH (u) WHERE u.type != 'posts' RETURN u")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	result, err := e.Execute(context.Background(), q)
+	result, err := e.Execute(context.Background(), q, hint)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestCompareForSort_Numerics(t *testing.T) {
 		{int(3), int(2), 1},
 		{int64(5), int64(10), -1},
 		{float32(1.5), float32(1.5), 0},
-		{"10", "20", -1},   // numeric strings
+		{"10", "20", -1}, // numeric strings
 		{nil, nil, 0},
 		{nil, 1.0, -1},
 		{1.0, nil, 1},
@@ -331,18 +331,21 @@ func TestCompareForSort_Strings(t *testing.T) {
 }
 
 func TestToFloat64_AllTypes(t *testing.T) {
+	// toFloat64 now delegates to qs.ToFloatSafe, which handles all numeric
+	// types including float32 and bool. String parsing is not handled here —
+	// string-to-numeric conversion happens in compareNumeric's string case.
 	cases := []struct {
-		v     interface{}
-		want  float64
+		v      interface{}
+		want   float64
 		wantOK bool
 	}{
 		{int(42), 42.0, true},
 		{int64(100), 100.0, true},
 		{float64(3.14), 3.14, true},
-		{float32(2.5), 2.5, true},
-		{"1.5", 1.5, true},
+		{float32(2.5), float64(float32(2.5)), true},
+		{true, 1.0, true},
+		{false, 0.0, true},
 		{"notanumber", 0, false},
-		{true, 0, false},
 		{nil, 0, false},
 	}
 	for _, c := range cases {
@@ -375,13 +378,13 @@ func TestCompareNumeric_AllOps(t *testing.T) {
 		// int types
 		{int(5), OpLt, int(10), true},
 		{int64(15), OpGt, int64(10), true},
-		// string numerics
+		// string numerics — compareNumeric handles string-to-float parsing
 		{"5", OpLt, "10", true},
-		{"abc", OpLt, 10.0, false},   // non-numeric string value
-		{10.0, OpLt, "abc", false},   // non-numeric string expected
-		// non-numeric types
-		{true, OpLt, 1.0, false},
-		{10.0, OpLt, true, false},
+		{"abc", OpLt, 10.0, false}, // non-numeric string value
+		{10.0, OpLt, "abc", false}, // non-numeric string expected
+		// bool: qs.ToFloatSafe handles bool (true=1, false=0)
+		{true, OpLt, 2.0, true},  // 1.0 < 2.0
+		{false, OpLt, 1.0, true}, // 0.0 < 1.0
 	}
 	for _, c := range cases {
 		got := compareNumeric(c.value, c.op, c.expected)

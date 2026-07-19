@@ -34,22 +34,22 @@ func setupGuardrailServer(t *testing.T, overrides func(*config.Config)) *TestSer
 	os.MkdirAll(filepath.Join(schemaDir, "items"), 0755)
 
 	cfg := &config.Config{
-		Host:              "localhost",
-		Port:              0,
-		BaseDir:           tmpDir,
-		Schema:            "test_schema",
-		SchemaDir:         schemaDir,
-		StorageType:       "jsonfile",
-		CacheType:         "memory",
-		CacheTTL:          300,
-		GraphEnabled:      false,
-		FullTextEnabled:   false,
-		MaxEmbedDepth:     10,
-		RefEmbedDepth:     3,
-		MaxEntitySize:     1048576,
-		DefaultPageSize:   10,
-		PatchNullBehavior: "store",
-		TenantMode:        "path",
+		Host:               "localhost",
+		Port:               0,
+		BaseDir:            tmpDir,
+		Schema:             "test_schema",
+		SchemaDir:          schemaDir,
+		StorageType:        "sqlite",
+		CacheType:          "memory",
+		CacheTTL:           300,
+		GraphEnabled:       false,
+		FullTextEnabled:    false,
+		MaxEmbedDepth:      10,
+		RefEmbedDepth:      3,
+		MaxEntitySize:      1048576,
+		DefaultPageSize:    10,
+		PatchNullBehavior:  "store",
+		TenantMode:         "path",
 		TenantAutoRegister: true,
 		// Guardrail defaults — tests override these
 		QueryTimeout:          30,
@@ -62,10 +62,7 @@ func setupGuardrailServer(t *testing.T, overrides func(*config.Config)) *TestSer
 		overrides(cfg)
 	}
 
-	store, err := storage.NewStore("jsonfile", map[string]interface{}{
-		"base_dir": cfg.BaseDir,
-		"schema":   cfg.Schema,
-	})
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +72,7 @@ func setupGuardrailServer(t *testing.T, overrides func(*config.Config)) *TestSer
 	validator := validation.NewJSONSchemaValidator(schemaPath)
 	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
 
-	srv := server.New(cfg, store, memCache, nil, nil, validator, logger)
+	srv := server.New(cfg, store, memCache, nil, validator, logger)
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{
@@ -130,8 +127,8 @@ func TestGuardrail_ScanLimit(t *testing.T) {
 	}
 
 	code, _ := errObj["code"].(string)
-	if code != "OLU-QL010" {
-		t.Errorf("scan limit: code = %q, want OLU-QL010", code)
+	if code != "XOLU-QL010" {
+		t.Errorf("scan limit: code = %q, want XOLU-QL010", code)
 	}
 }
 
@@ -139,7 +136,7 @@ func TestGuardrail_ScanLimit(t *testing.T) {
 
 func TestGuardrail_RowLimit(t *testing.T) {
 	ts := setupGuardrailServer(t, func(cfg *config.Config) {
-		cfg.QueryMaxRows = 3 // Very low: max 3 rows returned
+		cfg.QueryMaxRows = 3          // Very low: max 3 rows returned
 		cfg.QueryMaxScanRows = 100000 // Don't hit scan limit
 	})
 	defer ts.ts.Close()
@@ -160,8 +157,8 @@ func TestGuardrail_RowLimit(t *testing.T) {
 	}
 
 	code, _ := errObj["code"].(string)
-	if code != "OLU-QL009" {
-		t.Errorf("row limit: code = %q, want OLU-QL009", code)
+	if code != "XOLU-QL009" {
+		t.Errorf("row limit: code = %q, want XOLU-QL009", code)
 	}
 }
 
@@ -186,8 +183,8 @@ func TestGuardrail_ResponseSizeLimit(t *testing.T) {
 
 	errObj, _ := result["error"].(map[string]interface{})
 	code, _ := errObj["code"].(string)
-	if code != "OLU-QL011" {
-		t.Errorf("response size: code = %q, want OLU-QL011", code)
+	if code != "XOLU-QL011" {
+		t.Errorf("response size: code = %q, want XOLU-QL011", code)
 	}
 }
 
@@ -210,7 +207,7 @@ func TestGuardrail_QueryTimeout(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		errObj, _ := result["error"].(map[string]interface{})
-	errMsg, _ := errObj["message"].(string)
+		errMsg, _ := errObj["message"].(string)
 		t.Errorf("fast query with timeout: got status %d (%s), want 200", resp.StatusCode, errMsg)
 	}
 }
@@ -231,7 +228,7 @@ func TestGuardrail_UnderLimits(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		errObj, _ := result["error"].(map[string]interface{})
-	errMsg, _ := errObj["message"].(string)
+		errMsg, _ := errObj["message"].(string)
 		t.Errorf("under-limit query: got status %d (%s), want 200", resp.StatusCode, errMsg)
 	}
 

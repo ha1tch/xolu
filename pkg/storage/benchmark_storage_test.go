@@ -12,7 +12,7 @@ package storage_test
 //
 // Run with: go test ./pkg/storage/... -bench=. -benchmem
 //
-// Author: ha1tch <h@ual.fi>
+// Author: ha1tch <h@ual.li>
 
 import (
 	"context"
@@ -32,7 +32,7 @@ import (
 // BenchmarkSQLite_ConcurrentMixed simulates realistic concurrent access:
 // 80% reads, 20% writes across multiple goroutines.
 func BenchmarkSQLite_ConcurrentMixed(b *testing.B) {
-	tmpFile, _ := os.CreateTemp("", "olu-bench-mixed-*.db")
+	tmpFile, _ := os.CreateTemp("", "xolu-bench-mixed-*.db")
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
@@ -77,7 +77,7 @@ func BenchmarkSQLite_ConcurrentMixed(b *testing.B) {
 // BenchmarkJSONFile_ConcurrentMixed is the same workload against JSONFile
 // for cross-backend comparison.
 func BenchmarkJSONFile_ConcurrentMixed(b *testing.B) {
-	tmpDir, _ := os.MkdirTemp("", "olu-bench-jf-mixed-*")
+	tmpDir, _ := os.MkdirTemp("", "xolu-bench-jf-mixed-*")
 	defer os.RemoveAll(tmpDir)
 
 	store, err := storage.NewStore("jsonfile", map[string]interface{}{
@@ -136,7 +136,7 @@ func BenchmarkSQLite_LargeEntity(b *testing.B) {
 
 	for _, sz := range sizes {
 		b.Run(fmt.Sprintf("Create_%s", sz.name), func(b *testing.B) {
-			tmpFile, _ := os.CreateTemp("", "olu-bench-large-*.db")
+			tmpFile, _ := os.CreateTemp("", "xolu-bench-large-*.db")
 			tmpFile.Close()
 			defer os.Remove(tmpFile.Name())
 
@@ -161,7 +161,7 @@ func BenchmarkSQLite_LargeEntity(b *testing.B) {
 		})
 
 		b.Run(fmt.Sprintf("Get_%s", sz.name), func(b *testing.B) {
-			tmpFile, _ := os.CreateTemp("", "olu-bench-large-*.db")
+			tmpFile, _ := os.CreateTemp("", "xolu-bench-large-*.db")
 			tmpFile.Close()
 			defer os.Remove(tmpFile.Name())
 
@@ -198,7 +198,7 @@ func BenchmarkSQLite_LargeEntity(b *testing.B) {
 // for direct comparison between backends.
 func BenchmarkCrossBackend_Create(b *testing.B) {
 	b.Run("SQLite", func(b *testing.B) {
-		tmpFile, _ := os.CreateTemp("", "olu-bench-xb-*.db")
+		tmpFile, _ := os.CreateTemp("", "xolu-bench-xb-*.db")
 		tmpFile.Close()
 		defer os.Remove(tmpFile.Name())
 
@@ -217,7 +217,7 @@ func BenchmarkCrossBackend_Create(b *testing.B) {
 	})
 
 	b.Run("JSONFile", func(b *testing.B) {
-		tmpDir, _ := os.MkdirTemp("", "olu-bench-xb-jf-*")
+		tmpDir, _ := os.MkdirTemp("", "xolu-bench-xb-jf-*")
 		defer os.RemoveAll(tmpDir)
 
 		store, _ := storage.NewStore("jsonfile", map[string]interface{}{
@@ -249,7 +249,7 @@ func BenchmarkCrossBackend_Search(b *testing.B) {
 	}
 
 	b.Run("SQLite", func(b *testing.B) {
-		tmpFile, _ := os.CreateTemp("", "olu-bench-xbs-*.db")
+		tmpFile, _ := os.CreateTemp("", "xolu-bench-xbs-*.db")
 		tmpFile.Close()
 		defer os.Remove(tmpFile.Name())
 
@@ -267,7 +267,7 @@ func BenchmarkCrossBackend_Search(b *testing.B) {
 	})
 
 	b.Run("JSONFile", func(b *testing.B) {
-		tmpDir, _ := os.MkdirTemp("", "olu-bench-xbs-jf-*")
+		tmpDir, _ := os.MkdirTemp("", "xolu-bench-xbs-jf-*")
 		defer os.RemoveAll(tmpDir)
 
 		store, _ := storage.NewStore("jsonfile", map[string]interface{}{
@@ -296,7 +296,7 @@ func BenchmarkSQLite_WriteContention(b *testing.B) {
 
 	for _, w := range workers {
 		b.Run(fmt.Sprintf("%d_writers", w), func(b *testing.B) {
-			tmpFile, _ := os.CreateTemp("", "olu-bench-wc-*.db")
+			tmpFile, _ := os.CreateTemp("", "xolu-bench-wc-*.db")
 			tmpFile.Close()
 			defer os.Remove(tmpFile.Name())
 

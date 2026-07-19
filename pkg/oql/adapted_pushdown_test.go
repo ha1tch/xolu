@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/storage"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ func TestAdaptedPushDown(t *testing.T) {
 }
 
 func TestAdaptedPushDown_AllRows(t *testing.T) {
-env := newAdaptedEnv(t)
+	env := newAdaptedEnv(t)
 	// No WHERE, no LIMIT — should return all 500 rows
 	stmt := parseOQL(t, "SELECT region, quantity FROM items")
 
@@ -299,7 +299,7 @@ env := newAdaptedEnv(t)
 }
 
 func TestAdaptedPushDown_Benchmark(t *testing.T) {
-if testing.Short() {
+	if testing.Short() {
 		t.Skip("skipping benchmark in -short mode")
 	}
 

@@ -5,7 +5,6 @@
 package storage
 
 import (
-	"context"
 	"os"
 	"testing"
 )
@@ -16,8 +15,8 @@ import (
 
 func TestListStores(t *testing.T) {
 	stores := ListStores()
-	if len(stores) < 2 {
-		t.Errorf("Expected at least 2 registered stores, got %d", len(stores))
+	if len(stores) < 1 {
+		t.Errorf("Expected at least 1 registered store, got %d", len(stores))
 	}
 
 	found := map[string]bool{}
@@ -27,9 +26,6 @@ func TestListStores(t *testing.T) {
 	if !found["sqlite"] {
 		t.Error("Expected 'sqlite' in registered stores")
 	}
-	if !found["jsonfile"] {
-		t.Error("Expected 'jsonfile' in registered stores")
-	}
 }
 
 func TestNewStore_Unknown(t *testing.T) {
@@ -37,20 +33,6 @@ func TestNewStore_Unknown(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for unknown store type")
 	}
-}
-
-func TestNewStore_JSONFileDefaults(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "storage-cov")
-	defer os.RemoveAll(tmpDir)
-
-	// Empty config — should use "data" and "default" defaults
-	store, err := NewStore("jsonfile", map[string]interface{}{
-		"base_dir": tmpDir,
-	})
-	if err != nil {
-		t.Fatalf("NewStore(jsonfile) with defaults failed: %v", err)
-	}
-	store.Close()
 }
 
 func TestNewStoreFromConfig_UnknownType(t *testing.T) {
@@ -148,31 +130,4 @@ func TestSQLiteStore_Accessors(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// JSONFile: ListEntities
 // ---------------------------------------------------------------------------
-
-func TestJSONFileStore_ListEntities(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "storage-le")
-	defer os.RemoveAll(tmpDir)
-
-	store, err := NewJSONFileStore(tmpDir, "test")
-	if err != nil {
-		t.Fatalf("NewJSONFileStore failed: %v", err)
-	}
-	defer store.Close()
-
-	ctx := context.Background()
-
-	// Create entities of different types
-	store.Create(ctx, "users", map[string]interface{}{"name": "alice"})
-	store.Create(ctx, "items", map[string]interface{}{"name": "widget"})
-
-	entities, err := store.ListEntities(ctx)
-	if err != nil {
-		t.Fatalf("ListEntities failed: %v", err)
-	}
-
-	if len(entities) < 2 {
-		t.Errorf("Expected at least 2 entity types, got %d: %v", len(entities), entities)
-	}
-}
