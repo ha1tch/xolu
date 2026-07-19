@@ -4,6 +4,33 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.2] - 2026-07-19 (multi-core fixes: T-39, T-40)
+
+The GitHub CI runner — the first habitual multi-core executor of the full
+suite — surfaced two defects in its first hours of service. Both fixed;
+closure of both register items gated on a multi-core green run.
+
+### Fixed
+
+- **T-40 — engine-bound @SEQ/@GEN registered into the process-global
+  scalar map.** Every `oql` engine construction wrote closures capturing
+  its own executor into the package-level `ScalarFunctions` map:
+  concurrent map writes when servers boot in parallel (the CI fatal), and
+  last-writer-wins cross-engine dispatch of @SEQ/@GEN session state
+  (invisible in single-server production, wrong in any multi-engine
+  process). Executors now carry an instance overlay consulted before the
+  package defaults (`EvalScalarFunctionWith`); the package map holds inert
+  @SEQ/@GEN stubs for membership checks; `RegisterScalarFunc`'s contract
+  is hardened to init()-time only.
+- **T-39 — racy blob GlobalUsage test.** The multi-tenant test asserted a
+  deliberately-transient state (opened-but-unsampled tenant) against a
+  sampler whose first act on Start() is an immediate sample; multi-core
+  scheduling let the sample win. The test now injects an open store with
+  a constructed-but-never-Started sampler — zero SampledAt by
+  construction, no timing anywhere. Implementation unchanged (the
+  immediate initial sample is intended; GlobalUsage's skip-unsampled
+  contract exists precisely for that window).
+
 ## [0.16.1] - 2026-07-18 (T-34 fix: atomic terminal transitions)
 
 > **Re-cut 2026-07-18 (same version, superseding the earlier artefact):**

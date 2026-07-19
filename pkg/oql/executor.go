@@ -28,9 +28,15 @@ type Executor struct {
 	store           storage.Store
 	aggregator      *Aggregator
 	schemaValidator SchemaValidator
-	planner         *Planner
-	dialect         SQLDialect
-	limits          QueryLimits
+	// scalars is the instance overlay of scalar functions bound to THIS
+	// executor (@SEQ, @GEN close over its session state). Consulted before
+	// the package-level defaults at evaluation. Written only during
+	// construction (RegisterSeqGenFuncs), read on every query — never
+	// mutated after the executor is in service. T-40.
+	scalars map[string]ScalarFunc
+	planner *Planner
+	dialect SQLDialect
+	limits  QueryLimits
 	// sqlTenantID is injected into push-down SQL WHERE clauses to filter by
 	// the tenant_id column. It is set by ExecuteWithStore (which extracts it
 	// from the store's config) and left empty otherwise. This is separate from
@@ -804,7 +810,7 @@ func (e *Executor) evalExpr(rec map[string]interface{}, expr ast.Expression) int
 	case *ast.FunctionCall:
 		// Check scalar functions first
 		if IsScalarFunction(ex) {
-			return EvalScalarFunction(ex, func(arg ast.Expression) interface{} {
+			return EvalScalarFunctionWith(e.scalars, ex, func(arg ast.Expression) interface{} {
 				return e.evalExpr(rec, arg)
 			})
 		}
@@ -932,7 +938,7 @@ func (e *Executor) materializeScalars(records []map[string]interface{}, columns 
 					val = e.evalSeqValue(args)
 				}
 			default:
-				val = EvalScalarFunction(s.expr, func(arg ast.Expression) interface{} {
+				val = EvalScalarFunctionWith(e.scalars, s.expr, func(arg ast.Expression) interface{} {
 					return e.evalExpr(rec, arg)
 				})
 			}

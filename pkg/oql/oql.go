@@ -34,8 +34,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/ha1tch/tsqlparser"
 	"github.com/ha1tch/tsqlparser/ast"
-	ot "github.com/ha1tch/xolu/pkg/xolutime"
 	"github.com/ha1tch/xolu/pkg/storage"
+	ot "github.com/ha1tch/xolu/pkg/xolutime"
 )
 
 // SchemaValidator validates entity data against schemas

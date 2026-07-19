@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.1
-Last reviewed: 2026-07-18
+Version: 0.16.2
+Last reviewed: 2026-07-19
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:

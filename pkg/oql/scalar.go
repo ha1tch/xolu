@@ -45,11 +45,29 @@ var ScalarFunctions = map[string]ScalarFunc{
 	"REPLACE":    qs.ScalarReplace,
 	"CHARINDEX":  qs.ScalarCharIndex,
 	"NEWID":      qs.ScalarNewID,
+
+	// @SEQ and @GEN are session-bound: their real implementations close
+	// over a specific Executor and live in that Executor's instance
+	// overlay (see RegisterSeqGenFuncs). These package-level entries are
+	// inert stubs so that membership checks (IsScalarFunction) recognise
+	// the names in any context; unbound evaluation returns nil, matching
+	// the documented "no NEXT VALUE FOR in this session" semantics.
+	// T-40: engine-bound closures must NEVER be registered into this
+	// package-level map — that is a concurrent map write across engines
+	// and, worse, last-writer-wins cross-engine dispatch.
+	"@SEQ": func(_ []interface{}) interface{} { return nil },
+	"@GEN": func(_ []interface{}) interface{} { return nil },
 }
 
-// RegisterScalarFunc registers a new scalar function in the OQL function map.
-// The name is normalised to uppercase. Calling this with an existing name
-// overwrites the previous registration. Safe to call from init().
+// RegisterScalarFunc registers a new scalar function in the package-level
+// OQL function map. The name is normalised to uppercase. Calling this with
+// an existing name overwrites the previous registration.
+//
+// ONLY safe to call from init() (or otherwise strictly before any Engine
+// exists): the map is read on every query evaluation and is not internally
+// synchronised. Runtime or per-engine registrations belong on the
+// Executor's instance overlay instead (T-40 — a per-engine registration
+// here crashed with concurrent map writes and cross-wired engines).
 func RegisterScalarFunc(name string, fn ScalarFunc) {
 	ScalarFunctions[strings.ToUpper(name)] = fn
 }
@@ -68,9 +86,21 @@ func IsScalarFunction(expr ast.Expression) bool {
 
 // EvalScalarFunction evaluates a scalar function call against a record.
 // The evalFn callback is used to resolve argument expressions to values.
+// Resolution consults only the package-level defaults; executor-bound
+// functions (@SEQ, @GEN) resolve through EvalScalarFunctionWith.
 func EvalScalarFunction(fc *ast.FunctionCall, evalFn func(ast.Expression) interface{}) interface{} {
+	return EvalScalarFunctionWith(nil, fc, evalFn)
+}
+
+// EvalScalarFunctionWith evaluates a scalar function call, consulting the
+// given instance overlay before the package-level defaults. The overlay
+// carries executor-bound functions; nil is a valid overlay.
+func EvalScalarFunctionWith(overlay map[string]ScalarFunc, fc *ast.FunctionCall, evalFn func(ast.Expression) interface{}) interface{} {
 	funcName := strings.ToUpper(exprToString(fc.Function))
-	fn, exists := ScalarFunctions[funcName]
+	fn, exists := overlay[funcName]
+	if !exists {
+		fn, exists = ScalarFunctions[funcName]
+	}
 	if !exists {
 		return nil
 	}

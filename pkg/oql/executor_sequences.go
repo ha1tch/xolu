@@ -127,11 +127,18 @@ func (e *Executor) evalSeqValue(args []interface{}) interface{} {
 //	and execute without error rather than failing at the
 //	unknown-function path.
 func RegisterSeqGenFuncs(e *Executor) {
-	RegisterScalarFunc("@SEQ", func(args []interface{}) interface{} {
+	// T-40: these closures capture THIS executor and therefore live on its
+	// instance overlay, never the package-level map — a per-engine write
+	// there is a concurrent map write across engines and last-writer-wins
+	// cross-engine dispatch. The package map carries inert @SEQ/@GEN stubs
+	// for membership checks (see scalar.go).
+	if e.scalars == nil {
+		e.scalars = make(map[string]ScalarFunc, 2)
+	}
+	e.scalars["@SEQ"] = func(args []interface{}) interface{} {
 		return e.evalSeqValue(args)
-	})
-	// @GEN('name') — dispatch to the named stateful generator (S10).
-	RegisterScalarFunc("@GEN", func(args []interface{}) interface{} {
+	}
+	e.scalars["@GEN"] = func(args []interface{}) interface{} {
 		return e.evalGenValue(args)
-	})
+	}
 }
