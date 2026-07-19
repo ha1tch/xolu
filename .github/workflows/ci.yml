@@ -1,82 +1,41 @@
-name: CI
+# xolu CI — quick tier only (build, vet, unit tests, lint).
+# Stress/integration tiers are dormant guards run per Part 3 §8 of the
+# working practices; wiring them into CI is a recorded, undecided option
+# (see docs/TRACKING.md T-37 note).
+#
+# Versions are pinned exactly. "latest" is how the previous pipeline
+# broke: golangci-lint-action@v4 resolved "latest" to v1.64.8 (the final
+# v1, built with Go 1.24), which cannot load v2 configs or analyse
+# Go ≥ 1.25 targets. Bump the pins deliberately, together.
+
+name: ci
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
-
-env:
-  GONOSUMDB: '*'
-  GOFLAGS: -mod=mod
+    tags: ["v*"]
+  pull_request:
 
 jobs:
   test:
-    name: Test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          cache: true
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Run tests
-        run: go test -short ./...
+          go-version-file: go.mod   # tracks the go directive; no separate pin to drift
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -count=1
 
   lint:
-    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          cache: true
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.12.2          # pinned; built with go1.26.x, handles the 1.26.5 target
           args: --timeout=5m
-
-  race:
-    name: Race Detection
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-
-      - name: Run race detector
-        run: go test -race -timeout 10m ./pkg/sulpher/... ./pkg/oql/... ./pkg/server/...
-
-  stress:
-    name: Stress Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-
-      - name: Run stress tests
-        run: go test -v -race -run TestStress ./pkg/storage/...

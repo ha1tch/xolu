@@ -19,12 +19,12 @@
 //
 // Environment overrides (all optional; defaults are set below):
 //
-//   XOLU_SEAL_STRESS_TRIALS       — number of independent trials
-//   XOLU_SEAL_STRESS_WORKERS      — concurrent mutator goroutines per trial
-//   XOLU_SEAL_STRESS_BOOKINGS     — bookings seeded per trial
-//   XOLU_SEAL_STRESS_OPS_PER_WORKER — mutations attempted per worker
-//   XOLU_SEAL_STRESS_CALENDARS    — calendars per tenant
-//   XOLU_SEAL_STRESS_DAYS         — future days across which bookings are spread
+//   XOLU_TEST_SEAL_STRESS_TRIALS       — number of independent trials
+//   XOLU_TEST_SEAL_STRESS_WORKERS      — concurrent mutator goroutines per trial
+//   XOLU_TEST_SEAL_STRESS_BOOKINGS     — bookings seeded per trial
+//   XOLU_TEST_SEAL_STRESS_OPS_PER_WORKER — mutations attempted per worker
+//   XOLU_TEST_SEAL_STRESS_CALENDARS    — calendars per tenant
+//   XOLU_TEST_SEAL_STRESS_DAYS         — future days across which bookings are spread
 //
 // The default scale (5 trials, 16 workers, 5000 bookings, 2000 ops/worker,
 // 10 calendars, 90 days) targets ~1.6 million mutation attempts against
@@ -98,12 +98,12 @@ func loadStressConfig() stressConfig {
 		return n
 	}
 	return stressConfig{
-		trials:       get("XOLU_SEAL_STRESS_TRIALS", defaultStressTrials),
-		workers:      get("XOLU_SEAL_STRESS_WORKERS", defaultStressWorkers),
-		bookings:     get("XOLU_SEAL_STRESS_BOOKINGS", defaultStressBookings),
-		opsPerWorker: get("XOLU_SEAL_STRESS_OPS_PER_WORKER", defaultStressOpsPerWorker),
-		calendars:    get("XOLU_SEAL_STRESS_CALENDARS", defaultStressCalendars),
-		days:         get("XOLU_SEAL_STRESS_DAYS", defaultStressDays),
+		trials:       get("XOLU_TEST_SEAL_STRESS_TRIALS", defaultStressTrials),
+		workers:      get("XOLU_TEST_SEAL_STRESS_WORKERS", defaultStressWorkers),
+		bookings:     get("XOLU_TEST_SEAL_STRESS_BOOKINGS", defaultStressBookings),
+		opsPerWorker: get("XOLU_TEST_SEAL_STRESS_OPS_PER_WORKER", defaultStressOpsPerWorker),
+		calendars:    get("XOLU_TEST_SEAL_STRESS_CALENDARS", defaultStressCalendars),
+		days:         get("XOLU_TEST_SEAL_STRESS_DAYS", defaultStressDays),
 	}
 }
 

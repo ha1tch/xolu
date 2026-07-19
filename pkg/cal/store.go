@@ -82,7 +82,7 @@ func (s *IndexStore) dayValue(ord CalOrdinal, plane Plane, dayNanos int64) (DayB
 	if err != nil {
 		return bm, fmt.Errorf("cal: get %x: %w", key, err)
 	}
-	defer closer.Close()
+	defer func() { _ = closer.Close() }()
 	if err := decodeDayValue(val, &bm); err != nil {
 		return bm, err
 	}
@@ -130,7 +130,7 @@ func (s *IndexStore) applyBooking(b Booking, add bool) error {
 		return err
 	}
 	batch := s.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	for _, d := range days {
 		cur, err := s.dayValue(ord, plane, d.DayNanos)
 		if err != nil {
@@ -238,7 +238,7 @@ func (s *IndexStore) RebuildFrom(src BookingSource) error {
 
 	// Re-apply every live booking.
 	batch := s.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	// accumulate per-key bitmaps in memory first so overlaps OR correctly within
 	// the rebuild without repeated read-modify-write.
 	acc := map[string]*DayBitmap{}
@@ -299,12 +299,12 @@ func (s *IndexStore) ReadOccupancy(calendarID string) (*Occupancy, error) {
 		for iter.First(); iter.Valid(); iter.Next() {
 			_, _, dayNanos, derr := DecodeKey(iter.Key())
 			if derr != nil {
-				iter.Close()
+				_ = iter.Close()
 				return nil, derr
 			}
 			var bm DayBitmap
 			if derr := decodeDayValue(iter.Value(), &bm); derr != nil {
-				iter.Close()
+				_ = iter.Close()
 				return nil, derr
 			}
 			o.planeMap(plane)[dayNanos] = &bm

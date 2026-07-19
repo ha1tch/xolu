@@ -105,6 +105,20 @@ that enforcement, recorded so a passing build is read honestly.
 
 ## `cal` design — recorded decisions
 
+- **Intent preservation vs grid occupancy (recorded 2026-07-18).** Booking
+  spans store the caller's exact instants in the SQLite record (H1); the
+  bitmap index (H2) derives occupancy by conservative outward rounding
+  (floored start quantum, ceiled end — `SpanDays`). A 9:57–10:15 booking
+  occupies the 09:55–10:15 quanta but is stored, returned, and displayed
+  as 9:57–10:15. The design-stage "3-bit minute modifier" (add/subtract
+  up to 4 minutes to recover true start time from a bitmap-centric
+  record) was superseded by the H1/H2 split and never reached code: the
+  offset is recoverable by arithmetic from the exact stored instant, at
+  full precision, for zero stored bits. Pinned by
+  `TestSpanIntentPreservedOffGrid`. (Distinct from the per-calendar grid
+  `delta` of the codec proposal §2.1a, which phase-shifts a whole
+  calendar's grid and remains unimplemented design intent.)
+
 - **Table convention (recorded decision).** `cal`'s tables follow the **fsm
   family convention** (`tenant_id` column + `PRIMARY KEY (tenant_id, ...)`,
   unprefixed table names), not the prefixed per-tenant data-table convention used

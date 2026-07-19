@@ -15,7 +15,7 @@ Status legend: ✓ done · ◐ partial · ☐ not started · ✗ dropped
 | M2 | Conventions + auth extraction (T-21 + T-19) | ✓ done | v0.15.2 | **Deviation** (see below). |
 | M3 | Client Stage 5: cal methods | ✓ done | v0.15.3 | 4 methods, 12 tests incl. wire-level Openings→Check→Propose sequence. Stale mode comment in the cal handler header (pre-T-30) fixed en route. |
 | M4a | Stage 6 sizing spike | ✓ done | — | Output: `docs/CLIENT_STAGE6_PLAN.md`. D-iii decided: T-26 folds in, minimal form. Headline finding: declared-scope coverage already complete; M4b is hardening, not endpoint work. ~2–2.5 d. |
-| M4b | Stage 6 execution | ✓ done | v0.16.0 | Executed per plan. Integration suite surfaced the FTS double-gate and T-33 (filed). Client declared stable. **Plan complete: xolu-side molu readiness achieved** — blessing gated on T-34 multi-core verification (fix shipped v0.16.1). |
+| M4b | Stage 6 execution | ✓ done | v0.16.0 | Executed per plan. Integration suite surfaced the FTS double-gate and T-33 (filed). Client declared stable. **Plan complete: xolu-side molu readiness achieved and verified** — T-34 closed after 5×-repeated race-test verification plus a full stress-tier pass on 8-core M1 under -race (2026-07-18, ~195s, all green; seal throughput 1344–1385 ops/s, marginally above the pre-fix 1272–1324). Extended-scale run (32 workers × 5000 ops/worker, 800k attempts, -race) also green: 5,905–6,263 ops/s and success ratios matching the T-15 pre-CAS baseline to two decimals — the CAS is measurably free at full contention. |
 | M5 | Recorded deferrals | ✓ by definition | — | No work; the deferral decisions are recorded in the plan. |
 
 ## Deviations from the plan

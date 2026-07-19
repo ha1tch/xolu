@@ -306,7 +306,7 @@ func (s *SQLiteBookingSource) Calendars() []Calendar {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Calendar
 	for rows.Next() {
 		var c Calendar
@@ -335,7 +335,7 @@ func (s *SQLiteBookingSource) LiveBookings() []Booking {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanBookings(rows)
 }
 
@@ -366,7 +366,7 @@ func (s *SQLiteBookingSource) LiveBookingsOn(calendarID string, plane Plane) []B
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanBookings(rows)
 }
 

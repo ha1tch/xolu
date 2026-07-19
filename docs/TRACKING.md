@@ -49,8 +49,9 @@ item's Trigger line.
 | T-06 | Schema modes (b) strict and (c) clone | storage-config | P5 | ☐ | No timeline committed; design in `SCHEMA_MODES_DESIGN.md`. |
 | T-33 | Partial `StoreConfig` in `loadTenantEntitiesFromStore` scoped store | storage-config | P5 | ☐ | Inert today (read-only path); fragile against future writes. |
 | T-16 | `cal` daypart rollup-prune performance validation | cal | P5 | ☐ | After: realistic occupancy distributions are available to measure against. |
-| T-34 | cal terminal transitions not atomic: N racers can all win | cal | P1 | ◐ | Fix shipped v0.16.1 (CAS); closure gated on multi-core verification. |
 | T-35 | Investigate: Move's conflict-check → setSpan window (suspected T-34-class race) | cal | P2 | ☐ | Investigation; not proven. After T-34 verification. |
+| T-36 | Create the dormant-guards table (Part 3 §8 compliance) | tooling | P2 | ☐ | Gates the §6 release-gate check; pairs with T-22. |
+| T-37 | Adopt git history inside the checkpoint (retrofit v0.15.1–v0.16.1 boundaries) | tooling | P3 | ☐ | Decided in principle 2026-07-18; execute at next session start. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 
 ---
@@ -358,6 +359,35 @@ Blocks/after: No timeline committed; design in `SCHEMA_MODES_DESIGN.md`.
 
 ---
 
+### T-36. Create the dormant-guards table
+
+Theme: tooling · Priority: P2 · Status: ☐
+Blocks/after: Required by working-agreement Part 3 §8 (2026-07-18); the §6 release gate cannot check guard exercise until the table exists. Pairs naturally with T-22.
+
+- **Work:** enumerate every dormant guard — `stress`-tagged tests (incl.
+  `TestConcurrentTerminalTransition_ExactlyOneWins`, `TestSealStressLocal`),
+  the `integration`-tagged client suite, fuzz targets from the D-003/4/7/8
+  family — into a table in this register or KNOWN_ISSUES: name, gating
+  condition, hardware needs, canonical invocation, last-exercised date +
+  environment. Seed last-exercised from today's recorded runs (M1, 8 cores,
+  -race, 2026-07-18).
+- **Estimate:** an hour.
+
+### T-37. Git history inside the checkpoint
+
+Theme: tooling · Priority: P3 · Status: ☐
+Blocks/after: Decided in principle 2026-07-18 (zip-with-.git hybrid; bundle optional for incremental sync). Execute at the start of the next working session while release boundaries remain reconstructible from CHANGELOG.
+
+- **Work:** `git init` in the checkpoint; retrofit commits at the
+  v0.15.0-import, v0.15.1, v0.15.2, v0.15.3, v0.16.0, v0.16.1 boundaries
+  (content reconstructible from CHANGELOG entries); tag each; adopt
+  commit-per-release thereafter; checkpoint zips ship with `.git` included.
+- **Not included (separate decision):** GitHub Actions as dormant-guard
+  executor — proposed, undecided; would close the loop between T-36's
+  table and mechanical execution, but needs Horacio's call on repo
+  visibility and CI wiring.
+- **Estimate:** half an hour for the retrofit.
+
 ### T-33. Per-tenant scoped store built with partial `StoreConfig`
 
 Theme: storage-config · Priority: P5 · Status: ☐
@@ -405,37 +435,6 @@ Blocks/after: Investigation only; suspected, not proven. Run after T-34's verifi
   per-calendar.
 - **Estimate:** half a day for the test; fix cost separately scoped.
 
-### T-34. Terminal transitions are check-then-act, not atomic — multiple racers win
-
-Theme: cal · Priority: P1 · Status: ◐
-Blocks/after: molu Part 2 booking tools (which will drive concurrent confirms); the v0.16.0 stress blessing. Fix verification requires multi-core hardware — the 1-CPU sandbox cannot reproduce.
-
-- **Trigger:** first-ever local run of the stress-tagged
-  `TestConcurrentTerminalTransition_ExactlyOneWins` (shipped v0.14.11,
-  never executed in any recorded campaign — the T-15 record covers the
-  seal harness only). On an 8-core M1: 2–4 of 32 racers succeed in every
-  trial across all four transition kinds; `success + illegal = 32`
-  always; zero data races.
-- **Diagnosis:** `Lifecycle.transition` reads the booking, checks
-  `allowedTransition`, then calls `BookingSource.SetState` — an
-  unconditional overwrite. All goroutines that read the stale state pass
-  the check and return nil. The invariant the test encodes ("state graph
-  as natural mutex") was specified but never implemented.
-- **Fix shape:** compare-and-swap at the source: `SetState` gains the
-  expected from-state (`SetStateFrom(cal, id, from, to)`); SQLite:
-  `UPDATE … SET state=? WHERE … AND state=?` with RowsAffected==1, else
-  `ErrIllegalTransition`; Mem source: mutex-guarded check+set. Losers
-  return before touching the index; the winner does index work once.
-- **Consequence unfixed:** N callers each believe they performed the
-  terminal transition — compensation logic, notifications, and any
-  exactly-once accounting downstream silently multiply.
-- **Estimate:** half a day including both sources, call-site sweep, and
-  local re-verification on multi-core hardware.
-- **Fix shipped (v0.16.1):** `SetState` → `SetStateFrom(cal, id, from, to)`
-  across the Store interface and both sources; SQLite guarded UPDATE
-  (`AND state=?`) with RowsAffected==1, Mem check-and-set under the
-  source lock; losers get `ErrIllegalTransition` before any index work.
-  **Closure gated on** the race test passing on multi-core hardware.
 
 ### T-16. `cal` daypart rollup-prune performance validation
 

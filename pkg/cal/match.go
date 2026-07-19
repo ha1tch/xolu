@@ -224,7 +224,7 @@ func (s *IndexStore) Check(c Calendar, span Span, mode Mode) (CheckResult, error
 	}
 
 	// Feasibility: the requested span must be free of any commitment.
-	period := Period{Start: span.Start, End: span.End}
+	period := Period(span)
 	counts, err := o.CountQuanta(period)
 	if err != nil {
 		return CheckResult{}, err

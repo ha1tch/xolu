@@ -34,7 +34,7 @@ import (
 // by any overrides supplied in the request).
 func (c *Client) CreateMachine(ctx context.Context, req CreateMachineRequest) (*Machine, error) {
 	if req.Definition <= 0 {
-		return nil, fmt.Errorf("Definition is required")
+		return nil, fmt.Errorf("definition is required")
 	}
 	var m Machine
 	if err := c.doURL(ctx, http.MethodPost, c.buildURLv2("/fsm/machine"), req, &m); err != nil {
@@ -165,7 +165,7 @@ func (c *Client) WalkMachine(ctx context.Context, id int64, req WalkRequest) (*W
 		return nil, fmt.Errorf("id must be positive")
 	}
 	if req.Input == "" {
-		return nil, fmt.Errorf("Input is required")
+		return nil, fmt.Errorf("input is required")
 	}
 	path := fmt.Sprintf("/fsm/machine/%d/walk", id)
 	var res WalkResult

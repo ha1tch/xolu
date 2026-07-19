@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.16.1] - 2026-07-18 (T-34 fix: atomic terminal transitions)
 
+> **Re-cut 2026-07-18 (same version, superseding the earlier artefact):**
+> toolchain synced to latest Go (`go.mod` directive → `go 1.26.5`;
+> slabber/slabbis already require ≥ 1.23); CI workflow added
+> (`.github/workflows/ci.yml`, golangci-lint v2.12.2 via action v8,
+> pinned — replaces the broken action@v4/"latest" pipeline that resolved
+> to the Go 1.24-built v1.64.8); all 20 outstanding lint findings fixed
+> in code per the `.golangci.yml` policy (13 errcheck explicit-discard
+> closes, 3 S1016 Span→Period conversions, 2 ST1005 error-string
+> casings, 2 dead symbols removed: `quantumOfDay`, `discardLogger`);
+> and the test-only stress-harness env knobs renamed
+> `XOLU_SEAL_STRESS_*` → `XOLU_TEST_SEAL_STRESS_*` (previously listed
+> as Unreleased, folded into this re-cut).
+
 ### Fixed — cal exactly-once terminal transitions (T-34)
 
 First-ever run of the v0.14.11 race guard

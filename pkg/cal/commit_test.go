@@ -37,7 +37,7 @@ func TestMatchCommitAllLand(t *testing.T) {
 	// every calendar must now be busy at the span.
 	for _, cid := range []string{"or-3", "surgeon", "anaesthetist", "cart"} {
 		o, _ := s.ReadOccupancy(cid)
-		busy, _ := o.IsBusy(Period{Start: when.Start, End: when.End})
+		busy, _ := o.IsBusy(Period(when))
 		if !busy {
 			t.Fatalf("calendar %q should be busy at the committed span", cid)
 		}
@@ -76,7 +76,7 @@ func TestMatchCommitConflictCommitsNothing(t *testing.T) {
 	// CRITICAL: nothing placed — or-3 and anaesthetist must NOT have op bookings.
 	for _, cid := range []string{"or-3", "anaesthetist"} {
 		o, _ := s.ReadOccupancy(cid)
-		busy, _ := o.IsBusy(Period{Start: when.Start, End: when.End})
+		busy, _ := o.IsBusy(Period(when))
 		if busy {
 			t.Fatalf("calendar %q must be untouched after refused commit (partial write!)", cid)
 		}

@@ -75,7 +75,7 @@ func (m *Manager) assemble(tenantID uint16) (*tenantCal, error) {
 	// the derived occupancy matches the persisted bookings (index == rebuild).
 	// This makes a fresh process / first-touch correct without a separate warmup.
 	if err := idx.RebuildFrom(src); err != nil {
-		idx.Close()
+		_ = idx.Close()
 		return nil, err
 	}
 

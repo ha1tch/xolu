@@ -427,7 +427,7 @@ Returns a ZIP archive containing:
 See [JSON Schema & Adapted Tables](docs/JSON_SCHEMA.md) for the full reference on supported keywords, adapted table layout, REF fields, decimal types, and schema evolution.
 
 ```http
-GET /api/v1/schema              # List registered entity types
+GET /api/v1/schemas             # List registered entity types (v0.15.1)
 GET /api/v1/schema/{entity}     # Retrieve schema for one entity
 POST /api/v1/schema/{entity}    # Register or update schema; creates adapted table
 ```
@@ -813,6 +813,7 @@ Everything added after the 1.0 stability commitment lives under `/api/v2`, so th
 | `/api/v2/event/def` | Event definitions | Reactive definitions wiring subsystems to webhooks/actions |
 | `/api/v2/meta` | Entity metadata | Per-entity key/value sidecar with entity-scoped lifecycle (TTL) |
 | `/api/v2/gen` | Generators | Stateless and named value generators (UUID, sequence, token, timestamp, pick) |
+| `/api/v2/gen/seq` (GET) | Sequence listing | Enumerate the tenant's named sequences (v0.15.1) |
 | `/api/v2/seq` | Sequences | Convenience alias for `/api/v2/gen/seq` |
 
 ### Finite State Machines
@@ -1113,6 +1114,12 @@ For the full language reference including all supported syntax, predicates, func
 ---
 
 ## Authentication
+
+As of v0.15.2 the authentication middleware lives in `pkg/authmw` with its
+configuration subset in `pkg/authconfig`, importable by external binaries
+(the molu hub) without the full server config; the server wires it from
+`config.(*Config).AuthConfig()` at startup. `pkg/middleware` retains
+compatibility aliases. Behaviour is unchanged.
 
 ### JWT Authentication
 
@@ -1880,7 +1887,7 @@ curl http://localhost:8080/api/v1/users
 
 xolu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.15.0`.
+or API. The current version is `0.16.1`.
 
 ### Database Format Stability
 

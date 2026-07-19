@@ -32,13 +32,6 @@ func dayFloorNanos(t ot.Instant) int64 {
 	return (n / NsPerDay) * NsPerDay
 }
 
-// quantumOfDay returns the quantum index (0..287) of an instant within its UTC
-// day: q = seconds_into_day / 300, computed in nanoseconds.
-func quantumOfDay(t ot.Instant) int {
-	n := t.UnixNano()
-	intoDay := n - (n/NsPerDay)*NsPerDay
-	return int(intoDay / NsPerQuantum)
-}
 
 // --- Key codec (codec §3.2) ---
 //

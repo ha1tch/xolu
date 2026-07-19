@@ -6,7 +6,6 @@ package client
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"time"
 )
@@ -44,11 +43,6 @@ import (
 // and the caller decides whether to log them. Logging errors here would
 // double every failure in the caller's log stream.
 
-// discardLogger is what the client uses when WithLogger is not set. It
-// implements the slog.Logger interface but emits nothing, avoiding both
-// pollution of the process-wide default logger and nil-check pollution
-// through the request pipeline.
-var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // logRequest emits the debug-level record for a single completed attempt.
 // method is the HTTP method; urlPath is the URL's path (never the full URL

@@ -8,6 +8,53 @@ duplicate, each other. Never edit or delete existing entries.
 
 ---
 
+## T-34 — closed v0.16.1 (2026-07-18)
+
+Fix shipped in v0.16.1 (see that changelog entry); **verified on 8-core
+M1 under `-race`: five consecutive runs of
+`TestConcurrentTerminalTransition_ExactlyOneWins` pass** (previously
+2–4 of 32 racers won in every trial). The defect existed since the cal
+lifecycle shipped; the v0.14.11 race guard encoded the invariant
+correctly but was never executed until 2026-07-18 — a lesson now
+carried by T-22's remit: a shipped guard that never runs guards
+nothing. Single-core environments cannot reproduce or verify this
+class; the 1-CPU sandbox passed the failing code and the fixed code
+identically.
+
+### T-34. Terminal transitions are check-then-act, not atomic — multiple racers win
+
+Theme: cal · Priority: P1 · Status: ◐
+Blocks/after: molu Part 2 booking tools (which will drive concurrent confirms); the v0.16.0 stress blessing. Fix verification requires multi-core hardware — the 1-CPU sandbox cannot reproduce.
+
+- **Trigger:** first-ever local run of the stress-tagged
+  `TestConcurrentTerminalTransition_ExactlyOneWins` (shipped v0.14.11,
+  never executed in any recorded campaign — the T-15 record covers the
+  seal harness only). On an 8-core M1: 2–4 of 32 racers succeed in every
+  trial across all four transition kinds; `success + illegal = 32`
+  always; zero data races.
+- **Diagnosis:** `Lifecycle.transition` reads the booking, checks
+  `allowedTransition`, then calls `BookingSource.SetState` — an
+  unconditional overwrite. All goroutines that read the stale state pass
+  the check and return nil. The invariant the test encodes ("state graph
+  as natural mutex") was specified but never implemented.
+- **Fix shape:** compare-and-swap at the source: `SetState` gains the
+  expected from-state (`SetStateFrom(cal, id, from, to)`); SQLite:
+  `UPDATE … SET state=? WHERE … AND state=?` with RowsAffected==1, else
+  `ErrIllegalTransition`; Mem source: mutex-guarded check+set. Losers
+  return before touching the index; the winner does index work once.
+- **Consequence unfixed:** N callers each believe they performed the
+  terminal transition — compensation logic, notifications, and any
+  exactly-once accounting downstream silently multiply.
+- **Estimate:** half a day including both sources, call-site sweep, and
+  local re-verification on multi-core hardware.
+- **Fix shipped (v0.16.1):** `SetState` → `SetStateFrom(cal, id, from, to)`
+  across the Store interface and both sources; SQLite guarded UPDATE
+  (`AND state=?`) with RowsAffected==1, Mem check-and-set under the
+  source lock; losers get `ErrIllegalTransition` before any index work.
+  **Closure gated on** the race test passing on multi-core hardware.
+
+---
+
 ## T-02 — closed v0.16.0 (2026-07-18)
 
 The client roadmap completed: Stages 0–4 shipped v0.14.2–v0.14.6,

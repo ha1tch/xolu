@@ -68,7 +68,7 @@ func (s *IndexStore) recomputeDays(ord CalOrdinal, plane Plane, dayNanos map[int
 	}
 
 	batch := s.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	for d, bm := range acc {
 		key := EncodeKey(ord, plane, d)
 		if bm.IsZero() {
