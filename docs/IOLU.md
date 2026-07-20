@@ -1,6 +1,8 @@
 # iolu — interactive xolu
 
-`iolu` (interactive xolu) is the offline administrative CLI. It operates directly against
+`iolu` (interactive xolu) is the offline administrative CLI. For planned
+operational commands beyond the current set, see
+[the operations roadmap](proposals/iolu-operations-roadmap.md). It operates directly against
 the SQLite database file without starting the HTTP server. Use it to initialise
 new deployments, manage the tenant registry, and inspect database state.
 

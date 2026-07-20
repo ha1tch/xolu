@@ -53,6 +53,7 @@ item's Trigger line.
 | T-36 | Create the dormant-guards table (Part 3 §8 compliance) | tooling | P2 | ☐ | Gates the §6 release-gate check; pairs with T-22. |
 | T-37 | Adopt git history inside the checkpoint (retrofit v0.15.1–v0.16.1 boundaries) | tooling | P3 | ☐ | Decided in principle 2026-07-18; execute at next session start. |
 | T-38 | Trusted-proxy-aware client-IP extraction (RealIP replacement) | server | P3 | ☐ | Until then: client identity = TCP peer; behind a proxy, rate limits are per-proxy. |
+| T-41 | Cascade delete is a stub: flag changes response shape, not behaviour | server | P2 | ☐ | Referent discovery is a comment; graph is the natural engine. Gateway to full RI policies. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 
 ---
@@ -361,6 +362,30 @@ Blocks/after: No timeline committed; design in `SCHEMA_MODES_DESIGN.md`.
 ---
 
 
+
+### T-41. `CascadingDelete` is a stub — cascades to nothing
+
+Theme: server · Priority: P2 · Status: ☐
+Blocks/after: Nothing hard; stage 1 of docs/proposals/referential-integrity.md, which designs the full per-ref policy system this defect motivated.
+
+- **Finding:** `handlers.go` `cascadeDelete` seeds its work queue with the
+  target entity and never appends referents — the discovery step exists
+  only as a comment ("would require scanning all entities — simplified
+  here"). With `config.CascadingDelete` enabled, behaviour is identical
+  to a plain delete, but the response reports `cascaded_deletes` as if a
+  cascade ran. A flag that changes the response's claims but not the
+  behaviour misleads any operator who enables it.
+- **The right engine is already present:** the graph materialises ref
+  edges and is consulted (`removeGraph`) in the same code path. Referent
+  discovery is an inbound-edge query, O(edges), no entity scans — the
+  scan-based sketch in the comment predates or ignores this.
+- **Work required (minimum):** implement discovery via inbound graph
+  edges within the existing `MaxCascadeDeletions` budget, or remove the
+  flag and the response field until real semantics exist. (Maximum,
+  separate decision: schema-level per-ref delete policies —
+  cascade | restrict | nullify — with restrict as the safest default.)
+- **Estimate:** minimum fix ~half a day; the full policy design is its
+  own small proposal.
 
 ### T-38. Trusted-proxy-aware client-IP extraction
 
