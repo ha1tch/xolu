@@ -104,7 +104,7 @@ func (f *fieldBrowser) Format() string {
 	}
 
 	// Fall back to Meta("format") for custom formats (decimal, ref, etc.)
-	if meta, ok := f.getMeta("format"); ok {
+	if meta, ok := f.getSchemaMeta("format"); ok {
 		if s, ok := meta.(string); ok {
 			return s
 		}
@@ -121,17 +121,20 @@ func (f *fieldBrowser) EnumValues() []string {
 }
 
 func (f *fieldBrowser) Meta(key string) (interface{}, bool) {
-	return f.getMeta(key)
+	return f.getSchemaMeta(key)
 }
 
-// getMeta retrieves metadata from the schema's BaseSchema.
-func (f *fieldBrowser) getMeta(key string) (interface{}, bool) {
-	// All queryfy schema types embed BaseSchema which has GetMeta()
-	type metaGetter interface {
+// getSchemaMeta retrieves schema-definition metadata from queryfy's
+// BaseSchema (via its GetMeta method) — this is field-level schema
+// annotation like "format" or "decimalPrecision", NOT the /meta
+// per-subject sidecar (@C04c: meta is engine-inert; renamed here so
+// no reader mistakes the two).
+func (f *fieldBrowser) getSchemaMeta(key string) (interface{}, bool) {
+	type schemaMetaGetter interface {
 		GetMeta(string) (interface{}, bool)
 	}
-	if mg, ok := f.schema.(metaGetter); ok {
-		return mg.GetMeta(key)
+	if smg, ok := f.schema.(schemaMetaGetter); ok {
+		return smg.GetMeta(key)
 	}
 	return nil, false
 }

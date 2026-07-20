@@ -49,6 +49,10 @@ type PebbleStore struct {
 
 	metaPath string
 
+	// sysmaskWidth is the immutable system/user partition width, loaded
+	// once from meta.json at open and never mutated thereafter (@S).
+	sysmaskWidth SysmaskWidth
+
 	// Write performance configuration — per-timeline, persisted separately.
 	wcMu   sync.RWMutex
 	wc     map[TimelineID]TimelineWriteConfig
@@ -74,6 +78,11 @@ type storeMeta struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	Compression string           `json:"compression"`
 	Counts      map[string]int64 `json:"counts,omitempty"` // timeline_id (decimal string) -> count
+	// SysmaskWidth is the immutable system/user partition width (@S).
+	// Frozen at store creation; never rewritten. Absent (0) in stores
+	// created before this field existed, which is exactly the correct
+	// default: no system reservation.
+	SysmaskWidth SysmaskWidth `json:"sysmask_width,omitempty"`
 }
 
 // NewPebbleStore opens or creates a Pebble timeseries store in dir.
@@ -151,6 +160,7 @@ func NewPebbleStore(dir string, cfg StoreConfig, pcfg PebbleConfig, tenantName s
 		dc:                dc,
 		counters:          make(map[TimelineID]*atomic.Int64),
 		metaPath:          filepath.Join(dir, "meta.json"),
+		sysmaskWidth:      cfg.SysmaskWidth, // creation intent; overwritten by persisted value on reopen
 		wc:                make(map[TimelineID]TimelineWriteConfig),
 		wcPath:            filepath.Join(dir, "write_config.json"),
 		coalCh:            make(chan coalEntry, 8192),
@@ -207,7 +217,33 @@ func NewPebbleStoreFactory(pcfg PebbleConfig, dc *dynconfig.DynConfig) StoreFact
 
 // --- Timeline management ---
 
+// DefineTimeline is the user-facing timeline definition path (@S §8).
+// It refuses any id in the system region: under the store's sysmask
+// width, an id whose selector bits are non-zero is system-scope and
+// cannot be minted by a user request. With the default width 0 no id is
+// system-scope, so this guard is a no-op until an operator opts in.
+//
+// System timelines are created via DefineSystemTimeline, which is not
+// reachable through the tenant HTTP surface.
 func (s *PebbleStore) DefineTimeline(id TimelineID, cfg TimelineConfig) error {
+	if s.sysmaskWidth.IsSystem(id) {
+		return fmt.Errorf("timeseries: timeline ID 0x%08X is in the system region under sysmask width %d (%s)",
+			uint32(id), uint8(s.sysmaskWidth), xoluerr.ErrTSSystemScopeID)
+	}
+	return s.reg.define(id, cfg)
+}
+
+// defineSystemTimeline is the system-internal timeline definition path
+// (@S §8). It draws from the system region and is the only way to mint a
+// system id. It is deliberately unexported and not wired to the tenant
+// HTTP surface — platform components call it directly. It refuses ids
+// that are NOT system-scope (the symmetric guard), so the two paths
+// partition the id space between them with no overlap.
+func (s *PebbleStore) DefineSystemTimeline(id TimelineID, cfg TimelineConfig) error {
+	if !s.sysmaskWidth.IsSystem(id) {
+		return fmt.Errorf("timeseries: timeline ID 0x%08X is not in the system region under sysmask width %d (%s)",
+			uint32(id), uint8(s.sysmaskWidth), xoluerr.ErrTSSystemScopeID)
+	}
 	return s.reg.define(id, cfg)
 }
 
@@ -221,6 +257,12 @@ func (s *PebbleStore) Timeline(id TimelineID) (TimelineConfig, bool) {
 
 func (s *PebbleStore) Timelines() []TimelineID {
 	return s.reg.list()
+}
+
+// SysmaskWidth returns the store's immutable system/user partition width
+// (@S), loaded once from meta.json at open.
+func (s *PebbleStore) SysmaskWidth() SysmaskWidth {
+	return s.sysmaskWidth
 }
 
 // --- Write ---
@@ -1275,7 +1317,7 @@ type writeConfigDisk struct {
 }
 
 type writeConfigEntry struct {
-	ID     uint16 `json:"id"`
+	ID     uint32 `json:"id"`
 	NoSync bool   `json:"nosync"`
 }
 
@@ -1307,7 +1349,7 @@ func (s *PebbleStore) saveWriteConfig() error {
 	for id, cfg := range s.wc {
 		if cfg.NoSync {
 			disk.Timelines = append(disk.Timelines, writeConfigEntry{
-				ID:     uint16(id),
+				ID:     uint32(id),
 				NoSync: cfg.NoSync,
 			})
 		}
@@ -1634,9 +1676,13 @@ func (s *PebbleStore) decodeEntry(key, val []byte, dims uint8) (Event, error) {
 func (s *PebbleStore) loadMeta(compression string) error {
 	data, err := os.ReadFile(s.metaPath)
 	if os.IsNotExist(err) {
+		// First open: freeze the width from creation intent (s.sysmaskWidth,
+		// seeded from StoreConfig). This is the only moment the width is
+		// written from config; every subsequent open reads it back from disk.
 		meta := &storeMeta{
-			CreatedAt:   time.Now().UTC(),
-			Compression: compression,
+			CreatedAt:    time.Now().UTC(),
+			Compression:  compression,
+			SysmaskWidth: s.sysmaskWidth,
 		}
 		return s.writeMeta(meta)
 	}
@@ -1647,10 +1693,15 @@ func (s *PebbleStore) loadMeta(compression string) error {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return err
 	}
-	// Seed counters.
+	// The sysmask width is immutable; load it once. (Absent → 0 → no
+	// reservation, the correct default for pre-existing stores.)
+	s.sysmaskWidth = meta.SysmaskWidth
+	// Seed counters. id is a uint32 TimelineID (widened in wave 1); a
+	// uint16 scan target here would silently truncate any counter key
+	// above 65535.
 	s.countersMu.Lock()
 	for k, v := range meta.Counts {
-		var id uint16
+		var id uint32
 		if _, err := fmt.Sscanf(k, "%d", &id); err != nil {
 			continue
 		}
@@ -1671,8 +1722,9 @@ func (s *PebbleStore) flushMeta() error {
 	s.countersMu.RUnlock()
 
 	meta := &storeMeta{
-		Compression: "",
-		Counts:      counts,
+		Compression:  "",
+		Counts:       counts,
+		SysmaskWidth: s.sysmaskWidth, // preserve the immutable width across flush
 	}
 	return s.writeMeta(meta)
 }

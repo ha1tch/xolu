@@ -134,47 +134,141 @@ func TestCleanupExpired_RetainsActiveWindows(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// getClientIP
+// getClientIP — trusted-proxy-aware, T-38
+//
+// The pre-fix tests codified the very vulnerability T-38 exists to close:
+// they treated "X-Forwarded-For sets client IP unconditionally" as the
+// expected behaviour. Replaced with the correct trust regime.
 // ---------------------------------------------------------------------------
 
-func TestGetClientIP_XForwardedFor(t *testing.T) {
+// newTestLimiter builds a RateLimiter with a specific TrustedProxies spec
+// for isolated getClientIP testing.
+func newIPTestLimiter(trustedProxies string) *RateLimiter {
+	return &RateLimiter{
+		trustedProxies: parseTrustedProxies(trustedProxies),
+	}
+}
+
+// TestGetClientIP_NoTrustedProxies_HeadersIgnored — the default deployment:
+// no trusted proxies configured, so any X-Forwarded-For or X-Real-IP header
+// from an arbitrary peer is untrusted and must be ignored.
+func TestGetClientIP_NoTrustedProxies_HeadersIgnored(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "203.0.113.5:12345"
 	r.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
-	if got := getClientIP(r); got != "1.2.3.4" {
-		t.Errorf("XFF: want 1.2.3.4, got %q", got)
+	r.Header.Set("X-Real-IP", "9.9.9.9")
+	rl := newIPTestLimiter("")
+	if got := rl.getClientIP(r); got != "203.0.113.5" {
+		t.Errorf("headers must be ignored without trusted proxies: want 203.0.113.5, got %q", got)
 	}
 }
 
-func TestGetClientIP_XForwardedForSingle(t *testing.T) {
+// TestGetClientIP_UntrustedPeer_HeadersIgnored — even when *some* proxies
+// are configured, a peer not in the list has its XFF ignored.
+func TestGetClientIP_UntrustedPeer_HeadersIgnored(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("X-Forwarded-For", "9.9.9.9")
-	if got := getClientIP(r); got != "9.9.9.9" {
-		t.Errorf("XFF single: want 9.9.9.9, got %q", got)
+	r.RemoteAddr = "203.0.113.5:12345" // not in the trusted set
+	r.Header.Set("X-Forwarded-For", "attacker-forged-ip")
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "203.0.113.5" {
+		t.Errorf("untrusted peer must not be able to forge IP: want 203.0.113.5, got %q", got)
 	}
 }
 
-func TestGetClientIP_XRealIP(t *testing.T) {
+// TestGetClientIP_TrustedProxy_XFFHonoured — the intended flow: peer is a
+// configured proxy, XFF's rightmost non-trusted hop is honoured.
+func TestGetClientIP_TrustedProxy_XFFHonoured(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("X-Real-IP", "10.0.0.1")
-	if got := getClientIP(r); got != "10.0.0.1" {
-		t.Errorf("X-Real-IP: want 10.0.0.1, got %q", got)
+	r.RemoteAddr = "10.0.0.5:12345" // trusted
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "198.51.100.7" {
+		t.Errorf("trusted proxy XFF should be honoured: want 198.51.100.7, got %q", got)
 	}
 }
 
+// TestGetClientIP_TrustedChain_WalksPastTrusted — the client sent its
+// request through two trusted proxies; the algorithm walks past all
+// trusted hops (rightmost first) and returns the first non-trusted one.
+func TestGetClientIP_TrustedChain_WalksPastTrusted(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345"
+	// XFF format: client, proxy1, proxy2 (left-to-right appended)
+	r.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.9, 10.0.0.10")
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "198.51.100.7" {
+		t.Errorf("must walk past trusted hops: want 198.51.100.7, got %q", got)
+	}
+}
+
+// TestGetClientIP_AttackerPrependsForgedHop — attacker sends XFF starting
+// with a forged IP. Since the algorithm walks right-to-left past trusted
+// hops and stops at the first non-trusted hop, it correctly ignores what
+// the attacker prepended.
+func TestGetClientIP_AttackerPrependsForgedHop(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345"
+	// Attacker (192.0.2.66) prepends a forged 1.1.1.1 hop.
+	r.Header.Set("X-Forwarded-For", "1.1.1.1, 192.0.2.66")
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "192.0.2.66" {
+		t.Errorf("must ignore attacker-prepended forgery: want 192.0.2.66, got %q", got)
+	}
+}
+
+// TestGetClientIP_TrustedProxy_XRealIPFallback — no XFF, but a trusted
+// peer sets X-Real-IP.
+func TestGetClientIP_TrustedProxy_XRealIPFallback(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345"
+	r.Header.Set("X-Real-IP", "198.51.100.7")
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "198.51.100.7" {
+		t.Errorf("trusted X-Real-IP should be honoured: want 198.51.100.7, got %q", got)
+	}
+}
+
+// TestGetClientIP_TrustedProxy_NoHeaders — trusted peer sends no headers.
+// Fall back to the peer.
+func TestGetClientIP_TrustedProxy_NoHeaders(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345"
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "10.0.0.5" {
+		t.Errorf("no headers should fall back to peer: want 10.0.0.5, got %q", got)
+	}
+}
+
+// TestGetClientIP_RemoteAddr — the trivial case: no headers, no proxies.
 func TestGetClientIP_RemoteAddr(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "192.168.1.100:54321"
-	if got := getClientIP(r); got != "192.168.1.100" {
+	rl := newIPTestLimiter("")
+	if got := rl.getClientIP(r); got != "192.168.1.100" {
 		t.Errorf("RemoteAddr: want 192.168.1.100, got %q", got)
 	}
 }
 
+// TestGetClientIP_BareIP_TrustedProxy — CIDR spec supports bare IPs.
+func TestGetClientIP_BareIP_TrustedProxy(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345"
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	rl := newIPTestLimiter("10.0.0.5") // bare IP
+	if got := rl.getClientIP(r); got != "198.51.100.7" {
+		t.Errorf("bare-IP trust spec: want 198.51.100.7, got %q", got)
+	}
+}
+
+// TestGetClientIP_XFFTakesPrecedence — legacy name preserved but rewritten
+// for the correct trust regime: with a trusted peer, XFF beats X-Real-IP.
 func TestGetClientIP_XFFTakesPrecedence(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.5:12345" // trusted
 	r.Header.Set("X-Forwarded-For", "1.1.1.1")
 	r.Header.Set("X-Real-IP", "2.2.2.2")
-	r.RemoteAddr = "3.3.3.3:80"
-	if got := getClientIP(r); got != "1.1.1.1" {
+	rl := newIPTestLimiter("10.0.0.0/8")
+	if got := rl.getClientIP(r); got != "1.1.1.1" {
 		t.Errorf("precedence: want 1.1.1.1, got %q", got)
 	}
 }

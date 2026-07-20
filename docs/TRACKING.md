@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.16.2
-Last reviewed: 2026-07-19
+Version: 0.16.3
+Last reviewed: 2026-07-20
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -31,7 +31,6 @@ item's Trigger line.
 
 | ID | Summary | Theme | Pri | Status | Blocks / after |
 |----|---------|-------|-----|--------|----------------|
-| T-22 | Release-hygiene script (incl. tracking-consistency gate) | tooling | P2 | ☐ | Gates: the release-hygiene checks in `TRACKING_PRACTICES.md` §6, including register/RES… |
 | T-07 | Durable dispatch, at-least-once delivery | events | P3 | ☐ | Blocks: agentic reliance on events as source of truth (molu included). Overlaps: S16 (d… |
 | T-08 | Wire deferred event types | events | P3 | ☐ | Overlaps: S15 (additional trigger sources). Companion: T-20 could ship together. |
 | T-09 | Wire deferred event actions (`sulpher`, `fsm.walk`) | events | P3 | ☐ | Overlaps: S14 (`fsm.walk` action); `sulpher` action in the S13–S17 family. |
@@ -49,11 +48,7 @@ item's Trigger line.
 | T-06 | Schema modes (b) strict and (c) clone | storage-config | P5 | ☐ | No timeline committed; design in `SCHEMA_MODES_DESIGN.md`. |
 | T-33 | Partial `StoreConfig` in `loadTenantEntitiesFromStore` scoped store | storage-config | P5 | ☐ | Inert today (read-only path); fragile against future writes. |
 | T-16 | `cal` daypart rollup-prune performance validation | cal | P5 | ☐ | After: realistic occupancy distributions are available to measure against. |
-| T-35 | Investigate: Move's conflict-check → setSpan window (suspected T-34-class race) | cal | P2 | ☐ | Investigation; not proven. After T-34 verification. |
-| T-36 | Create the dormant-guards table (Part 3 §8 compliance) | tooling | P2 | ☐ | Gates the §6 release-gate check; pairs with T-22. |
-| T-37 | Adopt git history inside the checkpoint (retrofit v0.15.1–v0.16.1 boundaries) | tooling | P3 | ☐ | Decided in principle 2026-07-18; execute at next session start. |
-| T-38 | Trusted-proxy-aware client-IP extraction (RealIP replacement) | server | P3 | ☐ | Until then: client identity = TCP peer; behind a proxy, rate limits are per-proxy. |
-| T-41 | Cascade delete is a stub: flag changes response shape, not behaviour | server | P2 | ☐ | Referent discovery is a comment; graph is the natural engine. Gateway to full RI policies. |
+| T-42 | Dockerfile audit and refresh before wave-programme close | ops | P4 | ☐ | End-of-programme item so shipped images carry release-quality xolu, not interim wave states. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 
 ---
@@ -67,6 +62,18 @@ item's Trigger line.
 ---
 
 ## FSM read surface
+
+
+
+### T-42. Dockerfile audit and refresh (end-of-programme)
+
+Theme: ops · Priority: P4 · Status: ☐
+Blocks/after: Scheduled deliberately late — after most of the wave programme has landed, so the image ships the best available substrate rather than a mid-flight version.
+
+- **Trigger:** During v0.16.1 re-cut the Dockerfile was bumped `golang:1.22-alpine` → `golang:1.26-alpine` alongside the toolchain sync, but the image itself has not been rebuilt or exercised since. Wave-era changes (uint32 tenant IDs, chronicle extraction, bal, dxp, iolu operations) will each touch things a Docker build could regress on quietly.
+- **Work required:** rebuild the image against latest main; smoke-test it (`docker run xolu` → binaries respond on `/health`, `/version`); confirm the base image is still current stable Go; align any CMD/ENTRYPOINT changes wave work introduces.
+- **Timing:** after wave 5 (dxp) or wave 6 (iolu), whichever settles the substrate for a release deemed "shippable to a customer."
+- **Estimate:** ~half a day if nothing has broken; a day if wave changes have reshaped configuration surface.
 
 ### T-27. Guard-evaluated `GetMachineTransitions` (server-side option)
 
@@ -363,73 +370,9 @@ Blocks/after: No timeline committed; design in `SCHEMA_MODES_DESIGN.md`.
 
 
 
-### T-41. `CascadingDelete` is a stub — cascades to nothing
 
-Theme: server · Priority: P2 · Status: ☐
-Blocks/after: Nothing hard; stage 1 of docs/proposals/referential-integrity.md, which designs the full per-ref policy system this defect motivated.
 
-- **Finding:** `handlers.go` `cascadeDelete` seeds its work queue with the
-  target entity and never appends referents — the discovery step exists
-  only as a comment ("would require scanning all entities — simplified
-  here"). With `config.CascadingDelete` enabled, behaviour is identical
-  to a plain delete, but the response reports `cascaded_deletes` as if a
-  cascade ran. A flag that changes the response's claims but not the
-  behaviour misleads any operator who enables it.
-- **The right engine is already present:** the graph materialises ref
-  edges and is consulted (`removeGraph`) in the same code path. Referent
-  discovery is an inbound-edge query, O(edges), no entity scans — the
-  scan-based sketch in the comment predates or ignores this.
-- **Work required (minimum):** implement discovery via inbound graph
-  edges within the existing `MaxCascadeDeletions` budget, or remove the
-  flag and the response field until real semantics exist. (Maximum,
-  separate decision: schema-level per-ref delete policies —
-  cascade | restrict | nullify — with restrict as the safest default.)
-- **Estimate:** minimum fix ~half a day; the full policy design is its
-  own small proposal.
 
-### T-38. Trusted-proxy-aware client-IP extraction
-
-Theme: server · Priority: P3 · Status: ☐
-Blocks/after: Nothing; deployment-quality item. Born from the 0.16.1 re-cut's removal of `chi/middleware.RealIP` (deprecated upstream citing GHSA-3fxj-6jh8-hvhx: it trusts X-Forwarded-For/X-Real-IP unconditionally, letting any client spoof its identity to the rate limiter and logs).
-
-- **Current behaviour (safe default):** client identity is the TCP peer
-  (`r.RemoteAddr` untouched). Deployed behind a reverse proxy, per-client
-  rate limits coarsen to per-proxy and logs show the proxy address.
-- **Work required:** a small middleware taking a configured trusted-proxy
-  CIDR list (e.g. `XOLU_TRUSTED_PROXIES`); only when the direct peer is
-  in the list, honour the rightmost non-trusted X-Forwarded-For hop.
-  Config plumbing through pkg/authconfig is NOT needed — this is
-  transport identity, not auth; it belongs beside the rate limiter.
-- **Estimate:** half a day including tests for the spoofing cases.
-
-### T-36. Create the dormant-guards table
-
-Theme: tooling · Priority: P2 · Status: ☐
-Blocks/after: Required by working-agreement Part 3 §8 (2026-07-18); the §6 release gate cannot check guard exercise until the table exists. Pairs naturally with T-22.
-
-- **Work:** enumerate every dormant guard — `stress`-tagged tests (incl.
-  `TestConcurrentTerminalTransition_ExactlyOneWins`, `TestSealStressLocal`),
-  the `integration`-tagged client suite, fuzz targets from the D-003/4/7/8
-  family — into a table in this register or KNOWN_ISSUES: name, gating
-  condition, hardware needs, canonical invocation, last-exercised date +
-  environment. Seed last-exercised from today's recorded runs (M1, 8 cores,
-  -race, 2026-07-18).
-- **Estimate:** an hour.
-
-### T-37. Git history inside the checkpoint
-
-Theme: tooling · Priority: P3 · Status: ☐
-Blocks/after: Decided in principle 2026-07-18 (zip-with-.git hybrid; bundle optional for incremental sync). Execute at the start of the next working session while release boundaries remain reconstructible from CHANGELOG.
-
-- **Work:** `git init` in the checkpoint; retrofit commits at the
-  v0.15.0-import, v0.15.1, v0.15.2, v0.15.3, v0.16.0, v0.16.1 boundaries
-  (content reconstructible from CHANGELOG entries); tag each; adopt
-  commit-per-release thereafter; checkpoint zips ship with `.git` included.
-- **Not included (separate decision):** GitHub Actions as dormant-guard
-  executor — proposed, undecided; would close the loop between T-36's
-  table and mechanical execution, but needs Horacio's call on repo
-  visibility and CI wiring.
-- **Estimate:** half an hour for the retrofit.
 
 ### T-33. Per-tenant scoped store built with partial `StoreConfig`
 
@@ -458,25 +401,6 @@ Blocks/after: Nothing; hardening. Found during M4b integration-suite work (v0.16
 
 ## cal
 
-### T-35. Investigate: Move's conflict-check window (suspected T-34-class race)
-
-Theme: cal · Priority: P2 · Status: ☐
-Blocks/after: Investigation only; suspected, not proven. Run after T-34's verification, since its outcome shapes the fix pattern if confirmed.
-
-- **Trigger:** T-34's diagnosis. `Move` is structurally the same
-  check-then-act: conflict/feasibility check, then `setSpan` — an
-  unconditional span overwrite guarded only by existence. Two concurrent
-  Moves of different bookings into the same window could both pass the
-  check and both land, double-booking.
-- **Caveats:** the seal stress and `TestMoveConflictLeavesUntouched`
-  pass, but neither races two Moves onto one window; absence of a test
-  is not absence of a race. May also be mitigated by serialisation
-  further up — that is what the investigation determines.
-- **Work required:** write the racing test (T-34's harness pattern,
-  two bookings, one free window, N racers each); if it fails, apply the
-  CAS pattern to `setSpan` (guard on expected span) or serialise Move
-  per-calendar.
-- **Estimate:** half a day for the test; fix cost separately scoped.
 
 
 ### T-16. `cal` daypart rollup-prune performance validation
@@ -503,19 +427,6 @@ Blocks/after: —
 - Does not catch `time.Now()` passed to unlisted functions that store their argument.
 - Requires an SSA-based `go/analysis` pass for full coverage.
 
-### T-22. Release-hygiene test for stale version strings
-
-Theme: tooling · Priority: P2 · Status: ☐
-Blocks/after: Gates: the release-hygiene checks in `TRACKING_PRACTICES.md` §6, including register/RESOLVED and theme/field–table consistency.
-
-- **Trigger:** during the v0.14.1 T-01 rename release, `pkg/errors/errors_test.go` was found to assert hardcoded integer offsets (`9` for error-code length, `s[:4]` for prefix, `s[6:]` for numeric portion) that assumed the old `OLU-` prefix length. All three had to be updated by hand after the rename. Same class of hardcoded assumption caused four version-string updates in tsqlparser during the v0.6.1 release.
-- **Work required:**
-  - Add a `scripts/check_release_hygiene.py` that scans the tree for:
-    - Test files carrying a version string that doesn't match `VERSION` or `pkg/version/version.txt`.
-    - Integer literals in test files adjacent to `error-code`, `prefix`, `length`, or similar terms that look like structural assumptions.
-    - Hardcoded release dates in CHANGELOG entries that predate the file's last-modified time.
-  - Wire into `release.sh` as an optional gate (`--strict-hygiene`).
-- **Impact:** small utility, high value on rename-class changes. Would have flagged both the errors_test and the version_test issues before the release scripts ran.
 
 ### T-23. Add `syncver.sh` and `release.sh` to tsqlparser
 

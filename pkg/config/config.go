@@ -149,6 +149,12 @@ type Config struct {
 	RateLimitRate    int // Requests per window
 	RateLimitWindow  int // Window in seconds
 	RateLimitByIP    bool
+
+	// TrustedProxies is a comma-separated list of CIDR ranges whose
+	// requests are permitted to override the observed peer IP via
+	// X-Forwarded-For headers. When empty (default), header-based IP
+	// spoofing is refused and the TCP peer is authoritative. See T-38.
+	TrustedProxies string `json:"trusted_proxies"`
 	RateLimitByKey   bool // Rate limit by API key or JWT subject
 
 	// Metrics
@@ -551,7 +557,10 @@ func LoadFromEnv(cfg *Config) {
 	// XOLU_ADDR is a convenience alias for setting host and port together
 	// as a single "host:port" value. XOLU_HOST and XOLU_PORT take precedence
 	// if set, so existing deployments are unaffected.
-	if val := os.Getenv("XOLU_ADDR"); val != "" {
+	if val := os.Getenv("XOLU_TRUSTED_PROXIES"); val != "" {
+		cfg.TrustedProxies = val
+	}
+		if val := os.Getenv("XOLU_ADDR"); val != "" {
 		if h, p, err := net.SplitHostPort(val); err == nil {
 			cfg.Host = h
 			if port, err := strconv.Atoi(p); err == nil {

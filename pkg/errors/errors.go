@@ -303,6 +303,33 @@ const (
 	// ErrTSRollupDestInUse is returned when the destination timeline is
 	// already the target of another rollup definition (single-parent rule).
 	ErrTSRollupDestInUse Code = "XOLU-TS026"
+	// ErrTSSystemScopeID: a user-facing define named an id in the system
+	// region under the store's sysmask width (@S §8). System ids are
+	// mintable only via the system-internal path.
+	ErrTSSystemScopeID Code = "XOLU-TS027"
+)
+
+const (
+	// --- Referential integrity (@R) ---
+
+	// ErrRIRestrictViolation is returned when a DELETE is refused because
+	// live referrers under a restrict on_delete policy name the target
+	// (@R02.2). HTTP 409. The SQL ON DELETE RESTRICT behaviour.
+	ErrRIRestrictViolation Code = "XOLU-RI001"
+
+	// ErrRICascadeBudget is returned when a cascade delete would exceed
+	// the MaxCascadeDeletions budget; the whole operation fails before
+	// anything is deleted (@R02.2). Stage 3. HTTP 409.
+	ErrRICascadeBudget Code = "XOLU-RI002"
+
+	// ErrRIValidateTarget is returned when a write-time validate check
+	// finds the referenced target missing (@R02.3). Stage 4. HTTP 400.
+	ErrRIValidateTarget Code = "XOLU-RI003"
+
+	// ErrRISchemaXRef is returned when an entity's schema carries a
+	// malformed x-ref annotation (@R02.1). HTTP 400 at schema-load or
+	// registry-build time.
+	ErrRISchemaXRef Code = "XOLU-RI004"
 )
 
 const (

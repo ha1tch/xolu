@@ -4,7 +4,56 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.16.3] - 2026-07-20 (per-primitive ID widening + sysmask mechanism)
+
+Wave 1 of the substrate programme: the per-tenant primitive ID space
+grows from 16 to 32 bits, and a system/user partition primitive is
+introduced. Pre-production format change — see the note below.
+
+### Changed
+
+- **`/ts` `TimelineID` widened uint16 → uint32.** A single tenant can
+  now hold far more than 65 535 timelines — the ceiling mid-market
+  workloads reach (retail SKUs, hotel rooms, sensor arrays) long before
+  a machine reaches its tenant count. The Pebble key codec's TimelineID
+  prefix widens from 2 to 4 bytes accordingly. **On-disk format change:**
+  a ts store written by an earlier build is not key-compatible with this
+  one. This lands deliberately before any production data exists, so no
+  migration is owed; a future store-generation change is handled offline
+  by transvasing (see the sysmask proposal).
+- Registry and write-config entry IDs widened to match; a latent uint16
+  truncation in counter loading (would have clipped counter keys above
+  65 535) fixed in the same pass.
+
+### Added
+
+- **Sysmask: a system/user partition of the 32-bit primitive ID space.**
+  An immutable `uint8` *width* (0–32, default 0 = no reservation) frozen
+  at store creation splits the id space: ids whose top `width` bits are
+  zero are user-space, non-zero are system-space. One branchless
+  predicate (`SysmaskWidth.IsSystem`); width stored in ts store metadata,
+  persisted-wins on reopen so an id's class can never drift. The
+  substrate provides only the partition — meaning inside the system
+  region is deferred to later convention. Design:
+  `docs/proposals/system-bookkeeping-scope.md`.
+- `/cal` audited compliant (already uint32-native); `/bal` records
+  uint32 as its pre-implementation default.
+
+### Notes
+
+- Enforcement (the two allocation paths that make the sysmask partition
+  refuse rather than merely describe) and the `iolu` width display are
+  tracked as T-43 and T-44; the mechanism ships here, enforcement
+  follows.
+- Tenant IDs deliberately remain uint16: a server hits throughput and
+  storage ceilings long before 65 k tenants, and the answer if it ever
+  did would be a second xolu, not a wider id.
+
+## [0.16.2] - 2026-07-19 (multi-core fixes: T-39, T-40)
+
+The GitHub CI runner — the first habitual multi-core executor of the full
+suite — surfaced two defects in its first hours of service. Both fixed;
+closure of both register items gated on a multi-core green run.
 
 ### Changed
 
@@ -21,12 +70,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   plus SHA256SUMS to the GitHub release. `cross-build.yml` verifies the
   same matrix on every push. The matrix is bounded by modernc.org/libc
   platform support (notably: no netbsd/arm64, no dragonfly).
-
-## [0.16.2] - 2026-07-19 (multi-core fixes: T-39, T-40)
-
-The GitHub CI runner — the first habitual multi-core executor of the full
-suite — surfaced two defects in its first hours of service. Both fixed;
-closure of both register items gated on a multi-core green run.
 
 ### Fixed
 

@@ -1,9 +1,15 @@
 # Referential Integrity — Prospective Design (proposal)
 
-Updated: 2026-07-19
-Status: proposal — not scheduled. T-41 (register) records the defect that
-motivated this document; its minimum fix is stage one below. No other
-register items exist until execution is decided.
+Updated: 2026-07-20
+Status: scheduled — wave 2 (@P). T-41 (register) recorded the defect that
+motivated this document; its minimum fix shipped as stage one. Stages 2+
+are now demanded: incoming development teams staffed with junior
+developers whose instincts come from SQL / traditional ER design will
+onboard faster and make fewer reference-handling mistakes if xolu
+behaves, at least partially, like SQL referential integrity. Restrict
+(stage 2) delivers exactly the `ON DELETE RESTRICT` behaviour that
+instinct expects, and is the safety half of RI. Stage 2 is scheduled;
+stages 3–5 follow as that consumer's needs extend.
 
 ## 1. Problem
 
@@ -282,12 +288,15 @@ stage 2's design answers them rather than discovers them:
 
 ## 8. Staging
 
-1. **T-41 minimum fix** (independent, ~half a day): graph-backed
-   discovery behind the existing flag, or flag removal. Ships whenever
-   convenient; unblocks nothing and lies to no one.
-2. **Schema annotation + restrict** (~2 days): parsing, the enforcement
-   read, XOLU-RI001/004, tests. Restrict alone already delivers the
-   safety half of RI.
+1. **T-41 minimum fix** — ✓ **done** (shipped): graph-backed discovery
+   behind the existing flag.
+2. **Schema annotation + restrict** — ✓ **done** (wave 2, 2026-07-20):
+   x-ref parsing (`pkg/refintegrity`), the referrer registry, delete-time
+   restrict enforcement in `handleDelete`, XOLU-RI001/004, HTTP
+   integration tests, and the G-12 race harness. Restrict delivers the
+   safety half of RI. **Known limitation:** the enforcement read and the
+   delete are separate operations, so the @R §5 check-then-act window is
+   open until stage 3 (recorded in KNOWN_ISSUES; G-12 measures it).
 3. **Cascade + nullify** (~2 days): transactional multi-delete,
    budget semantics, response truthfulness, fault-injection tests.
 4. **Write-time validation** (~1 day): batched existence checks,

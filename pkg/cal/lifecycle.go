@@ -5,6 +5,7 @@
 package cal
 
 import (
+	"sync"
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
@@ -160,11 +161,43 @@ type Store interface {
 type Lifecycle struct {
 	src   Store
 	index *IndexStore
+
+	// moveMu serialises Move per calendar. Move is check-then-act
+	// (destinationConflicts → setSpan) over shared calendar occupancy;
+	// two concurrent Moves of different bookings into one free window
+	// both pass the check and both land (T-35). Per-calendar
+	// serialisation is preferred over CAS-on-span because the shared
+	// state the race contends over is the calendar's occupancy, not
+	// any single booking's span. Contention is naturally bounded (Moves
+	// are cross-plane in effect and rare compared with reads), and the
+	// serialisation is per-calendar so distinct calendars remain parallel.
+	moveLoks   map[string]*sync.Mutex
+	moveLoksMu sync.Mutex
 }
 
 // NewLifecycle binds a source and an index.
 func NewLifecycle(src Store, index *IndexStore) *Lifecycle {
-	return &Lifecycle{src: src, index: index}
+	return &Lifecycle{
+		src:      src,
+		index:    index,
+		moveLoks: make(map[string]*sync.Mutex),
+	}
+}
+
+// moveLockFor returns the per-calendar mutex used to serialise Move
+// against races on shared occupancy (T-35). Distinct calendars remain
+// parallel; only concurrent Moves *within* one calendar are
+// serialised, and only within Move itself — reads and other operations
+// are unaffected.
+func (l *Lifecycle) moveLockFor(calendarID string) *sync.Mutex {
+	l.moveLoksMu.Lock()
+	defer l.moveLoksMu.Unlock()
+	m, ok := l.moveLoks[calendarID]
+	if !ok {
+		m = &sync.Mutex{}
+		l.moveLoks[calendarID] = m
+	}
+	return m
 }
 
 // allowedTransition reports whether from -> to is a legal A9 transition.
@@ -312,6 +345,13 @@ type Conflict struct {
 // (Dependency tracking is not in v1's record, so StrandedDependents is always
 // empty here; the field exists so the contract is visible and stable.)
 func (l *Lifecycle) Move(calendarID, bookingID string, to Span) (MoveResult, error) {
+	// T-35: Move is check-then-act over shared calendar occupancy.
+	// Serialise per-calendar so exactly one Move at a time can pass
+	// destinationConflicts and commit setSpan, closing the window
+	// where two concurrent Moves into one free target both land.
+	l.moveLockFor(calendarID).Lock()
+	defer l.moveLockFor(calendarID).Unlock()
+
 	b, ok := l.src.booking(calendarID, bookingID)
 	if !ok {
 		return MoveResult{}, fmt.Errorf("cal: Move: %w: %q/%q", ErrUnknownBooking, calendarID, bookingID)
@@ -341,8 +381,7 @@ func (l *Lifecycle) Move(calendarID, bookingID string, to Span) (MoveResult, err
 		return MoveResult{Moved: false, Conflicts: conflicts}, nil
 	}
 
-	// Commit the move: update the record's span, then scoped-recompute both the
-	// old days (remove old contribution) and add the new contribution.
+	// Commit the move.
 	oldSpan := b.Span
 	if err := l.src.setSpan(calendarID, bookingID, to); err != nil {
 		return MoveResult{}, err

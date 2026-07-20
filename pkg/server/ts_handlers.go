@@ -295,7 +295,7 @@ func classifyTSError(err error) string {
 		xoluerr.ErrTSInvalidInterval, xoluerr.ErrTSRangeTooWide, xoluerr.ErrTSLimitExceeded,
 		xoluerr.ErrTSInternal, xoluerr.ErrTSRetentionFailed, xoluerr.ErrTSProvisionFailed,
 		xoluerr.ErrTSDimsImmutable, xoluerr.ErrTSNaNValue, xoluerr.ErrTSReservedID,
-		xoluerr.ErrTSBucketLimit,
+		xoluerr.ErrTSBucketLimit, xoluerr.ErrTSSystemScopeID,
 	} {
 		if strings.Contains(msg, string(code)) {
 			return string(code)

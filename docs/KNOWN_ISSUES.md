@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.2
-Last reviewed: 2026-07-19
+Version: 0.16.3
+Last reviewed: 2026-07-20
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
@@ -129,3 +129,126 @@ that enforcement, recorded so a passing build is read honestly.
   meta tables. This realises the GATE-3 "tenancy follows xolu config" decision: the
   tenant_id column discriminates in shared-file mode and is a constant 0 in
   per-file mode, the same as every other v2 table.
+
+
+## Referential integrity — recorded decisions and stage boundaries
+
+- **Restrict check-then-act window (recorded 2026-07-20, wave 2 stage 2).**
+  Stage-2 restrict enforcement reads inbound edges (via the graph) and
+  then issues the delete (via the store) as **two separate operations**,
+  not one transaction. @R §5 requires the enforcement read to run inside
+  the delete's transaction for the single-writer property to serialise a
+  delete against a concurrent referrer-create; stage 2 does not yet do
+  this, so a check-then-act window is **open by design** at this stage.
+  Under true multi-core parallelism a referrer created in that window can
+  leave a dangling reference. This is a known, bounded limitation of the
+  safety half shipping first — restrict correctly refuses in the
+  sequential and common cases, which is what the initial consumer (junior
+  dev teams onboarding from SQL) needs, while the concurrency-tight
+  version follows. **Fix path:** stage 3 brings transactional edge-table
+  enforcement and the @R05a composite-FK pushdown, which close the window
+  database-natively. **Guard:** G-12 (dormant-guards table) measures the
+  window now and converts to an assertion when stage 3 closes it.
+
+- **CascadingDelete flag coexistence (recorded 2026-07-20).** The legacy
+  `CascadingDelete` config flag and stage-2 restrict enforcement coexist
+  without conflict: restrict is checked first (a restrict-referrer blocks
+  the delete with XOLU-RI001 regardless of the flag), and only if no
+  restrict-referrer exists does the flag's cascade-or-plain-delete path
+  run. The flag is **not** retired at stage 2 — @R02.4 retires it only
+  after stage 3 replaces its coarse binary (cascade-all / restrict-all)
+  with per-x-ref policy. Until then it remains the mechanism for cascade
+  behaviour, now gated behind restrict.
+
+
+## Dormant guards — verification records
+
+Per Part 3 §8 of the working agreement: every verification that does not
+run in the default test invocation is registered here, with its gating
+condition and last-exercised environment. A shipped guard that never
+runs guards nothing; the release gate refuses unexercised guards, or
+records the skip explicitly.
+
+Convention: **Last exercised** is `YYYY-MM-DD env:<where>` — env values
+`sandbox` (single-core Linux, this project's default CI runner class),
+`m1` (Horacio's Apple M1, 8-core), `gh-runner` (GitHub Actions
+`ubuntu-latest`, multi-core). Race-class tests that only manifest
+under true parallelism require `m1` or `gh-runner`.
+
+### G-01. cal seal stress (`pkg/cal/seal_stress_local_test.go`)
+
+- **Gate:** build tag `stress`; env `XOLU_TEST_SEAL_STRESS_*` (six knobs — trials, workers, bookings, ops-per-worker, calendars, days).
+- **Hardware:** multi-core essential — the T-34 defect class this guards only manifests under true parallelism.
+- **Invocation:** `go test -tags stress ./pkg/cal/ -run TestSealFrontier_Stress -v` (adjust env for scale).
+- **Last exercised:** 2026-07-18 env:m1 — 194.6 s stress tier + 800 k extended-scale ops at 5.9–6.3 k ops/s. Zero races.
+
+### G-02. Client integration suite (`pkg/client/integration_test.go`)
+
+- **Gate:** build tag `integration`.
+- **Hardware:** any; boots an in-process server, no external services.
+- **Invocation:** `go test -tags integration ./pkg/client/ -count=1`.
+- **Last exercised:** 2026-07-19 env:sandbox — full suite green.
+
+### G-03. Fuzz targets
+
+Injection-class property tests written during the adversarial security
+pass; run as native Go fuzz targets. Not race-shaped — each is a
+correctness envelope over parser/validator input space.
+
+| ID | Target | File | Invocation |
+|---|---|---|---|
+| G-03a | JSON tokeniser | `pkg/jsonic/fuzz_tokeniser_test.go` | `go test -run=^$ -fuzz=FuzzTokenise -fuzztime=60s ./pkg/jsonic/` |
+| G-03b | OQL field-name validator | `pkg/oql/fuzz_validatefield_test.go` | `go test -run=^$ -fuzz=FuzzValidateFieldName -fuzztime=60s ./pkg/oql/` |
+| G-03c | Blob SHA computation | `pkg/blob/fuzz_sha_test.go` | `go test -run=^$ -fuzz=FuzzBlobSHA -fuzztime=60s ./pkg/blob/` |
+| G-03d | JWT parse+validate | `pkg/authmw/fuzz_jwt_test.go` | `go test -run=^$ -fuzz=FuzzParseAndValidateJWT -fuzztime=60s ./pkg/authmw/` |
+| G-03e | Scalar functions | `pkg/qs/fuzz_scalar_test.go` | `go test -run=^$ -fuzz=FuzzScalarFunctions -fuzztime=60s ./pkg/qs/` |
+| G-03f | FSM eval guard | `pkg/fsm/eval/fuzz_eval_test.go` | `go test -run=^$ -fuzz=FuzzEvalGuard -fuzztime=60s ./pkg/fsm/eval/` |
+
+- **Last exercised (all G-03x):** during the v0.9.7-era adversarial audit; not re-exercised since. **Overdue for a session.**
+
+### G-11. cal Move race harness (`pkg/cal/move_race_test.go`)
+
+- **Gate:** none; runs by default. But like the T-34 confirm race, it only *fires* under multi-core — single-core sandbox runs are always green regardless of correctness.
+- **Hardware:** multi-core essential; the T-35 defect class only manifests under true parallelism.
+- **Invocation:** `GOMAXPROCS=8 go test ./pkg/cal/ -run TestConcurrentMove -count=20 -race`.
+- **Last exercised (pre-fix reproduction):** 2026-07-19 — T-35 reproduced under `-race`, single-CPU host, 2 winners into one window. Sufficient to confirm the defect exists.
+- **Last exercised (post-fix, real silicon):** 2026-07-20 env:m1 `GOMAXPROCS=8 -race -count=20` — 10.8 s, green. T-35 fully verified.
+
+### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
+
+- **Gate:** none; runs by default in DIAGNOSTIC mode. **This guard's invariant is not yet implemented** — stage-2 restrict enforcement reads inbound edges and deletes in separate operations, so the check-then-act window @R §5 identifies is OPEN by design until stage 3. The harness therefore *measures* the window (logs how many trials leave a dangling reference) rather than asserting it closed.
+- **Hardware:** multi-core essential; the window is a logic race between a delete's enforcement read and a concurrent referrer create, and only manifests under true parallelism. A single-core pass is not evidence either way.
+- **Invocation:** `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
+- **Last exercised:** 2026-07-20 env:sandbox (single-CPU) — builds and runs, 0/8 dangling (single-core cannot open the window; not evidence). **Owed:** a real-silicon multi-core run to characterise the window's actual width under load, handed to the operator.
+- **Conversion:** when stage 3 closes the window (transactional edge-table enforcement / composite-FK pushdown, @R05a), flip the diagnostic `t.Logf` to `if dangling > 0 { t.Fatalf(...) }` so the guard asserts the invariant it currently only measures.
+
+### G-04. Full suite with `-race` on multi-core
+
+- **Gate:** none in principle; every test is race-safe, but a full multi-core -race run is not the default because of runtime cost.
+- **Hardware:** multi-core essential — single-core Linux (sandbox default) cannot manifest logic races.
+- **Invocation:** `go test -race ./... -count=1 -v`.
+- **Last exercised:** 2026-07-19 env:gh-runner — surfaced T-39 (blob usage) and T-40 (@SEQ/@GEN global). Both closed same day, verified by two green runs. Best-in-class conscience for this class of defect.
+
+### G-05. Full 16-target cross-build matrix
+
+- **Gate:** every push (`cross-build.yml`) exercises this; strictly speaking a CI check rather than a dormant guard, but recorded here for completeness of the matrix's health record.
+- **Hardware:** `gh-runner` cross-compiles all targets from Linux, no per-OS pool.
+- **Invocation:** on GitHub push; locally, `for t in <matrix>; do GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 go build ./cmd/{xolu,iolu,xotogen}; done`.
+- **Last exercised:** 2026-07-19 env:gh-runner — 15 targets green (windows/386 removed per operator decision; empirical failure, no i386 Windows server use case).
+
+## Guards owed by future work
+
+Per each proposal's testing obligations (@P0 governing references),
+the following guards are **specified** and will be **registered here in
+the sessions they are written**, per Part 3 §8's rule that
+specification and registration are one act:
+
+- **G-06 bal near-floor race harness** — owed by @B06; wave 4.
+- **G-07 RI restrict race** — owed by @R07; wave 2.
+- **G-08 dxp outcome-uniqueness race** — owed by @D11; wave 5.
+- **G-09 dxp crash-recovery fault injection** — owed by @D11; wave 5.
+- **G-10 dxp degradation-equivalence** — owed by @D06; wave 5.
+
+None of these tests exists yet. They are registered as owed so the
+release gate can refuse to promote a version whose owning wave has
+shipped without them.

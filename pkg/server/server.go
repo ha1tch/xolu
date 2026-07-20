@@ -37,6 +37,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/storage"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/sulpher"
+	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/validation"
@@ -59,6 +60,7 @@ type Server struct {
 	cache             cache.Cache
 	graph             graph.Graph
 	validator         validation.Validator
+	riRegistry        *refintegrity.Registry // referential-integrity referrer map (@R); nil-safe when no x-refs
 	sulpherJobs       *sulpher.JobManager
 	tenantSulpherJobs sync.Map // uint16 -> *sulpher.JobManager; lazily initialised
 	oqlJobs           *oql.JobManager
@@ -511,12 +513,21 @@ func New(
 		logger:         logger,
 		router:         chi.NewRouter(),
 		tenantRegistry: tenant.NewRegistry(),
+		riRegistry:     refintegrity.NewRegistry(),
 	}
 
 	// Initialize rate limiter if enabled
 	if cfg.RateLimitEnabled {
 		s.rateLimiter = xoluMiddleware.NewRateLimiter(cfg)
 	}
+
+	// Build the referential-integrity registry from loaded schemas (@R,
+	// wave 2 stage 2). A malformed x-ref is logged and that entity's
+	// refs are skipped rather than aborting server start — the operator
+	// gets a clear warning and an unenforced ref, which is safer at boot
+	// than a server that won't start. Registry build is also re-runnable
+	// as schemas change (see rebuildRIRegistry).
+	s.rebuildRIRegistry()
 
 	// Initialize metrics if enabled
 	if cfg.MetricsEnabled {
@@ -740,11 +751,12 @@ func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
 	// middleware.RealIP deliberately NOT used: it rewrites r.RemoteAddr from
 	// X-Forwarded-For / X-Real-IP without any notion of trusted proxies,
-	// letting any client spoof its identity to the rate limiter and logs
-	// (chi deprecated it citing GHSA-3fxj-6jh8-hvhx and friends). Client
-	// identity is the TCP peer; behind a reverse proxy, per-client rate
-	// limits coarsen to per-proxy until configurable trusted-proxy
-	// extraction ships (see docs/TRACKING.md T-38).
+	// letting any client spoof its identity (chi deprecated it citing
+	// GHSA-3fxj-6jh8-hvhx and friends). Instead, trusted-proxy-aware IP
+	// extraction lives in the rate limiter itself (pkg/middleware,
+	// getClientIP method), gated by the XOLU_TRUSTED_PROXIES config —
+	// the peer is authoritative unless it is in the configured trusted
+	// CIDR set. See T-38 in RESOLVED.md.
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	reqTimeout := 60

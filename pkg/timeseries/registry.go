@@ -19,7 +19,7 @@ const registryFile = "registry.json"
 
 // registryEntry is the on-disk representation of a timeline's config.
 type registryEntry struct {
-	ID            uint16    `json:"id"`
+	ID            uint32    `json:"id"`
 	Name          string    `json:"name,omitempty"`
 	Dims          uint8     `json:"dims"`
 	RetentionDays int       `json:"retention_days"`
@@ -94,7 +94,7 @@ func (r *registry) save() error {
 	}
 	for id, cfg := range r.timelines {
 		disk.Timelines = append(disk.Timelines, registryEntry{
-			ID:            uint16(id),
+			ID:            uint32(id),
 			Name:          cfg.Name,
 			Dims:          cfg.Dims,
 			RetentionDays: cfg.RetentionDays,

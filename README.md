@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://golang.org/)
 
 <!-- RELEASE_BADGE -->
-> **v0.16.2** — 4677 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
+> **v0.16.3** — 4704 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
 <!-- /RELEASE_BADGE -->
 
 ---

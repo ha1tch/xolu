@@ -11,23 +11,26 @@ import (
 	"time"
 )
 
-// Key layout: [timeline_id:2][d0:8][d1:8?]...[dN:8?][ts:8]  (all big-endian)
+// Key layout: [timeline_id:4][d0:8][d1:8?]...[dN:8?][ts:8]  (all big-endian)
 //
-// Total key size in bytes for N dimensions: 2 + N*8 + 8 = 10 + N*8
-//   dims=1: 18 bytes
-//   dims=2: 26 bytes
-//   dims=3: 34 bytes
-//   dims=4: 42 bytes
-//   dims=5: 50 bytes
+// Total key size in bytes for N dimensions: 4 + N*8 + 8 = 12 + N*8
+//   dims=1: 20 bytes
+//   dims=2: 28 bytes
+//   dims=3: 36 bytes
+//   dims=4: 44 bytes
+//   dims=5: 52 bytes
+//
+// TimelineID prefix widened from 2 to 4 bytes in wave 1 (@P) — before
+// any production data existed, so no on-disk migration is owed.
 
 // KeySize returns the key size in bytes for a given dimension count.
 func KeySize(dims uint8) int {
-	return 2 + int(dims)*8 + 8
+	return 4 + int(dims)*8 + 8
 }
 
 // tsOffset returns the byte offset of the timestamp field for a given dim count.
 func tsOffset(dims uint8) int {
-	return 2 + int(dims)*8
+	return 4 + int(dims)*8
 }
 
 // EncodeKey encodes a Pebble key for the given timeline, dimension values, and timestamp.
@@ -41,9 +44,9 @@ func EncodeKey(tid TimelineID, dims uint8, dv []uint64, ts time.Time) ([]byte, e
 	}
 
 	key := make([]byte, KeySize(dims))
-	binary.BigEndian.PutUint16(key[0:2], uint16(tid))
+	binary.BigEndian.PutUint32(key[0:4], uint32(tid))
 	for i, d := range dv {
-		binary.BigEndian.PutUint64(key[2+i*8:2+i*8+8], d)
+		binary.BigEndian.PutUint64(key[4+i*8:4+i*8+8], d)
 	}
 	binary.BigEndian.PutUint64(key[tsOffset(dims):], uint64(ts.UnixNano()))
 	return key, nil
@@ -52,10 +55,10 @@ func EncodeKey(tid TimelineID, dims uint8, dv []uint64, ts time.Time) ([]byte, e
 // EncodePrefixKey encodes a key prefix for range scanning using a leading
 // dimension slice (1 ≤ len(dv) ≤ dims). The timestamp is not included.
 func EncodePrefixKey(tid TimelineID, dv []uint64) []byte {
-	prefix := make([]byte, 2+len(dv)*8)
-	binary.BigEndian.PutUint16(prefix[0:2], uint16(tid))
+	prefix := make([]byte, 4+len(dv)*8)
+	binary.BigEndian.PutUint32(prefix[0:4], uint32(tid))
 	for i, d := range dv {
-		binary.BigEndian.PutUint64(prefix[2+i*8:2+i*8+8], d)
+		binary.BigEndian.PutUint64(prefix[4+i*8:4+i*8+8], d)
 	}
 	return prefix
 }
@@ -66,10 +69,10 @@ func DecodeKey(key []byte, dims uint8) (tid TimelineID, dv []uint64, ts time.Tim
 	if len(key) != expected {
 		return 0, nil, time.Time{}, fmt.Errorf("timeseries: DecodeKey: key len %d, expected %d (dims=%d)", len(key), expected, dims)
 	}
-	tid = TimelineID(binary.BigEndian.Uint16(key[0:2]))
+	tid = TimelineID(binary.BigEndian.Uint32(key[0:4]))
 	dv = make([]uint64, dims)
 	for i := range dv {
-		dv[i] = binary.BigEndian.Uint64(key[2+i*8 : 2+i*8+8])
+		dv[i] = binary.BigEndian.Uint64(key[4+i*8 : 4+i*8+8])
 	}
 	ns := binary.BigEndian.Uint64(key[tsOffset(dims):])
 	ts = time.Unix(0, int64(ns)).UTC()

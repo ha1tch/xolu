@@ -15,6 +15,7 @@
 //
 //	iolu db init     --base-dir /path/to/data [--tenant name[:id]] [--graph] [--mode per-file|shared]
 //	iolu db status   --base-dir /path/to/data [--mode per-file|shared]
+//	iolu ts status   --base-dir /path/to/data [--tenant <id>]
 //	iolu db upgrade  --base-dir /path/to/data [--mode per-file|shared]
 //
 //	iolu tenant create       --base-dir /path/to/data --name <name> [--id <n>]
@@ -30,6 +31,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -40,6 +42,7 @@ import (
 
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/tenant"
+	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/version"
 )
 
@@ -88,6 +91,18 @@ func main() {
 		default:
 			fmt.Fprintf(os.Stderr, "unknown tenant subcommand: %s\n", os.Args[2])
 			printTenantUsage()
+			os.Exit(1)
+		}
+	case "ts":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: iolu ts status --base-dir <dir> [--tenant <id>]")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "status":
+			cmdTSStatus(os.Args[3:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown ts subcommand: %s\n", os.Args[2])
 			os.Exit(1)
 		}
 	case "help", "--help", "-h":
@@ -762,6 +777,102 @@ func cmdTenantProvisionTS(args []string) {
 }
 
 // ---------------------------------------------------------------------------
+// ts status
+// ---------------------------------------------------------------------------
+
+// tsStoreMeta mirrors the fields of timeseries.storeMeta that iolu reads
+// directly from meta.json. Reading the JSON avoids opening (and locking)
+// the Pebble store just to report metadata. Only the fields iolu displays
+// are declared; unknown fields are ignored by encoding/json.
+type tsStoreMeta struct {
+	CreatedAt    string                  `json:"created_at"`
+	SysmaskWidth timeseries.SysmaskWidth `json:"sysmask_width"`
+}
+
+// cmdTSStatus reports each tenant's timeseries store metadata — notably
+// the immutable sysmask width (@S §4, R10). db status covers the SQL
+// storage layer; the sysmask width lives in the ts Pebble store's
+// meta.json, a separate directory tree, so it is surfaced here.
+func cmdTSStatus(args []string) {
+	fs := flag.NewFlagSet("iolu ts status", flag.ExitOnError)
+	baseDir := fs.String("base-dir", "", "xolu data root (required)")
+	tenantID := fs.Int("tenant", -1, "restrict to one tenant ID (default: all provisioned)")
+	_ = fs.Parse(args)
+
+	if *baseDir == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	fmt.Printf("Data root:   %s\n\n", *baseDir)
+
+	// Determine which tenant IDs to inspect: one, or every tXXXX dir that
+	// carries a ts/ store.
+	var ids []uint16
+	if *tenantID >= 0 {
+		if *tenantID > 0xFFFF {
+			fatal("tenant ID %d out of range", *tenantID)
+		}
+		ids = []uint16{uint16(*tenantID)}
+	} else {
+		ids = discoverTSTenants(*baseDir)
+		if len(ids) == 0 {
+			fmt.Println("No provisioned timeseries stores found.")
+			return
+		}
+	}
+
+	for _, id := range ids {
+		tsDir := sl.TenantTSDir(*baseDir, id)
+		metaPath := filepath.Join(tsDir, "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			fmt.Printf("Tenant %d (t%04X): no ts store (%s)\n", id, id, "meta.json absent")
+			continue
+		}
+		var meta tsStoreMeta
+		if err := json.Unmarshal(data, &meta); err != nil {
+			fmt.Printf("Tenant %d (t%04X): meta.json unreadable: %v\n", id, id, err)
+			continue
+		}
+		if !meta.SysmaskWidth.Valid() {
+			fmt.Printf("Tenant %d (t%04X): \u26a0  invalid sysmask width %d in meta\n",
+				id, id, uint8(meta.SysmaskWidth))
+			continue
+		}
+		fmt.Printf("Tenant %d (t%04X):\n", id, id)
+		fmt.Printf("  ts dir:        %s\n", tsDir)
+		if meta.CreatedAt != "" {
+			fmt.Printf("  created:       %s\n", meta.CreatedAt)
+		}
+		fmt.Printf("  sysmask width: %s\n\n", meta.SysmaskWidth.String())
+	}
+}
+
+// discoverTSTenants returns the tenant IDs under baseDir that carry a
+// ts/ store directory. Best-effort: unreadable base dir yields nil.
+func discoverTSTenants(baseDir string) []uint16 {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return nil
+	}
+	var ids []uint16
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id, ok := sl.ParseTenantSegment(e.Name())
+		if !ok {
+			continue
+		}
+		if _, err := os.Stat(sl.TenantTSDir(baseDir, id)); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -947,6 +1058,7 @@ func printUsage() {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  iolu db     <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu tenant <command> [flags]")
+	_, _ = fmt.Fprintln(w, "  iolu ts     <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu version")
 	_, _ = fmt.Fprintln(w, "  iolu help")
 	_, _ = fmt.Fprintln(w)
@@ -970,9 +1082,17 @@ func printUsage() {
 		_, _ = fmt.Fprintf(w, "  %-14s  %s\n", l.cmd, l.desc)
 	}
 	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Timeseries commands:")
+	for _, l := range []struct{ cmd, desc string }{
+		{"status", "Show each tenant's ts store metadata, including sysmask width"},
+	} {
+		_, _ = fmt.Fprintf(w, "  %-14s  %s\n", l.cmd, l.desc)
+	}
+	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Examples:")
 	_, _ = fmt.Fprintln(w, "  iolu db init   --base-dir /data --tenant acme --tenant beta:2 --graph")
 	_, _ = fmt.Fprintln(w, "  iolu db status --base-dir /data")
+	_, _ = fmt.Fprintln(w, "  iolu ts status --base-dir /data")
 	_, _ = fmt.Fprintln(w, "  iolu db upgrade --base-dir /data")
 	_, _ = fmt.Fprintln(w, "  iolu tenant create       --base-dir /data --name acme")
 	_, _ = fmt.Fprintln(w, "  iolu tenant list         --base-dir /data")

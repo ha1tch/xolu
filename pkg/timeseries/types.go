@@ -15,12 +15,18 @@ import (
 // removed when this error is received.
 var ErrDeleteNotSupported = fmt.Errorf("ts: delete not supported by this backend")
 
-// TimelineID is a uint16 identifier for a timeline within a tenant store.
-// ID 0x0000 is reserved; valid IDs are 0x0001–0xFFFF.
-type TimelineID uint16
+// TimelineID is a uint32 identifier for a timeline within a tenant store.
+// ID 0x00000000 is reserved; valid IDs are 0x00000001–0xFFFFFFFF.
+// Widened from uint16 in the wave-1 per-primitive ID pass (@P wave 1)
+// so per-tenant timeline counts scale past 65k — the ceiling that
+// mid-market workloads reach long before a machine reaches its tenant
+// count. On-disk Pebble key format widens from 2 to 4 bytes for the
+// TimelineID prefix; done before production data exists so no migration
+// is owed.
+type TimelineID uint32
 
 // MaxTimelineID is the highest valid timeline ID.
-const MaxTimelineID TimelineID = 0xFFFF
+const MaxTimelineID TimelineID = 0xFFFFFFFF
 
 // MinDims and MaxDims bound the number of dimensions a timeline may declare.
 const (
@@ -187,6 +193,13 @@ type TimelineStats struct {
 type StoreConfig struct {
 	DefaultRetentionDays int // store-level fallback; 0 = no expiry
 
+	// SysmaskWidth is the immutable system/user partition width (@S),
+	// applied ONLY at store creation. On reopen the persisted value in
+	// meta.json wins and this field is ignored — the width can never
+	// change for the life of a store. 0 (the default) means no system
+	// reservation.
+	SysmaskWidth SysmaskWidth
+
 	// RollupCascadeDelete controls whether DeleteRollup automatically removes
 	// all descendant definitions. When true (default), deleting a parent
 	// removes its entire subtree. When false, deleting a definition that has
@@ -219,9 +232,17 @@ type PebbleConfig struct {
 type Store interface {
 	// Timeline management
 	DefineTimeline(id TimelineID, cfg TimelineConfig) error
+	// DefineSystemTimeline is the system-internal define path (@S §8):
+	// it mints a system-region id and is not exposed on the tenant HTTP
+	// surface. Refuses non-system ids (the symmetric guard).
+	DefineSystemTimeline(id TimelineID, cfg TimelineConfig) error
 	UpdateTimeline(id TimelineID, cfg TimelineConfig) error // name + RetentionDays only
 	Timeline(id TimelineID) (TimelineConfig, bool)
 	Timelines() []TimelineID
+
+	// SysmaskWidth returns the store's immutable system/user partition
+	// width (@S). 0 means no system reservation.
+	SysmaskWidth() SysmaskWidth
 
 	// Write
 	Append(ctx context.Context, e Event) error

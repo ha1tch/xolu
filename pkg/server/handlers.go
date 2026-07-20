@@ -27,6 +27,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/storage"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/sulpher"
+	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/version"
@@ -193,6 +194,19 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if !store.Exists(r.Context(), entity, id) {
 		s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 			fmt.Sprintf("Resource of entity %s with id %d not found", entity, id))
+		return
+	}
+
+	// Referential integrity: restrict enforcement (@R02.2, wave 2 stage 2).
+	// If any live entity references this one through a ref field whose
+	// on_delete policy is restrict, refuse the delete — the SQL ON DELETE
+	// RESTRICT behaviour. Cheap pre-check (registry lookup) gates the
+	// inbound-edge query, so entities that nothing restrict-references pay
+	// nothing.
+	if refs, blocked := s.restrictReferrers(r.Context(), entity, id); blocked {
+		s.writeError(w, http.StatusConflict, xoluerr.ErrRIRestrictViolation,
+			fmt.Sprintf("cannot delete %s:%d — it is referenced by: %s",
+				entity, id, strings.Join(refs, ", ")))
 		return
 	}
 
@@ -1284,6 +1298,12 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A new or changed schema may add or alter x-ref annotations, so the
+	// referential-integrity registry must be rebuilt to reflect them
+	// (@R, wave 2 stage 2). Cheap: it re-reads the loaded schemas' x-ref
+	// keys, which are few.
+	s.rebuildRIRegistry()
+
 	// Persist schema to disk so it survives restarts and is visible
 	// to subsystems that scan the schema directory (e.g. OQL validator).
 	if err := s.validator.SaveSchema(entity, schema); err != nil {
@@ -1502,17 +1522,37 @@ func (s *Server) embedValue(ctx context.Context, v interface{}, depth int) inter
 	return v
 }
 
+// cascadeDelete deletes the target entity and, transitively, every entity
+// that refers to it — bounded by MaxCascadeDeletions.
+//
+// T-41 (@R08 stage 1): the pre-fix version seeded its work queue with only
+// the target and reported cascaded_deletes without ever discovering any
+// referents, so CascadingDelete=true was semantically identical to plain
+// delete. This implementation walks inbound graph edges to discover
+// referents, then deletes them in BFS order — bounded, cycle-safe.
+//
+// This is the minimum fix, not the full RI programme: policies remain
+// binary (cascade all, restrict all) rather than per-x-ref; the full
+// per-field cascade|restrict|nullify design lives in
+// docs/proposals/referential-integrity.md (@R) and lands in wave 2.
+//
+// Behaviour when the graph is disabled: no referents can be discovered,
+// so cascade degrades to a plain delete of the target — with a warning
+// logged so operators see the discovery gap rather than a silent bypass.
 func (s *Server) cascadeDelete(ctx context.Context, entity string, id int) ([]string, error) {
-	// This is a simplified cascade delete
-	// In production, you'd want more sophisticated logic
-
 	deletedRefs := []string{}
 	toCheck := []struct {
 		entity string
 		id     int
 	}{{entity, id}}
-
 	checked := make(map[string]bool)
+
+	tid := getTenantIDNumeric(ctx)
+	graphAvailable := s.config.GraphEnabled && s.graph != nil
+	if !graphAvailable {
+		s.logger.Warn().Str("entity", entity).Int("id", id).
+			Msg("cascade delete requested but graph disabled; referents cannot be discovered")
+	}
 
 	for len(toCheck) > 0 && len(deletedRefs) < s.config.MaxCascadeDeletions {
 		current := toCheck[0]
@@ -1525,21 +1565,150 @@ func (s *Server) cascadeDelete(ctx context.Context, entity string, id int) ([]st
 		checked[key] = true
 		deletedRefs = append(deletedRefs, key)
 
-		// Find referencing entities
-		// This would require scanning all entities - simplified here
+		// Discover referents via inbound graph edges before deleting —
+		// the delete itself removes the incoming-edge target, so
+		// discovery must happen first.
+		if graphAvailable {
+			nodeID := tenant.NodeID(tid, current.entity, current.id)
+			incoming, err := s.graph.GetIncomingEdges(nodeID)
+			if err != nil {
+				s.logger.Error().Err(err).Str("node", nodeID).
+					Msg("cascade delete: incoming-edge lookup failed; continuing without this node's referents")
+			} else {
+				for referrerNodeID := range incoming {
+					refEntity, refID, ok := parseNodeID(referrerNodeID)
+					if !ok {
+						s.logger.Warn().Str("node", referrerNodeID).
+							Msg("cascade delete: unparseable referrer nodeID; skipped")
+						continue
+					}
+					toCheck = append(toCheck, struct {
+						entity string
+						id     int
+					}{refEntity, refID})
+				}
+			}
+		}
 
-		// Delete the entity
+		// Delete the entity.
 		store := s.getStore(ctx)
 		if err := store.Delete(ctx, current.entity, current.id); err != nil {
 			s.logger.Error().Err(err).Str("entity", current.entity).Int("id", current.id).
-				Msg("Failed to delete during cascade")
+				Msg("cascade delete: entity delete failed")
 		}
 
-		// Remove from graph
+		// Remove from graph.
 		s.removeGraph(ctx, current.entity, current.id)
 	}
 
 	return deletedRefs, nil
+}
+
+// parseNodeID splits a tenant-scoped graph node ID back into its
+// (entity, id) components. Handles both bare form ("entity:id", tenant 0)
+// and tenant-prefixed form ("XXXX@entity:id"). Returns ok=false if the
+// input does not match either shape.
+func parseNodeID(nodeID string) (entity string, id int, ok bool) {
+	stripped := tenant.NodeIDStripped(nodeID)
+	i := strings.LastIndex(stripped, ":")
+	if i <= 0 || i == len(stripped)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(stripped[i+1:])
+	if err != nil {
+		return "", 0, false
+	}
+	return stripped[:i], n, true
+}
+
+// rebuildRIRegistry rebuilds the referential-integrity registry from the
+// validator's currently loaded schemas (@R, wave 2 stage 2). Called at
+// server start and after schema changes. A malformed x-ref on one entity
+// is logged and that entity is skipped, rather than failing the whole
+// rebuild — one bad schema should not disable RI everywhere.
+func (s *Server) rebuildRIRegistry() {
+	reg := refintegrity.NewRegistry()
+	le, ok := s.validator.(interface{ LoadedEntities() []string })
+	if !ok {
+		// A validator that can't enumerate entities (e.g. the no-op) has
+		// no schemas to read x-refs from; leave the registry empty.
+		s.riRegistry = reg
+		return
+	}
+	for _, entity := range le.LoadedEntities() {
+		raw, err := s.validator.GetSchema(entity)
+		if err != nil {
+			continue
+		}
+		fields := refintegrity.FieldsFromRawSchema(raw)
+		if err := reg.AddEntitySchema(entity, fields); err != nil {
+			s.logger.Warn().Err(err).Str("entity", entity).
+				Str("code", string(xoluerr.ErrRISchemaXRef)).
+				Msg("referential integrity: malformed x-ref; entity's refs not enforced")
+			continue
+		}
+	}
+	s.riRegistry = reg
+}
+
+// restrictReferrers reports whether entity:id has any live referrer under
+// a restrict on_delete policy, and if so returns up to a bounded number
+// of referrer keys for the error message (@R02.2). The registry pre-check
+// (HasRestrictReferrers) gates the inbound-edge query so entities that
+// nothing restrict-references cost nothing at delete time.
+//
+// "Live" is what matters: the edge table records only current references,
+// so a referrer that was itself deleted does not block. Discovery uses
+// the same inbound-edge query T-41's cascade path uses.
+func (s *Server) restrictReferrers(ctx context.Context, entity string, id int) (refs []string, blocked bool) {
+	if !s.riRegistry.HasRestrictReferrers(entity) {
+		return nil, false
+	}
+	if !s.config.GraphEnabled || s.graph == nil {
+		// Without the graph we cannot discover referrers. Rather than
+		// silently allow a delete the schema says to restrict, log and
+		// allow — but make the gap visible. (A graph-less deployment that
+		// wants RI must enable the graph; flagged here so it is not a
+		// silent bypass.)
+		s.logger.Warn().Str("entity", entity).Int("id", id).
+			Msg("referential integrity: restrict policy present but graph disabled; cannot enforce")
+		return nil, false
+	}
+
+	// Which referring entities carry a restrict policy toward this target.
+	restrictBy := make(map[string]bool)
+	for _, p := range s.riRegistry.ReferrersOf(entity) {
+		if p.OnDelete == refintegrity.OnDeleteRestrict {
+			restrictBy[p.ReferringEntity] = true
+		}
+	}
+
+	tid := getTenantIDNumeric(ctx)
+	nodeID := tenant.NodeID(tid, entity, id)
+	incoming, err := s.graph.GetIncomingEdges(nodeID)
+	if err != nil {
+		// A discovery failure must not silently permit the delete when a
+		// restrict policy is in force; treat it as blocking, naming the
+		// error, so the operator investigates rather than losing data.
+		s.logger.Error().Err(err).Str("node", nodeID).
+			Msg("referential integrity: inbound-edge lookup failed; blocking delete conservatively")
+		return []string{"(referrer discovery failed; delete blocked for safety)"}, true
+	}
+
+	const maxNamed = 10
+	for referrerNodeID := range incoming {
+		refEntity, refID, ok := parseNodeID(referrerNodeID)
+		if !ok {
+			continue
+		}
+		if restrictBy[refEntity] {
+			refs = append(refs, fmt.Sprintf("%s:%d", refEntity, refID))
+			if len(refs) >= maxNamed {
+				break
+			}
+		}
+	}
+	return refs, len(refs) > 0
 }
 
 func validateEntityName(entity string) error {

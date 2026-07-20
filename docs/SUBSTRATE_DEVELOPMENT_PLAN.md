@@ -70,10 +70,20 @@ than repeated here:
 3. **Demand gates hold.** Deferred items (§6) build when a named
    consumer exists, not before. The plan closes the *committed* gaps;
    it does not commit the optional ones.
-4. **The uint32 widening precedes any production deployment.** It is
-   three days now and weeks-with-risk later
-   (S.md §2). Wave 1 is therefore immovable in
-   its position even if other waves reorder.
+4. **Per-tenant per-primitive ID widening precedes any production
+   deployment.** `/ts`'s `TimelineID` is `uint16` (0xFFFF cap) and packed
+   as a 2-byte big-endian prefix in every Pebble key. `/cal` and
+   (future) `/bal` internal IDs need the same audit before ship. This
+   is the actual ceiling Shevo's mid-market SMB workloads hit
+   (retail SKUs, hotel rooms, hospital patients within one tenant reach
+   65k long before a machine reaches its tenant count). Wave 1's
+   position is fixed because on-disk key formats must not change after
+   production data exists.
+
+   Cross-tenant scaling is *not* here: tenant ID stays `uint16`. A
+   production server hits its throughput or storage ceiling long before
+   65k tenants, and the answer if it ever did would be a second xolu,
+   not a wider ID.
 
 ## 2. Inventory
 
@@ -87,7 +97,7 @@ than repeated here:
 | 6 | Trusted-proxy client-IP extraction | T-38 | 0.5 | — | 0 |
 | 7 | /meta subject-addressing generalisation | @B03a; @C04c (meta engine-inert) | 1 | — | 0 |
 | 8 | Tenant ID → uint32 (218 sites, 2 codec sites, dir format, fixtures) | @S02; working agreement §7 (mass substitution) | 3 | — | 1 |
-| 9 | Sysmask: predicate, registry guard, authz, iolu display | @S02 (immutability rule) | 2 | #8 | 1 |
+| 9 | Sysmask: immutable uint8 width partitioning the 32-bit primitive ID space (default 0 = all user); `IsSystem` predicate; two-allocation-path enforcement; metadata storage; `iolu db status` display; transvasing designed-in (built wave 6) | @S (rewritten 2026-07-20, width-model) | 2 | #8 | 1 |
 | 10 | RI stages 2–5: x-ref schema, restrict, cascade/nullify, write validation, client | @R02 (schema), §3 (engine), §5 (concurrency), §5a (kernel fence for PG), §7 (tests), §8 (staging) | 6 | #5 | 2 |
 | 11 | Chronicle extraction: monoid cascade engine | @C03 (monoid theorem), §4 (extraction inventory), §5 (sequencing: extract with bal, cal opportunistic) | 3 | — | 3 |
 | 12 | Chronicle extraction: Sealer lift from cal | @C04 (extraction #2); cal-pebble-codec.md (existing Sealer); working agreement §5 (serialisation discipline) | 2 | — | 3 |
@@ -134,10 +144,22 @@ dormant-guards table live and seeded with the existing verification
 records (cal stress, CI runs); git history flowing; hygiene script
 guarding releases; meta ready for every later reference-code use.
 
-**Wave 1 — Identity and scope (≈ 5 days).** Items 8–9. Two-pass
-discipline (production code green on `TenantID uint32`, fixtures
-second), tree-wide `%04X`/codec sweep before declaring done. Exit:
-suite + CI green on uint32; sysmask declared, displayed, enforced.
+**Wave 1 — Per-primitive ID widening and system-scope reservation (≈ 4 days).**
+Items 8–9. `/ts` codec widens its tenant-key prefix from 2 bytes to
+4 bytes so per-tenant `TimelineID` becomes uint32; `/cal` gets an
+audit for analogous caps and either widens or documents "no cap
+today". `/bal`'s ID width is chosen at implementation (@B) with
+uint32 as the default; this wave records the choice. Sysmask partitions
+the now-32-bit primitive ID space via an immutable uint8 width
+(default 0 = entirely user-space); the substrate provides only the
+partition predicate and two-allocation-path enforcement, with
+system-region meaning deferred to later convention (@S, A-flat).
+Transvasing — the offline, non-lossy migration that makes the
+init-frozen width survivable — is designed in now and built wave 6.
+Exit: suite green on the new codec; `iolu db status` displays the
+sysmask width;
+existing timelines migrate cleanly (see @P01 principle #4 — before
+any production deployment).
 **Hard gate: no production deployment before this wave completes.**
 
 **Wave 2 — Referential integrity (≈ 6 days).** Item 10, per the RI

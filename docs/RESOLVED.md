@@ -8,6 +8,313 @@ duplicate, each other. Never edit or delete existing entries.
 
 ---
 
+## T-38 — closed 2026-07-20 (wave 0 item #6)
+
+**Finding upgraded during work:** T-38 was filed as a P3 deployment-quality item
+about the *absent* trusted-proxy extraction. In flight, an audit surfaced that
+`pkg/middleware/ratelimit.go`'s `getClientIP` was itself *honouring
+X-Forwarded-For and X-Real-IP unconditionally* — the same
+GHSA-3fxj-6jh8-hvhx-class spoofing hazard chi's middleware.RealIP was
+retired for, sitting one directory over from the deliberate comment
+that had rejected chi's version. Five existing tests codified this
+vulnerable behaviour as expected.
+
+**Fix:** The rate limiter's `getClientIP` is now a method on
+`*RateLimiter` (so it can consult its configured trusted-proxy CIDR
+set), with the trust model:
+
+- The TCP peer (r.RemoteAddr) is always authoritative.
+- X-Forwarded-For and X-Real-IP are consulted only when the peer sits
+  in the configured trusted-proxy CIDR list.
+- When honoured, XFF is walked right-to-left past any hop that is also
+  a trusted proxy, and the first non-trusted address is returned —
+  yielding the real client behind proxy chains and resisting
+  attacker-prepended forgeries.
+
+**Config surface:**
+
+- `config.Config.TrustedProxies` — comma-separated CIDR ranges (bare
+  IPs accepted, treated as /32 or /128).
+- `XOLU_TRUSTED_PROXIES` env var. Empty by default: header-based IP
+  extraction is refused and the peer is authoritative — the safe default.
+- Parsed via `parseTrustedProxies`; malformed entries silently skipped.
+- Membership test via `ipInAnyCIDR`.
+
+**Tests (rewrites plus additions):** Nine test cases in
+`pkg/middleware/ratelimit_test.go` covering: no trust config → headers
+ignored; untrusted peer with forged XFF → peer wins; trusted peer with
+XFF → hop honoured; trusted chain → walk past to first non-trusted;
+attacker-prepended forgery → correctly ignored; X-Real-IP fallback;
+trusted peer with no headers → peer wins; bare-IP trust spec accepted;
+XFF-over-X-Real-IP precedence when trusted. **The pre-fix tests
+codified the vulnerability; replacing them was the largest single
+correction.**
+
+**Verification:** middleware tests green; full suite (31 packages)
+green; lint 0 issues; gate PASS. The deliberate comment in server.go
+about "coarsen to per-proxy until T-38 ships" is updated to describe
+the shipped mechanism.
+
+### T-38. Trusted-proxy-aware client-IP extraction
+
+Theme: server · Priority: P3 · Status: ☐
+Blocks/after: Nothing; deployment-quality item. Born from the 0.16.1 re-cut's removal of `chi/middleware.RealIP` (deprecated upstream citing GHSA-3fxj-6jh8-hvhx: it trusts X-Forwarded-For/X-Real-IP unconditionally, letting any client spoof its identity to the rate limiter and logs).
+
+- **Current behaviour (safe default):** client identity is the TCP peer
+  (`r.RemoteAddr` untouched). Deployed behind a reverse proxy, per-client
+  rate limits coarsen to per-proxy and logs show the proxy address.
+- **Work required:** a small middleware taking a configured trusted-proxy
+  CIDR list (e.g. `XOLU_TRUSTED_PROXIES`); only when the direct peer is
+  in the list, honour the rightmost non-trusted X-Forwarded-For hop.
+  Config plumbing through pkg/authconfig is NOT needed — this is
+  transport identity, not auth; it belongs beside the rate limiter.
+- **Estimate:** half a day including tests for the spoofing cases.
+
+---
+
+## T-44 — closed 2026-07-20 (wave 1 item #9 display; @S §4 R10)
+
+**Fix:** `iolu ts status --base-dir <dir> [--tenant <id>]` reports each
+tenant's ts store metadata, notably the immutable sysmask width. `db
+status` inspects the SQL storage layer; the width lives in the ts
+Pebble store's meta.json (a separate directory tree), so it is surfaced
+by this ts-scoped command. The width is read directly from meta.json
+(lightweight — no Pebble store open/lock) and rendered via
+`SysmaskWidth.String()` for consistency with the type's own display.
+Tenant discovery walks tXXXX dirs carrying a ts/ store; `--tenant`
+restricts to one. Usage/help text updated.
+
+**Tests:** `cmd/iolu/ts_status_test.go` — meta JSON parse (guards
+against field-name/type drift between iolu's `tsStoreMeta` and
+`timeseries.storeMeta`, which would silently report width 0);
+absent-width-defaults-0; tenant discovery finds only ts-bearing dirs.
+Verified end-to-end against width-8 and width-0 stores.
+
+**Verification:** full suite green (31 packages); lint 0; gate PASS.
+
+**Wave 1 complete:** items #8 (per-primitive ID widening) and #9
+(sysmask mechanism + enforcement + display) all shipped.
+
+---
+
+## T-43 — closed 2026-07-20 (wave 1 item #9 enforcement; @S §8)
+
+**Fix:** the sysmask partition now enforces rather than merely
+describes. `/ts` gains two allocation paths that partition the id space
+with no overlap:
+
+- **`DefineTimeline`** (user-facing, HTTP-reachable) refuses any id in
+  the system region under the store's sysmask width — `IsSystem(id)` →
+  typed error `XOLU-TS027` (`ErrTSSystemScopeID`). With the default
+  width 0 the guard is inert (no id is system), so pre-existing
+  behaviour is unchanged until an operator opts in.
+- **`DefineSystemTimeline`** (system-internal, added to the `Store`
+  interface, NOT wired to the tenant HTTP surface) mints system-region
+  ids and refuses user-region ids — the symmetric guard.
+
+`/ts` is client-supplied-id (no auto-allocator), so the proposal's
+"user-space exhaustion typed error" and "sequential system allocator"
+clauses (@S §8) do not apply today; they become relevant only if `/ts`
+grows an auto-allocator. The enforceable clause for a client-supplied
+API — refuse explicit system ids on the user path — is implemented.
+
+`classifyTSError` maps `XOLU-TS027` to a client error rather than 500.
+
+**Tests:** `pkg/timeseries/sysmask_enforcement_test.go` — two-paths
+partition (user refuses system, system refuses user); default-width-0
+guard is inert; HTTP-boundary error carries the classifiable code.
+
+**Verification:** full suite green (31 packages); lint 0; gate PASS.
+
+---
+
+## T-41 — closed 2026-07-20 (wave 0 item #5; @R08 stage 1)
+
+**Fix:** `cascadeDelete` in `pkg/server/handlers.go` now performs
+inbound-edge discovery via `s.graph.GetIncomingEdges(nodeID)` before
+the delete, then parses each referrer nodeID back into `(entity, id)`
+and enqueues it for BFS traversal. Cycle detection and the
+`MaxCascadeDeletions` budget from the stub are preserved. `parseNodeID`
+helper added to split tenant-prefixed node IDs (via
+`tenant.NodeIDStripped`) and their `entity:id` payload. When the graph
+is disabled, cascade degrades to a plain delete of the target with a
+warning logged — no silent bypass.
+
+**Regression test:** `pkg/server/cascade_delete_test.go` creates a
+parent + two children referring to it, cascade-deletes the parent,
+asserts >=3 cascaded_deletes reported and all three GETs return 404.
+The pre-fix stub returned 1 and left both children reachable — the
+exact failure signature the test refuses. Test is not race-shaped;
+runs by default.
+
+**Scope:** minimum fix per @R08 stage 1. Policies remain binary
+(CascadingDelete flag on = cascade all, off = restrict none); the
+full per-x-ref policy design (cascade | restrict | nullify) is
+wave 2's work per the RI proposal. This closes the "flag misleads
+operators" defect without pre-empting the full RI programme.
+
+**Verification:** cascade test green; full suite green (31 packages);
+lint 0 issues; gate PASS.
+
+### T-41. `CascadingDelete` is a stub — cascades to nothing
+
+Theme: server · Priority: P2 · Status: ☐
+Blocks/after: Nothing hard; stage 1 of docs/proposals/referential-integrity.md, which designs the full per-ref policy system this defect motivated.
+
+- **Finding:** `handlers.go` `cascadeDelete` seeds its work queue with the
+  target entity and never appends referents — the discovery step exists
+  only as a comment ("would require scanning all entities — simplified
+  here"). With `config.CascadingDelete` enabled, behaviour is identical
+  to a plain delete, but the response reports `cascaded_deletes` as if a
+  cascade ran. A flag that changes the response's claims but not the
+  behaviour misleads any operator who enables it.
+- **The right engine is already present:** the graph materialises ref
+  edges and is consulted (`removeGraph`) in the same code path. Referent
+  discovery is an inbound-edge query, O(edges), no entity scans — the
+  scan-based sketch in the comment predates or ignores this.
+- **Work required (minimum):** implement discovery via inbound graph
+  edges within the existing `MaxCascadeDeletions` budget, or remove the
+  flag and the response field until real semantics exist. (Maximum,
+  separate decision: schema-level per-ref delete policies —
+  cascade | restrict | nullify — with restrict as the safest default.)
+- **Estimate:** minimum fix ~half a day; the full policy design is its
+  own small proposal.
+
+---
+
+## T-35 — closed 2026-07-19 (wave 0 item #4)
+
+**Verification record:** Race harness `TestConcurrentMove_ExactlyOneOccupiesTarget`
+added at `pkg/cal/move_race_test.go` — races N distinct bookings into
+one free target window, asserts exactly one wins. Pre-fix, `GOMAXPROCS=8
+-race -count=10` reproduced the defect: 2 winners into one window,
+14 losers, 0 errors. T-35 **confirmed as real**, not merely suspected.
+
+**Fix:** per-calendar Move mutex on `Lifecycle` (`moveLoks map[string]*sync.Mutex`
+guarded by `moveLoksMu`). Move now acquires the calendar's mutex before
+`destinationConflicts` and holds it through `setSpan`, serialising the
+check-then-act sequence within each calendar. Distinct calendars remain
+parallel; only concurrent Moves within one calendar are serialised, and
+only within Move itself — reads and other lifecycle operations are
+unaffected. The alternative fix considered (setSpanFrom CAS on expected
+old span) was rejected during implementation: it guards against the
+same booking's span changing, but the T-35 race is between *different*
+bookings racing into the same window over shared calendar occupancy,
+so span-CAS misses the actual shared state.
+
+**Verification status:** the defect reproduces under `-race` on a
+single-CPU host — the pre-fix run produced 2 winners into one window,
+confirming T-35 as real. The fix is a mutex, whose semantics are
+CPU-count-independent. Full cal package `-race` green, full suite
+green, lint 0.
+
+**Multi-core verification (real silicon):** 2026-07-20 env:m1,
+`GOMAXPROCS=8 go test ./pkg/cal/ -run TestConcurrentMove -count=20
+-race` — 10.8 s, green. The per-calendar mutex holds under true
+parallelism across 100 races (20 counts × 5 trials internal). T-35
+fully verified.
+
+### T-35. Investigate: Move's conflict-check window (suspected T-34-class race)
+
+Theme: cal · Priority: P2 · Status: ☐
+Blocks/after: Investigation only; suspected, not proven. Run after T-34's verification, since its outcome shapes the fix pattern if confirmed.
+
+- **Trigger:** T-34's diagnosis. `Move` is structurally the same
+  check-then-act: conflict/feasibility check, then `setSpan` — an
+  unconditional span overwrite guarded only by existence. Two concurrent
+  Moves of different bookings into the same window could both pass the
+  check and both land, double-booking.
+- **Caveats:** the seal stress and `TestMoveConflictLeavesUntouched`
+  pass, but neither races two Moves onto one window; absence of a test
+  is not absence of a race. May also be mitigated by serialisation
+  further up — that is what the investigation determines.
+- **Work required:** write the racing test (T-34's harness pattern,
+  two bookings, one free window, N racers each); if it fails, apply the
+  CAS pattern to `setSpan` (guard on expected span) or serialise Move
+  per-calendar.
+- **Estimate:** half a day for the test; fix cost separately scoped.
+
+---
+
+## T-22 — closed 2026-07-19 (wave 0 item #3)
+
+**Verification record:** `scripts/release_gate.py` implemented and
+integrated into `release.sh` as step 8b. Consolidates six check
+groups: register consistency (A1–A3), header discipline (B1),
+changelog hygiene (C1), resolution-record hygiene (D1), toolchain
+pin coherence (E1), and dormant-guards discipline (F1). Immediately
+caught two real conditions on first run: a lingering `[Unreleased]`
+CHANGELOG section (folded into 0.16.2) and the Docker Go-version
+drift (already deferred as T-42). Gate now passes with 2
+informational warnings pointing at T-42.
+
+### T-22. Release-hygiene test for stale version strings
+
+Theme: tooling · Priority: P2 · Status: ☐
+Blocks/after: Gates: the release-hygiene checks in `TRACKING_PRACTICES.md` §6, including register/RESOLVED and theme/field–table consistency.
+
+- **Trigger:** during the v0.14.1 T-01 rename release, `pkg/errors/errors_test.go` was found to assert hardcoded integer offsets (`9` for error-code length, `s[:4]` for prefix, `s[6:]` for numeric portion) that assumed the old `OLU-` prefix length. All three had to be updated by hand after the rename. Same class of hardcoded assumption caused four version-string updates in tsqlparser during the v0.6.1 release.
+- **Work required:**
+  - Add a `scripts/check_release_hygiene.py` that scans the tree for:
+    - Test files carrying a version string that doesn't match `VERSION` or `pkg/version/version.txt`.
+    - Integer literals in test files adjacent to `error-code`, `prefix`, `length`, or similar terms that look like structural assumptions.
+    - Hardcoded release dates in CHANGELOG entries that predate the file's last-modified time.
+  - Wire into `release.sh` as an optional gate (`--strict-hygiene`).
+- **Impact:** small utility, high value on rename-class changes. Would have flagged both the errors_test and the version_test issues before the release scripts ran.
+
+---
+
+## T-36 — closed 2026-07-19 (wave 0 item #2)
+
+**Verification record:** dormant-guards table appended to
+`docs/KNOWN_ISSUES.md` (Part 3 §8 canonical home), seeded with five
+existing guards each carrying gating condition, hardware requirement,
+canonical invocation, and last-exercised record. Five future guards
+registered as owed against their originating proposals, per the rule
+that specification and registration are one act. G-03x (fuzz targets)
+flagged as overdue for a session.
+
+### T-36. Create the dormant-guards table
+
+Theme: tooling · Priority: P2 · Status: ☐
+Blocks/after: Required by working-agreement Part 3 §8 (2026-07-18); the §6 release gate cannot check guard exercise until the table exists. Pairs naturally with T-22.
+
+- **Work:** enumerate every dormant guard — `stress`-tagged tests (incl.
+  `TestConcurrentTerminalTransition_ExactlyOneWins`, `TestSealStressLocal`),
+  the `integration`-tagged client suite, fuzz targets from the D-003/4/7/8
+  family — into a table in this register or KNOWN_ISSUES: name, gating
+  condition, hardware needs, canonical invocation, last-exercised date +
+  environment. Seed last-exercised from today's recorded runs (M1, 8 cores,
+  -race, 2026-07-18).
+- **Estimate:** an hour.
+
+---
+
+## T-37 — closed 2026-07-19 (wave 0 item #1)
+
+**Verification record:** git init run in the checkpoint at
+/home/claude/xolu-checkpoint, initial commit `v0.16.2 baseline
+(retrofit from checkpoint)` at HEAD, tagged v0.16.2 locally. Session
+audit commit follows on top. Sandbox-only artefacts (fuzz corpus,
+crashers) recorded in .gitignore per xolu upstream practice.
+
+### T-37. Git history inside the checkpoint
+
+Theme: tooling · Priority: P3 · Status: ☐
+Blocks/after: Decided in principle 2026-07-18 (zip-with-.git hybrid; bundle optional for incremental sync). Execute at the start of the next working session while release boundaries remain reconstructible from CHANGELOG.
+
+- **Work:** `git init` in the checkpoint; retrofit commits at the
+  v0.15.0-import, v0.15.1, v0.15.2, v0.15.3, v0.16.0, v0.16.1 boundaries
+  (content reconstructible from CHANGELOG entries); tag each; adopt
+  commit-per-release thereafter; checkpoint zips ship with `.git` included.
+- **Not included (separate decision):** GitHub Actions as dormant-guard
+  executor — proposed, undecided; would close the loop between T-36's
+  table and mechanical execution, but needs Horacio's call on repo
+  visibility and CI wiring.
+- **Estimate:** half an hour for the retrofit.
+
+---
+
 ## T-40 — closed v0.16.2 (2026-07-19)
 
 **Verification record:** GitHub Actions run on commit 5332542

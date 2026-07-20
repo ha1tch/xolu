@@ -5,6 +5,8 @@
 package middleware
 
 import (
+	"net"
+	"strings"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -18,14 +20,15 @@ import (
 // burst at window boundaries; a sliding-window approach would prevent that
 // but adds complexity. Acceptable for the current use case.
 type RateLimiter struct {
-	mu      sync.RWMutex
-	windows map[string]*window
-	rate    int           // Max requests per window
-	window  time.Duration // Window duration
-	byIP    bool
-	byKey   bool
-	cleanup time.Duration
-	stopCh  chan struct{}
+	mu             sync.RWMutex
+	windows        map[string]*window
+	rate           int           // Max requests per window
+	window         time.Duration // Window duration
+	byIP           bool
+	byKey          bool
+	cleanup        time.Duration
+	stopCh         chan struct{}
+	trustedProxies []*net.IPNet // T-38: CIDR ranges whose XFF headers are honoured
 }
 
 type window struct {
@@ -35,14 +38,16 @@ type window struct {
 
 // NewRateLimiter creates a new rate limiter
 func NewRateLimiter(cfg *config.Config) *RateLimiter {
+	trusted := parseTrustedProxies(cfg.TrustedProxies)
 	rl := &RateLimiter{
-		windows: make(map[string]*window),
-		rate:    cfg.RateLimitRate,
-		window:  time.Duration(cfg.RateLimitWindow) * time.Second,
-		byIP:    cfg.RateLimitByIP,
-		byKey:   cfg.RateLimitByKey,
-		cleanup: time.Minute * 5,
-		stopCh:  make(chan struct{}),
+		windows:        make(map[string]*window),
+		rate:           cfg.RateLimitRate,
+		window:         time.Duration(cfg.RateLimitWindow) * time.Second,
+		byIP:           cfg.RateLimitByIP,
+		byKey:          cfg.RateLimitByKey,
+		cleanup:        time.Minute * 5,
+		stopCh:         make(chan struct{}),
+		trustedProxies: trusted,
 	}
 
 	// Start cleanup goroutine
@@ -129,7 +134,7 @@ func RateLimitMiddleware(cfg *config.Config, limiter *RateLimiter) func(http.Han
 			}
 
 			// Determine rate limit key
-			key := getRateLimitKey(r, cfg)
+			key := limiter.getRateLimitKey(r, cfg)
 			if key == "" {
 				// Can't determine key, allow through
 				next.ServeHTTP(w, r)
@@ -164,12 +169,12 @@ func RateLimitMiddleware(cfg *config.Config, limiter *RateLimiter) func(http.Han
 }
 
 // getRateLimitKey determines the key for rate limiting
-func getRateLimitKey(r *http.Request, cfg *config.Config) string {
+func (rl *RateLimiter) getRateLimitKey(r *http.Request, cfg *config.Config) string {
 	var parts []string
 
 	// Add IP if enabled
 	if cfg.RateLimitByIP {
-		ip := getClientIP(r)
+		ip := rl.getClientIP(r)
 		if ip != "" {
 			parts = append(parts, "ip:"+ip)
 		}
@@ -185,7 +190,7 @@ func getRateLimitKey(r *http.Request, cfg *config.Config) string {
 
 	if len(parts) == 0 {
 		// Fall back to IP
-		return "ip:" + getClientIP(r)
+		return "ip:" + rl.getClientIP(r)
 	}
 
 	// Combine parts
@@ -199,31 +204,102 @@ func getRateLimitKey(r *http.Request, cfg *config.Config) string {
 	return key
 }
 
-// getClientIP extracts the client IP from the request
-func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
+// getClientIP extracts the client IP the rate limiter should attribute
+// this request to. Trust model (T-38):
+//
+//   - The TCP peer (r.RemoteAddr) is always authoritative.
+//   - X-Forwarded-For and X-Real-IP are consulted ONLY when the peer is
+//     in the operator-configured trusted-proxy CIDR list. Otherwise
+//     any client could set those headers and forge its rate-limiter
+//     identity (GHSA-3fxj-6jh8-hvhx, the reason chi's middleware.RealIP
+//     was retired).
+//   - When honoured, XFF is walked right-to-left past any hop that is
+//     also a trusted proxy, and the first non-trusted address is
+//     returned. This yields the actual client behind a proxy chain and
+//     resists appending forged hops at either end.
+//
+// Method receiver rather than free function so it can consult the
+// limiter's configured trusted-proxy set.
+func (rl *RateLimiter) getClientIP(r *http.Request) string {
+	peer := stripPort(r.RemoteAddr)
+
+	if len(rl.trustedProxies) == 0 || !ipInAnyCIDR(peer, rl.trustedProxies) {
+		return peer
 	}
 
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+	// Peer is a trusted proxy: honour XFF, walking past further trusted hops.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		hops := strings.Split(xff, ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop := strings.TrimSpace(hops[i])
+			if hop == "" {
+				continue
+			}
+			if !ipInAnyCIDR(hop, rl.trustedProxies) {
+				return hop
+			}
+		}
+	}
+	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
 		return xri
 	}
 
-	// Use RemoteAddr
-	addr := r.RemoteAddr
-	// Strip port if present
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
+	// Header trust was granted but no header was set — fall back to peer.
+	return peer
+}
+
+// stripPort removes the ":port" suffix from an address string. Returns
+// the input unchanged if it carries no port. IPv6 addresses are handled
+// via net.SplitHostPort's brackets convention.
+func stripPort(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
 	return addr
+}
+
+// parseTrustedProxies parses a comma-separated list of CIDR ranges.
+// Malformed entries are silently skipped; an empty input returns nil.
+// Bare IPs are accepted and treated as /32 (v4) or /128 (v6).
+func parseTrustedProxies(spec string) []*net.IPNet {
+	if spec == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, cidr, err := net.ParseCIDR(part); err == nil {
+			out = append(out, cidr)
+			continue
+		}
+		if ip := net.ParseIP(part); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				out = append(out, &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)})
+			} else {
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+		}
+	}
+	return out
+}
+
+// ipInAnyCIDR reports whether a plain IP string sits in any of the
+// supplied CIDR ranges. Returns false on parse failure.
+func ipInAnyCIDR(addr string, cidrs []*net.IPNet) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	for _, c := range cidrs {
+		if c.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

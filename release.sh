@@ -107,12 +107,17 @@ set +e
 # reported totals, not just ./pkg/...
 go test -json $SHORT_FLAG -count=1 -coverprofile="$COVER_OUT" ./... \
     2>test-errors.txt | tee "$TEST_JSON" >/dev/null
+# Capture the pipe's exit status IMMEDIATELY — any intervening command
+# (including the `if $RUN_INTEGRATION` test below) overwrites PIPESTATUS,
+# which reflects only the most recent pipeline. Capturing after the
+# integration block made TEST_EXIT reflect `false` whenever integration
+# was not requested, failing every non-integration release spuriously.
+TEST_EXIT=${PIPESTATUS[0]}
 
 if $RUN_INTEGRATION; then
     echo "==> Integration suite (in-process server, -tags integration)"
     go test -tags integration -count=1 ./pkg/client/ -run TestIntegration
 fi
-TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
 # Report partial totals per binary plus a general total from the single run.
@@ -182,6 +187,10 @@ if [ "$CHANGELOG_TOP" != "$VERSION" ]; then
     warn "CHANGELOG top entry [$CHANGELOG_TOP] does not match [$VERSION]"
 fi
 ok "All version strings consistent: $VERSION"
+
+# 8b. Canonical release gate (T-22)
+step "Release gate"
+python3 scripts/release_gate.py
 
 # 9. Clean stale artifacts from the working tree before zipping.
 #
