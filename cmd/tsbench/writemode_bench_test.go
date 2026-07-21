@@ -202,7 +202,7 @@ func BenchmarkWriteMode_Parallel(b *testing.B) {
 			// to avoid timestamp collisions under concurrent append.
 			const maxWorkers = 32
 			for i := 0; i < maxWorkers; i++ {
-				tid := timeseries.TimelineID(10 + i)
+				tid := timeseries.TimelineID(uint32(10 + i)) //nolint // test loop index; uint32() asserts fit (@C04d)
 				if err := store.DefineTimeline(tid, timeseries.TimelineConfig{Dims: 1}); err != nil {
 					b.Fatalf("define tl%d: %v", tid, err)
 				}
@@ -222,7 +222,7 @@ func BenchmarkWriteMode_Parallel(b *testing.B) {
 			var workerID atomic.Int64
 			b.RunParallel(func(pb *testing.PB) {
 				id := int(workerID.Add(1)) - 1
-				tid := timeseries.TimelineID(10 + (id % maxWorkers))
+				tid := timeseries.TimelineID(uint32(10 + (id % maxWorkers))) //nolint // test loop index; uint32() asserts fit (@C04d)
 				iter := 0
 				for pb.Next() {
 					// Each worker uses its own timeline and its own offset

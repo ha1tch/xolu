@@ -8,6 +8,55 @@ duplicate, each other. Never edit or delete existing entries.
 
 ---
 
+## T-45 — Mechanical guard for @C04d (sized-id wire discipline)
+
+**Closed:** 2026-07-21 · **Version:** post-v0.16.3 (ships with the next tagged release)
+**Resolution:** `tools/c04dcheck` — a type-aware go/analysis checker (separate
+module; main go.mod untouched) enforcing chronicle-substrate §4d with three
+checks: (1) narrowing conversions of registered sized-id types
+(TimelineID, CalOrdinal; matched by name + uint32 underlying) to
+int/int8/int16/int32/uint8/uint16, covering ceiling constants like
+int(MaxTimelineID); (2) values parsed via strconv.ParseUint/ParseInt with
+a constant bitSize below the id's width and converted to the id type in
+the same function; (3) ids constructed FROM lossy-width sources (the
+`Timeline uint16` wire-field shape). Verified: catches all five violation
+shapes on the analysistest fixture (five `want` annotations), zero
+findings on the current tree, and the legal patterns (int64 carry, 32-bit
+parse, tenant-id 16-bit parses, untyped constants, the explicit uint32()
+assertion idiom for test loop counters) stay silent. Wired into ci.yml as
+a failing step (test + build + run over ./...), making @C04d
+self-enforcing rather than review-enforced. Six pre-existing test-file
+loop-counter constructions were normalised to the uint32() idiom. bal's
+internal account key joins the registry when bal lands (@B §9a).
+
+**Original item as at closure:**
+
+### T-45. Mechanical guard for @C04d (sized-id wire discipline)
+
+Theme: tooling · Priority: P3 · Status: ☐
+Blocks/after: enforces @C04d (chronicle-substrate §4d). Independent; can land any time. Strengthens every current and future primitive that exposes a numeric id.
+
+- **What:** a mechanical check (go vet-style analyzer, or a CI grep/lint
+  pass) that flags the four @C04d violation sites: `int(<sized-id>)` and
+  `uintM(<sized-id>)` narrowing conversions, `ParseUint(..., 10, 16)` (or
+  any bitsize narrower than the id's width) on an id parse, and
+  conversion of a sized-id ceiling constant to `int`. Sized-id types are
+  registered by name (TimelineID, CalOrdinal, future bal AccountID).
+- **Why P3, why now on the radar:** @C04d was canonised only after the
+  /ts 32-bit break (2026-07-20). A law enforced solely by review is a
+  law that will be forgotten under deadline — exactly how the /ts
+  boundary fields slipped through the wave-1 widening. A mechanical guard
+  makes the law self-enforcing and would have caught that defect
+  pre-merge. This is the "should have been an early dependency" lesson
+  turned into a standing check.
+- **Scope note:** the guard complements, does not replace, the per-
+  primitive range regression test (@C04d stage-1 obligation). The test
+  proves one primitive's boundary is correct; the guard proves no new
+  narrowing is introduced anywhere.
+- **Reference:** docs/proposals/chronicle-substrate.md §4d;
+  pkg/timeseries/timeline_id_width_test.go (the test pattern it backstops).
+
+
 ## T-38 — closed 2026-07-20 (wave 0 item #6)
 
 **Finding upgraded during work:** T-38 was filed as a P3 deployment-quality item

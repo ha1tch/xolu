@@ -271,7 +271,7 @@ func TestWriteCoal_BatchAppend(t *testing.T) {
 
 	events := make([]Event, 20)
 	for i := range events {
-		tid := TimelineID(1 + (i % 2))
+		tid := TimelineID(uint32(1 + (i % 2)))
 		events[i] = Event{
 			Timeline: tid, Dims: []uint64{1},
 			Time: base.Add(time.Duration(i) * time.Millisecond),

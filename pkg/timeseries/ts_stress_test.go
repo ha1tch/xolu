@@ -48,7 +48,7 @@ func TestTSStress_BulkAppend(t *testing.T) {
 	eventsPerTimeline := stressSmallEvents / numTimelines
 
 	for tid := 1; tid <= numTimelines; tid++ {
-		if err := store.DefineTimeline(TimelineID(tid), TimelineConfig{Dims: 2}); err != nil {
+		if err := store.DefineTimeline(TimelineID(uint32(tid)), TimelineConfig{Dims: 2}); err != nil {
 			t.Fatalf("define timeline %d: %v", tid, err)
 		}
 	}
@@ -60,7 +60,7 @@ func TestTSStress_BulkAppend(t *testing.T) {
 	for tid := 1; tid <= numTimelines; tid++ {
 		for i := 0; i < eventsPerTimeline; i++ {
 			ev := Event{
-				Timeline: TimelineID(tid),
+				Timeline: TimelineID(uint32(tid)),
 				Dims:     []uint64{uint64(tid), uint64(i % 100)},
 				Time:     base.Add(time.Duration(i) * time.Millisecond),
 				Nums:     []float64{float64(i)},
@@ -78,7 +78,7 @@ func TestTSStress_BulkAppend(t *testing.T) {
 	// Verify counts via TimelineStats.
 	var totalEvents int64
 	for tid := 1; tid <= numTimelines; tid++ {
-		stats, err := store.TimelineStats(ctx, TimelineID(tid))
+		stats, err := store.TimelineStats(ctx, TimelineID(uint32(tid)))
 		if err != nil {
 			t.Fatalf("TimelineStats tid=%d: %v", tid, err)
 		}

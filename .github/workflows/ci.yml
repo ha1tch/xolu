@@ -21,6 +21,10 @@ jobs:
           go-version-file: go.mod   # tracks the go directive; no separate pin to drift
       - run: go build ./...
       - run: go vet ./...
+      - name: c04dcheck (substrate law @C04d, T-45)
+        run: |
+          cd tools/c04dcheck && go test ./... -count=1 && go build -o /tmp/c04dcheck . && cd ../..
+          /tmp/c04dcheck ./...
       - run: go test ./... -count=1
 
   lint:

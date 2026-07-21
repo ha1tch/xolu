@@ -4,6 +4,16 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.5] - 2026-07-21 (chronicle cascade engine, stage 1)
+
+- pkg/chronicle: the extracted monoid cascade engine (@C03, plan item 11 stage 1). Generic Engine[T] parameterised by Monoid[T] over a validated time-grain Hierarchy (exact-multiple nesting), with upward cascade on Append, chain Invalidate, and window Recompute via consumer-owned replay. Incumbent monoids instantiated as the correctness bar (ts sum/min/max, cal daypart BitsetOR, bal SumInt64) — property tests prove associativity/identity per instantiation, the homomorphism (coarse == fold of fine), and recompute == fresh fold. Incumbents NOT re-plumbed (@C §5: cal migrates opportunistically or never); bal rides natively at wave 4.
+
+## [0.16.4] - 2026-07-21 (G-12 closure, @C04d guard, fuzz session)
+
+- G-12 closed: restrict race window eliminated by DeleteWithRestrict's in-transaction referrer check (@C04a); two-pronged discovery (edge table for blob, spec-driven REF columns for adapted). Race harness converted diagnostic → asserting. REF compose/decompose invariantised through models.IsReference/NewReference with pipeline-agreement test.
+
+- T-45 closed: `tools/c04dcheck` mechanical guard for @C04d (sized-id wire discipline) wired into CI; six test-file loop-counter id constructions normalised to the explicit uint32() idiom. Resolution detail: docs/RESOLVED.md.
+
 ## [0.16.3] - 2026-07-20 (per-primitive ID widening + sysmask mechanism)
 
 Wave 1 of the substrate programme: the per-tenant primitive ID space

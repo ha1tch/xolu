@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.3
-Last reviewed: 2026-07-20
+Version: 0.16.5
+Last reviewed: 2026-07-21
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
@@ -255,7 +255,7 @@ correctness envelope over parser/validator input space.
 | G-03e | Scalar functions | `pkg/qs/fuzz_scalar_test.go` | `go test -run=^$ -fuzz=FuzzScalarFunctions -fuzztime=60s ./pkg/qs/` |
 | G-03f | FSM eval guard | `pkg/fsm/eval/fuzz_eval_test.go` | `go test -run=^$ -fuzz=FuzzEvalGuard -fuzztime=60s ./pkg/fsm/eval/` |
 
-- **Last exercised (all G-03x):** during the v0.9.7-era adversarial audit; not re-exercised since. **Overdue for a session.**
+- **Last exercised (all G-03x):** 2026-07-21 env:sandbox (Go 1.26.x, single-CPU) — all six targets 60s each, PASS, zero crashers, no repro artifacts. (Fuzzing is input-space work, so single-CPU exercise is valid evidence for this class, unlike the race guards.) Previous exercise: the v0.9.7-era adversarial audit.
 
 ### G-11. cal Move race harness (`pkg/cal/move_race_test.go`)
 

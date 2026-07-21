@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.16.3
-Last reviewed: 2026-07-20
+Version: 0.16.5
+Last reviewed: 2026-07-21
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -50,7 +50,6 @@ item's Trigger line.
 | T-16 | `cal` daypart rollup-prune performance validation | cal | P5 | ☐ | After: realistic occupancy distributions are available to measure against. |
 | T-42 | Dockerfile audit and refresh before wave-programme close | ops | P4 | ☐ | End-of-programme item so shipped images carry release-quality xolu, not interim wave states. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
-| T-45 | Mechanical guard for @C04d (sized-id wire discipline): a check that flags int()/uint16() narrowing of a sized-id type and ParseUint(...,16) on ids, so the law self-enforces instead of relying on review | tooling | P3 | ☐ | Enforces @C04d (chronicle §4d). Would have caught the /ts 32-bit break pre-merge. |
 | T-46 | Retrofit /ts to the two-identity model (@C04d): external string timeline id at the wire, internal uint32 as codec key — the design cal and bal already use. Breaking API change; eliminates ts's numeric-id boundary surface entirely | ts | P4 | ☐ | After: a v2 ts API window (breaking). Correct long-term direction; ts's int64+helper form holds the line until then. |
 
 ---
@@ -66,6 +65,23 @@ item's Trigger line.
 ## FSM read surface
 
 
+
+## Plan deviations (recorded per @P header rule)
+
+- **2026-07-21 — item 7 (/meta subject-addressing generalisation)
+  resequenced: wave 0 → wave-4 opening act.** Audit found /meta still
+  entity-only (routes hard-wired to `(entity, positive-int)`; @C04c's
+  subject list unimplemented). Deliberately deferred, not overlooked:
+  nothing in waves 2–3 consumes generalised subjects (RI never reads
+  meta — @C04c engine-inert; chronicle extraction doesn't touch it),
+  the costliest slice (cal delete-path cascade hooks) would be
+  refactored by wave 3's Sealer lift if done first, and bal
+  (`bal.account`) is the first real non-entity consumer — landing it as
+  wave 4 opens registers the subject kind live in the same breath.
+  Effort estimate at decision time: ~1.25d (storage migration 0.25,
+  subject model 0.25, handlers 0.25, cascade wiring 0.25–0.5,
+  tests+docs 0.25). Trigger to pull earlier: a non-entity annotation
+  consumer materialising before bal (none on the horizon).
 
 ### T-46. Retrofit /ts to the two-identity model (@C04d)
 
@@ -89,30 +105,6 @@ Blocks/after: needs a breaking-change window (v2 ts API). Not urgent — ts's co
   structure); cal (`CalendarID` string + `CalOrdinal uint32`) and bal
   (`account_id` string + internal key) as the pattern to match.
 
-### T-45. Mechanical guard for @C04d (sized-id wire discipline)
-
-Theme: tooling · Priority: P3 · Status: ☐
-Blocks/after: enforces @C04d (chronicle-substrate §4d). Independent; can land any time. Strengthens every current and future primitive that exposes a numeric id.
-
-- **What:** a mechanical check (go vet-style analyzer, or a CI grep/lint
-  pass) that flags the four @C04d violation sites: `int(<sized-id>)` and
-  `uintM(<sized-id>)` narrowing conversions, `ParseUint(..., 10, 16)` (or
-  any bitsize narrower than the id's width) on an id parse, and
-  conversion of a sized-id ceiling constant to `int`. Sized-id types are
-  registered by name (TimelineID, CalOrdinal, future bal AccountID).
-- **Why P3, why now on the radar:** @C04d was canonised only after the
-  /ts 32-bit break (2026-07-20). A law enforced solely by review is a
-  law that will be forgotten under deadline — exactly how the /ts
-  boundary fields slipped through the wave-1 widening. A mechanical guard
-  makes the law self-enforcing and would have caught that defect
-  pre-merge. This is the "should have been an early dependency" lesson
-  turned into a standing check.
-- **Scope note:** the guard complements, does not replace, the per-
-  primitive range regression test (@C04d stage-1 obligation). The test
-  proves one primitive's boundary is correct; the guard proves no new
-  narrowing is introduced anywhere.
-- **Reference:** docs/proposals/chronicle-substrate.md §4d;
-  pkg/timeseries/timeline_id_width_test.go (the test pattern it backstops).
 
 ### T-42. Dockerfile audit and refresh (end-of-programme)
 
