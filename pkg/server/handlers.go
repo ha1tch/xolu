@@ -221,9 +221,30 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		deletedRefs = refs
 	} else {
-		// Simple delete
-		if err := store.Delete(r.Context(), entity, id); err != nil {
-			s.logger.Error().Err(err).Msg("Failed to delete entity")
+		// Simple delete, with the authoritative in-transaction restrict
+		// check (G-12). The pre-check above is a cheap fast-path against
+		// the in-memory graph; it cannot close the check-then-act window
+		// (a concurrent referrer create can land between it and the store
+		// delete). The store-level check runs inside the delete's own
+		// transaction (@C04a), so the window is closed by SQL isolation.
+		restrictedBy := s.restrictingEntities(entity)
+		var derr error
+		if rd, ok := store.(interface {
+			DeleteWithRestrict(ctx context.Context, entity string, id int, restrictedBy []string) error
+		}); ok && len(restrictedBy) > 0 {
+			derr = rd.DeleteWithRestrict(r.Context(), entity, id, restrictedBy)
+		} else {
+			derr = store.Delete(r.Context(), entity, id)
+		}
+		if derr != nil {
+			var rve *storage.RestrictViolationError
+			if errors.As(derr, &rve) {
+				s.writeError(w, http.StatusConflict, xoluerr.ErrRIRestrictViolation,
+					fmt.Sprintf("cannot delete %s:%d — it is referenced by: %s",
+						entity, id, strings.Join(rve.Referrers, ", ")))
+				return
+			}
+			s.logger.Error().Err(derr).Msg("Failed to delete entity")
 			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to delete entity")
 			return
 		}
@@ -1649,6 +1670,25 @@ func (s *Server) rebuildRIRegistry() {
 		}
 	}
 	s.riRegistry = reg
+}
+
+// restrictingEntities returns the names of entities that reference `entity`
+// through an x-ref with on_delete=restrict — the set the store-level
+// in-transaction check (DeleteWithRestrict) needs. Empty when no restrict
+// policy targets this entity, letting callers skip the checked path.
+func (s *Server) restrictingEntities(entity string) []string {
+	if s.riRegistry == nil || !s.riRegistry.HasRestrictReferrers(entity) {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range s.riRegistry.ReferrersOf(entity) {
+		if p.OnDelete == refintegrity.OnDeleteRestrict && !seen[p.ReferringEntity] {
+			seen[p.ReferringEntity] = true
+			out = append(out, p.ReferringEntity)
+		}
+	}
+	return out
 }
 
 // restrictReferrers reports whether entity:id has any live referrer under

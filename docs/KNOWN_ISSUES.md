@@ -178,6 +178,29 @@ that enforcement, recorded so a passing build is read honestly.
   is chosen must be designed before code. Until then the stage-2 window
   stands, measured by G-12.
 
+  **RESOLVED 2026-07-21 — window closed by the in-transaction check; the
+  2026-07-20 constraint was re-audited and found inverted.** The code's
+  own comment (handlers.go, post-commit graph update) states the truth:
+  *the SQL edge table is updated atomically in the store's transaction*
+  (`syncGraphEdges` runs inside `createInner`/`updateInner`/`patchInner`);
+  the in-memory FlatGraph is the best-effort derived cache, not the
+  authority. The 2026-07-20 "edge table empty" observation traced to
+  **adapted entities**, whose write path never populates the edge table —
+  their REFs live decomposed in `REF_{field}_entity/_id` columns instead.
+  Neither option (a) nor (b) was needed. The shipped fix
+  (`SQLiteStore.DeleteWithRestrict`, optional capability interface):
+  referrer check inside the delete's own transaction (@C04a), two-pronged —
+  edge-table SELECT for blob referrers, spec-driven REF-column probe
+  (IsREFEntity/IsREFID) for adapted referrers. Zero write-path cost. The
+  handler's in-memory pre-check remains as a cheap fast path; the store
+  check is authoritative. Prong tests:
+  `pkg/storage/restrict_tx_test.go` (blob, adapted, mixed). REF
+  compose/decompose invariants hardened the same day
+  (`pkg/storage/ref_invariants_test.go`) so the two REF pipelines cannot
+  silently diverge under the check. G-12 remains registered for a
+  real-silicon multi-core run to confirm the closure under true
+  parallelism (single-core cannot open the window; not evidence).
+
 - **CascadingDelete flag coexistence (recorded 2026-07-20).** The legacy
   `CascadingDelete` config flag and stage-2 restrict enforcement coexist
   without conflict: restrict is checked first (a restrict-referrer blocks
@@ -244,11 +267,11 @@ correctness envelope over parser/validator input space.
 
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 
-- **Gate:** none; runs by default in DIAGNOSTIC mode. **This guard's invariant is not yet implemented** — stage-2 restrict enforcement reads inbound edges and deletes in separate operations, so the check-then-act window @R §5 identifies is OPEN by design until stage 3. The harness therefore *measures* the window (logs how many trials leave a dangling reference) rather than asserting it closed.
+- **Gate:** none; runs by default and since 2026-07-21 **ASSERTS** the invariant: the check-then-act window was closed by `DeleteWithRestrict`'s in-transaction referrer check (@C04a), ahead of the stage-3 schedule, so any dangling reference is now a failure.
 - **Hardware:** multi-core essential; the window is a logic race between a delete's enforcement read and a concurrent referrer create, and only manifests under true parallelism. A single-core pass is not evidence either way.
 - **Invocation:** `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
-- **Last exercised:** 2026-07-20 env:sandbox (single-CPU) — builds and runs, 0/8 dangling (single-core cannot open the window; not evidence). **Owed:** a real-silicon multi-core run to characterise the window's actual width under load, handed to the operator.
-- **Conversion:** when stage 3 closes the window (transactional edge-table enforcement / composite-FK pushdown, @R05a), flip the diagnostic `t.Logf` to `if dangling > 0 { t.Fatalf(...) }` so the guard asserts the invariant it currently only measures.
+- **Last exercised:** 2026-07-21 env:sandbox (single-CPU) — asserting mode, 0/8 dangling (single-core cannot open the window; vacuous pass, not evidence). **Owed:** a real-silicon multi-core run to verify the closure under true parallelism, handed to the operator: `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`
+- **Conversion:** done 2026-07-21 — the harness asserts `dangling == 0`; the diagnostic mode is retired.
 
 ### G-04. Full suite with `-race` on multi-core
 

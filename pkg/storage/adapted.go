@@ -450,25 +450,24 @@ func PartitionData(spec *AdaptedTableSpec, data map[string]interface{}) (columnV
 	columnValues = make([]interface{}, len(spec.Columns))
 	for i, col := range spec.Columns {
 		if col.IsREF {
-			// REF decomposition: extract entity/id from the REF object.
-			// IsREFEntity and IsREFID identify which half of the pair this is,
-			// with no dependency on the column name string.
-			refObj, _ := data[col.JSONField].(map[string]interface{})
-			if refObj == nil {
+			// REF decomposition through the canonical recogniser
+			// (models.IsReference) — the same predicate ExtractEntityEdges
+			// uses via ExtractRefs, so the column pipeline and the edge
+			// pipeline are structurally guaranteed to agree on what counts
+			// as a REF. A value that IsReference rejects (wrong shape,
+			// missing "type":"REF", bad id type) decomposes to nil/nil
+			// rather than half a reference. IsREFEntity and IsREFID
+			// identify which half of the pair this column is, with no
+			// dependency on the column name string.
+			ref, ok := models.IsReference(data[col.JSONField])
+			if !ok {
 				columnValues[i] = nil
 				continue
 			}
 			if col.IsREFEntity {
-				columnValues[i] = refObj["entity"]
+				columnValues[i] = ref.Entity
 			} else if col.IsREFID {
-				switch v := refObj["id"].(type) {
-				case float64:
-					columnValues[i] = int(v)
-				case int:
-					columnValues[i] = v
-				default:
-					columnValues[i] = nil
-				}
+				columnValues[i] = int(ref.ID)
 			}
 		} else {
 			columnValues[i] = data[col.JSONField]
@@ -549,9 +548,29 @@ func ReassembleData(spec *AdaptedTableSpec, columnValues []interface{}, extra ma
 		}
 	}
 
-	// Merge assembled REF objects
+	// Merge assembled REF objects, composed through the canonical
+	// constructor (models.NewReference / ToMap) so the reassembled shape is
+	// exactly what models.IsReference recognises — the round trip
+	// PartitionData ∘ ReassembleData is identity on REF fields by
+	// construction, not by parallel hand-built maps. A pair with a missing
+	// or non-integer half is dropped rather than emitted as half a
+	// reference.
 	for field, refObj := range refFields {
-		result[field] = refObj
+		entity, eok := refObj["entity"].(string)
+		var id int64
+		iok := false
+		switch v := refObj["id"].(type) {
+		case int:
+			id, iok = int64(v), true
+		case int64:
+			id, iok = v, true
+		case float64:
+			id, iok = int64(v), true
+		}
+		if !eok || !iok {
+			continue
+		}
+		result[field] = models.NewReference(entity, id).ToMap()
 	}
 
 	// Merge overflow

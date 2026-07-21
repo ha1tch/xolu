@@ -18,24 +18,18 @@ import (
 // safety-by-construction argument requires the enforcement read to run
 // INSIDE the delete's transaction; stage 2's enforcement does NOT yet do
 // that (the graph inbound-edge query and the SQL delete are separate
-// operations), so this harness documents and measures the window rather
-// than asserting it closed.
+// operations). The handler-level pre-check still has that shape, but the
+// authoritative store-level check (DeleteWithRestrict) runs inside the
+// delete's transaction, closing the window; this harness asserts that.
 //
 // Registered as dormant guard G-12. Like the cal race guards, it only
 // manifests under true multi-core parallelism; a single-core pass is not
-// evidence. The invariant it will assert once stage 3 closes the window
-// (transactional edge-table enforcement, @R05a): after concurrent
-// delete-target + create-referrer, the store is never left with a
-// committed referrer pointing at a deleted target.
-//
-// Until then this test runs in a DIAGNOSTIC mode: it records how often
-// the race produces a dangling reference and logs it, without failing —
-// so the guard exists, is exercised, and will convert to an assertion
-// the day the window is closed. This is the honest state: the guard is
-// specified and running; the invariant it guards is not yet implemented
-// (exactly the @P §8 "a shipped guard that never runs guards nothing"
-// concern, handled by making the guard visible rather than dormant-and-
-// silent).
+// evidence. Since 2026-07-21 this test ASSERTS the invariant: the window
+// was closed by DeleteWithRestrict's in-transaction referrer check
+// (@C04a), so after concurrent delete-target + create-referrer the store
+// must never hold a committed referrer pointing at a deleted target. A
+// single-core pass remains vacuous; the dormant-guard entry owes a
+// real-silicon multi-core run before the closure counts as verified.
 //
 // Invocation (real silicon):
 //
@@ -50,11 +44,20 @@ func TestRIRestrict_Race(t *testing.T) {
 		}
 	}
 
-	// Diagnostic, not assertion: report the window's observed width.
-	// When stage 3 closes the race, flip this to: if dangling > 0 { t.Fatalf(...) }.
-	t.Logf("RI restrict race (stage 2, window OPEN by design): %d/%d trials left a dangling reference. "+
-		"Stage 3 (transactional edge-table enforcement, @R05a) closes this; then this test asserts 0.",
-		dangling, trials)
+	// ASSERTION (window closed 2026-07-21 by DeleteWithRestrict's
+	// in-transaction check, ahead of the stage-3 schedule): after
+	// concurrent delete-target + create-referrer, the store must never
+	// hold a committed referrer pointing at a deleted target. On single-
+	// core hardware this cannot open the window and passes vacuously —
+	// the dormant-guard entry still owes a real-silicon multi-core run
+	// (G-12) before the closure counts as verified.
+	if dangling > 0 {
+		t.Fatalf("RI restrict race: %d/%d trials left a dangling reference — "+
+			"the in-transaction restrict check (DeleteWithRestrict, @C04a) failed to close the window",
+			dangling, trials)
+	}
+	t.Logf("RI restrict race: 0/%d trials left a dangling reference (window closed; "+
+		"single-core runs pass vacuously — multi-core run still owed per G-12)", trials)
 }
 
 // raceProducedDangling runs one trial: concurrently delete a user and

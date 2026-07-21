@@ -1445,17 +1445,67 @@ func (s *SQLiteStore) patchInner(ctx context.Context, entity string, id int, upd
 // Delete removes an entity
 func (s *SQLiteStore) Delete(ctx context.Context, entity string, id int) error {
 	return s.withRetry(func() error {
-		return s.deleteInner(ctx, entity, id)
+		return s.deleteInner(ctx, entity, id, nil)
 	})
 }
 
-func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) error {
+// RestrictViolationError reports that a delete was refused because live
+// referrers with a restrict on_delete policy exist. Referrers holds up to a
+// bounded number of "entity:id" keys for the error message.
+type RestrictViolationError struct {
+	Referrers []string
+}
+
+func (e *RestrictViolationError) Error() string {
+	return fmt.Sprintf("delete restricted by %d live referrer(s): %v", len(e.Referrers), e.Referrers)
+}
+
+// DeleteWithRestrict deletes entity:id, refusing with *RestrictViolationError
+// if any entity named in restrictedBy still references the target. The
+// referrer check runs INSIDE the delete's own transaction (@C04a: a guard
+// must live where its transaction lives), which closes the check-then-act
+// window the handler-level in-memory pre-check cannot (G-12): a concurrent
+// referrer create either commits its edge row before our read (we see it and
+// refuse) or serialises after our commit.
+//
+// Referrer discovery is two-pronged, matching where REF-derived state
+// authoritatively lives per storage class:
+//   - blob entities: the SQL edge table (synced transactionally by
+//     syncGraphEdges on every write);
+//   - adapted entities: their own REF_{field}_entity/_id columns, probed
+//     spec-driven via the IsREFEntity/IsREFID flags (adapted writes do not
+//     populate the edge table).
+//
+// restrictedBy is the set of referring entity names that carry a restrict
+// policy toward this target (the caller derives it from the schema x-ref
+// registry). Empty/nil means no restrict policies exist and this behaves
+// exactly like Delete.
+func (s *SQLiteStore) DeleteWithRestrict(ctx context.Context, entity string, id int, restrictedBy []string) error {
+	return s.withRetry(func() error {
+		return s.deleteInner(ctx, entity, id, restrictedBy)
+	})
+}
+
+func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int, restrictedBy []string) error {
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// In-transaction restrict check (G-12). Runs before the row delete so a
+	// refused delete does no work; under the same tx so no concurrent
+	// referrer create can slip between check and act.
+	if len(restrictedBy) > 0 {
+		refs, err := s.restrictReferrersInTx(ctx, tx, entity, id, restrictedBy)
+		if err != nil {
+			return fmt.Errorf("restrict referrer check: %w", err)
+		}
+		if len(refs) > 0 {
+			return &RestrictViolationError{Referrers: refs}
+		}
+	}
 
 	// Delete entity: adapted table or blob
 	if spec := s.adapted.Get(entity); spec != nil {
@@ -1514,6 +1564,128 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int) er
 }
 
 // Save creates an entity with a specific ID (fails if exists)
+// restrictReferrersInTx discovers live referrers of entity:id among the
+// restrictedBy entities, inside the caller's transaction. Returns up to
+// maxNamedReferrers "entity:id" keys. See DeleteWithRestrict for the
+// two-pronged discovery rationale.
+func (s *SQLiteStore) restrictReferrersInTx(ctx context.Context, tx *sql.Tx, entity string, id int, restrictedBy []string) ([]string, error) {
+	const maxNamedReferrers = 10
+	var refs []string
+
+	// Partition restrictedBy into blob referrers (edge table) and adapted
+	// referrers (REF column probe).
+	var blobReferrers []string
+	var adaptedSpecs []*AdaptedTableSpec
+	for _, refEntity := range restrictedBy {
+		if spec := s.adapted.Get(refEntity); spec != nil {
+			adaptedSpecs = append(adaptedSpecs, spec)
+		} else {
+			blobReferrers = append(blobReferrers, refEntity)
+		}
+	}
+
+	// Prong 1 — blob referrers via the edge table (transactionally synced).
+	if len(blobReferrers) > 0 && s.config.GraphEnabled {
+		edgeTable := tenant.GraphEdgesTableName(s.config.TenantID)
+		placeholders := strings.Repeat("?,", len(blobReferrers))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]interface{}, 0, len(blobReferrers)+2)
+		args = append(args, entity, id)
+		for _, e := range blobReferrers {
+			args = append(args, e)
+		}
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT source_entity, source_id FROM %s
+			 WHERE target_entity = ? AND target_id = ?
+			   AND source_entity IN (%s)
+			 LIMIT %d`, edgeTable, placeholders, maxNamedReferrers), args...)
+		if err != nil {
+			return nil, fmt.Errorf("edge-table referrer query: %w", err)
+		}
+		for rows.Next() {
+			var se string
+			var si int
+			if err := rows.Scan(&se, &si); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			refs = append(refs, fmt.Sprintf("%s:%d", se, si))
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		if len(refs) >= maxNamedReferrers {
+			return refs[:maxNamedReferrers], nil
+		}
+	}
+
+	// Prong 2 — adapted referrers via their REF columns, spec-driven.
+	// Adapted writes do not populate the edge table, but their REF fields
+	// decompose into REF_{field}_entity/_id columns (IsREFEntity/IsREFID),
+	// which are probed directly in the same transaction.
+	for _, spec := range adaptedSpecs {
+		// Collect the (entityCol, idCol) pairs per JSON field.
+		type refPair struct{ entityCol, idCol string }
+		pairs := map[string]*refPair{}
+		for _, col := range spec.Columns {
+			if !col.IsREF {
+				continue
+			}
+			p := pairs[col.JSONField]
+			if p == nil {
+				p = &refPair{}
+				pairs[col.JSONField] = p
+			}
+			if col.IsREFEntity {
+				p.entityCol = col.Name
+			} else if col.IsREFID {
+				p.idCol = col.Name
+			}
+		}
+		if len(pairs) == 0 {
+			continue
+		}
+		var conds []string
+		var args []interface{}
+		for _, p := range pairs {
+			if p.entityCol == "" || p.idCol == "" {
+				continue
+			}
+			conds = append(conds, fmt.Sprintf("(%s = ? AND %s = ?)", p.entityCol, p.idCol))
+			args = append(args, entity, id)
+		}
+		if len(conds) == 0 {
+			continue
+		}
+		q := fmt.Sprintf(`SELECT id FROM %s WHERE %s LIMIT %d`,
+			spec.TableName(), strings.Join(conds, " OR "), maxNamedReferrers-len(refs))
+		rows, err := tx.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("adapted referrer query (%s): %w", spec.Entity, err)
+		}
+		for rows.Next() {
+			var rid int
+			if err := rows.Scan(&rid); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			refs = append(refs, fmt.Sprintf("%s:%d", spec.Entity, rid))
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		if len(refs) >= maxNamedReferrers {
+			return refs[:maxNamedReferrers], nil
+		}
+	}
+
+	return refs, nil
+}
+
 func (s *SQLiteStore) Save(ctx context.Context, entity string, id int, data map[string]interface{}) (bool, error) {
 	var created bool
 	err := s.withRetry(func() error {
