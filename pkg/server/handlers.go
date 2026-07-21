@@ -2331,7 +2331,12 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("timeseries[%d]: timeline 0x0000 is reserved (XOLU-CM012)", i))
 				return
 			}
-			tid := timeseries.TimelineID(e.Timeline)
+			tid, tidErr := timeseries.TimelineIDFromJSON(e.Timeline)
+			if tidErr != nil {
+				s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMTSBadTimeline,
+					fmt.Sprintf("timeseries[%d]: %s (XOLU-CM012)", i, tidErr))
+				return
+			}
 			cfg, ok := tsStore.Timeline(tid)
 			if !ok {
 				s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMTSBadTimeline,

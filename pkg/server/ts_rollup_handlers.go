@@ -28,7 +28,7 @@ func (s *Server) tsParseRollupTimeline(w http.ResponseWriter, r *http.Request) (
 		return nil, 0, false
 	}
 	raw := chi.URLParam(r, "timeline_id")
-	tidInt, err := strconv.ParseUint(raw, 10, 16)
+	tidInt, err := strconv.ParseUint(raw, 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"),
 			fmt.Sprintf("invalid timeline_id %q", raw))
@@ -66,7 +66,7 @@ func (s *Server) tsParseRollupID(w http.ResponseWriter, r *http.Request) (timese
 
 // tsDefineRollupRequest is the body for POST /rollup/def.
 type tsDefineRollupRequest struct {
-	DestTID        uint16 `json:"dest_tid"`
+	DestTID        int64  `json:"dest_tid"`
 	BucketDuration string `json:"bucket_duration"` // Go duration string, e.g. "5m"
 	LateWindow     string `json:"late_window,omitempty"`
 }
@@ -74,8 +74,8 @@ type tsDefineRollupRequest struct {
 // tsRollupDefResponse is the response body for rollup definition endpoints.
 type tsRollupDefResponse struct {
 	ID             timeseries.RollupID `json:"id"`
-	SourceTID      uint16              `json:"source_tid"`
-	DestTID        uint16              `json:"dest_tid"`
+	SourceTID      int64               `json:"source_tid"`
+	DestTID        int64               `json:"dest_tid"`
 	BucketDuration string              `json:"bucket_duration"`
 	LateWindow     string              `json:"late_window,omitempty"`
 	Running        bool                `json:"running"`
@@ -85,8 +85,8 @@ type tsRollupDefResponse struct {
 func defToResponse(d timeseries.RollupDef) tsRollupDefResponse {
 	r := tsRollupDefResponse{
 		ID:             d.ID,
-		SourceTID:      uint16(d.SourceTID),
-		DestTID:        uint16(d.DestTID),
+		SourceTID:      int64(d.SourceTID),
+		DestTID:        int64(d.DestTID),
 		BucketDuration: d.BucketDuration.String(),
 		Running:        d.Running,
 		CreatedAt:      d.CreatedAt,
@@ -127,8 +127,13 @@ func (s *Server) HandleTSDefineRollup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	destTID, destErr := timeseries.TimelineIDFromJSON(req.DestTID)
+	if destErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, destErr.Error())
+		return
+	}
 	def := timeseries.RollupDef{
-		DestTID:        timeseries.TimelineID(req.DestTID),
+		DestTID:        destTID,
 		BucketDuration: bucketDur,
 		LateWindow:     lateWindow,
 	}
@@ -238,7 +243,7 @@ func (s *Server) HandleTSRollupParent(w http.ResponseWriter, r *http.Request) {
 
 // tsRollupTreeResponse is the body for GET /rollup/tree.
 type tsRollupTreeResponse struct {
-	TID      uint16                  `json:"tid"`
+	TID      int64                   `json:"tid"`
 	Def      *tsRollupDefResponse    `json:"def,omitempty"`
 	Children []*tsRollupTreeResponse `json:"children,omitempty"`
 }
@@ -247,7 +252,7 @@ func treeNodeToResponse(n *timeseries.RollupTreeNode) *tsRollupTreeResponse {
 	if n == nil {
 		return nil
 	}
-	resp := &tsRollupTreeResponse{TID: uint16(n.TID)}
+	resp := &tsRollupTreeResponse{TID: int64(n.TID)}
 	if n.Def != nil {
 		r := defToResponse(*n.Def)
 		resp.Def = &r

@@ -28,14 +28,14 @@ type tsProvisionResponse struct {
 // Timeline management
 
 type tsDefineTimelineRequest struct {
-	ID            int    `json:"id"`
+	ID            int64  `json:"id"`
 	Name          string `json:"name,omitempty"`
 	Dims          int    `json:"dims"`
 	RetentionDays int    `json:"retention_days,omitempty"`
 }
 
 type tsTimelineResponse struct {
-	ID            int        `json:"id"`
+	ID            int64      `json:"id"`
 	Name          string     `json:"name,omitempty"`
 	Dims          int        `json:"dims"`
 	RetentionDays int        `json:"retention_days"`
@@ -46,7 +46,7 @@ type tsTimelineResponse struct {
 // Write
 
 type tsAppendRequest struct {
-	Timeline int       `json:"timeline"`
+	Timeline int64     `json:"timeline"`
 	Dims     []uint64  `json:"dims"`
 	Time     string    `json:"time"`
 	Nums     []float64 `json:"nums,omitempty"`
@@ -66,7 +66,7 @@ type tsBatchAppendResponse struct {
 // Query
 
 type tsEventResponse struct {
-	Timeline int       `json:"timeline"`
+	Timeline int64     `json:"timeline"`
 	Dims     []uint64  `json:"dims"`
 	Time     time.Time `json:"time"`
 	Nums     []float64 `json:"nums,omitempty"`
@@ -81,7 +81,7 @@ type tsRangeResponse struct {
 // Aggregate
 
 type tsAggregateRequest struct {
-	Timeline int      `json:"timeline"`
+	Timeline int64    `json:"timeline"`
 	Dims     []uint64 `json:"dims"`
 	From     string   `json:"from"`
 	To       string   `json:"to"`
@@ -97,7 +97,7 @@ type tsBucketResponse struct {
 }
 
 type tsAggregateResponse struct {
-	Timeline int    `json:"timeline"`
+	Timeline int64  `json:"timeline"`
 	NumField int    `json:"num_field"`
 	Function string `json:"function"`
 	Interval string `json:"interval,omitempty"`
@@ -118,7 +118,7 @@ type tsRetentionResponse struct {
 }
 
 type tsTimelineRetention struct {
-	ID            int    `json:"id"`
+	ID            int64  `json:"id"`
 	Name          string `json:"name,omitempty"`
 	RetentionDays int    `json:"retention_days"`
 }
@@ -131,7 +131,7 @@ type tsStatsResponse struct {
 }
 
 type tsTimelineStatsResponse struct {
-	TimelineID             int        `json:"timeline_id"`
+	TimelineID             int64      `json:"timeline_id"`
 	Name                   string     `json:"name,omitempty"`
 	TotalEvents            int64      `json:"total_events"`
 	TotalEventsApproximate bool       `json:"total_events_approximate"`
@@ -234,7 +234,7 @@ func parseDims(s string) ([]uint64, error) {
 // eventToResponse converts a timeseries.Event to the HTTP response type.
 func eventToResponse(e timeseries.Event) tsEventResponse {
 	r := tsEventResponse{
-		Timeline: int(e.Timeline),
+		Timeline: int64(e.Timeline),
 		Dims:     e.Dims,
 		Time:     e.Time,
 		Nums:     e.Nums,
@@ -253,7 +253,7 @@ func eventToResponse(e timeseries.Event) tsEventResponse {
 // timelineToResponse converts a TimelineConfig to the HTTP response type.
 func timelineToResponse(id timeseries.TimelineID, cfg timeseries.TimelineConfig) tsTimelineResponse {
 	r := tsTimelineResponse{
-		ID:            int(id),
+		ID:            int64(id),
 		Name:          cfg.Name,
 		Dims:          int(cfg.Dims),
 		RetentionDays: cfg.RetentionDays,
@@ -409,8 +409,9 @@ func (s *Server) HandleTSDefineTimeline(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
-	if req.ID <= 0 || req.ID > int(timeseries.MaxTimelineID) {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, fmt.Sprintf("invalid timeline ID %d", req.ID))
+	tlID, err := timeseries.TimelineIDFromJSON(req.ID)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, err.Error())
 		return
 	}
 	// D-006: validate dims against [MinDims, MaxDims] on the raw int BEFORE the
@@ -427,13 +428,13 @@ func (s *Server) HandleTSDefineTimeline(w http.ResponseWriter, r *http.Request) 
 		Dims:          uint8(req.Dims),
 		RetentionDays: req.RetentionDays,
 	}
-	if err := store.DefineTimeline(timeseries.TimelineID(req.ID), cfg); err != nil {
+	if err := store.DefineTimeline(tlID, cfg); err != nil {
 		code := classifyTSError(err)
 		s.writeError(w, http.StatusConflict, xoluerr.Code(code), err.Error())
 		return
 	}
-	cfg, _ = store.Timeline(timeseries.TimelineID(req.ID))
-	s.writeJSON(w, http.StatusCreated, timelineToResponse(timeseries.TimelineID(req.ID), cfg))
+	cfg, _ = store.Timeline(tlID)
+	s.writeJSON(w, http.StatusCreated, timelineToResponse(tlID, cfg))
 }
 
 // HandleTSListTimelines returns all defined timelines.
@@ -462,7 +463,7 @@ func (s *Server) HandleTSGetTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tidStr := chi.URLParam(r, "timeline_id")
-	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
+	tidInt, err := strconv.ParseUint(tidStr, 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
@@ -485,7 +486,7 @@ func (s *Server) HandleTSUpdateTimeline(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	tidStr := chi.URLParam(r, "timeline_id")
-	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
+	tidInt, err := strconv.ParseUint(tidStr, 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
@@ -528,13 +529,18 @@ func (s *Server) HandleTSAppend(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
 		return
 	}
+	tlID, tlErr := timeseries.TimelineIDFromJSON(req.Timeline)
+	if tlErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, tlErr.Error())
+		return
+	}
 	ts, err := parseTSTime(req.Time)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
 		return
 	}
 	e := timeseries.Event{
-		Timeline: timeseries.TimelineID(req.Timeline),
+		Timeline: tlID,
 		Dims:     req.Dims,
 		Time:     ts,
 		Nums:     req.Nums,
@@ -574,8 +580,13 @@ func (s *Server) HandleTSBatchAppend(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), fmt.Sprintf("event[%d]: %s", i, err))
 			return
 		}
+		reTlID, reTlErr := timeseries.TimelineIDFromJSON(re.Timeline)
+		if reTlErr != nil {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, fmt.Sprintf("event[%d]: %s", i, reTlErr))
+			return
+		}
 		events = append(events, timeseries.Event{
-			Timeline: timeseries.TimelineID(re.Timeline),
+			Timeline: reTlID,
 			Dims:     re.Dims,
 			Time:     ts,
 			Nums:     re.Nums,
@@ -605,7 +616,7 @@ func (s *Server) HandleTSQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
-	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 16)
+	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline parameter")
 		return
@@ -713,7 +724,7 @@ func (s *Server) HandleTSQueryRangePost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if body.Timeline == 0 || body.Timeline > 0xFFFF {
+	if body.Timeline == 0 || body.Timeline > uint64(timeseries.MaxTimelineID) {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline field")
 		return
 	}
@@ -794,7 +805,7 @@ func (s *Server) HandleTSLatest(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
-	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 16)
+	tidInt, err := strconv.ParseUint(q.Get("timeline"), 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), "missing or invalid timeline parameter")
 		return
@@ -912,8 +923,13 @@ func (s *Server) HandleTSAggregate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	aqTlID, aqTlErr := timeseries.TimelineIDFromJSON(req.Timeline)
+	if aqTlErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, aqTlErr.Error())
+		return
+	}
 	aq := timeseries.AggregateQuery{
-		Timeline:      timeseries.TimelineID(req.Timeline),
+		Timeline:      aqTlID,
 		Dims:          req.Dims,
 		From:          from,
 		To:            to,
@@ -979,7 +995,7 @@ func (s *Server) HandleTSGetRetention(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		cfg, _ := store.Timeline(id)
 		resp.Timelines = append(resp.Timelines, tsTimelineRetention{
-			ID:            int(id),
+			ID:            int64(id),
 			Name:          cfg.Name,
 			RetentionDays: cfg.RetentionDays,
 		})
@@ -1017,7 +1033,7 @@ func (s *Server) HandleTSTimelineStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tidStr := chi.URLParam(r, "timeline_id")
-	tidInt, err := strconv.ParseUint(tidStr, 10, 16)
+	tidInt, err := strconv.ParseUint(tidStr, 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"), fmt.Sprintf("invalid timeline_id %q", tidStr))
 		return
@@ -1034,7 +1050,7 @@ func (s *Server) HandleTSTimelineStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := tsTimelineStatsResponse{
-		TimelineID:             int(tid),
+		TimelineID:             int64(tid),
 		Name:                   cfg.Name,
 		TotalEvents:            stats.TotalEvents,
 		TotalEventsApproximate: stats.TotalEventsApproximate,
@@ -1059,14 +1075,14 @@ type tsPatchRetentionRequest struct {
 }
 
 type tsRangeAggregateRequest struct {
-	Timeline uint16   `json:"timeline"`
+	Timeline int64    `json:"timeline"`
 	Dims     []uint64 `json:"dims"`
 	From     string   `json:"from"`
 	To       string   `json:"to"`
 }
 
 type tsRangeAggregateResponse struct {
-	Timeline uint16     `json:"timeline"`
+	Timeline int64      `json:"timeline"`
 	Count    uint64     `json:"count"`
 	Fields   [7]bool    `json:"fields"`
 	Sums     [7]float64 `json:"sums"`
@@ -1076,7 +1092,7 @@ type tsRangeAggregateResponse struct {
 }
 
 type tsFullAggregateRequest struct {
-	Timeline       uint16    `json:"timeline"`
+	Timeline       int64     `json:"timeline"`
 	Dims           []uint64  `json:"dims"`
 	From           string    `json:"from"`
 	To             string    `json:"to"`
@@ -1090,7 +1106,7 @@ type tsFullAggregateRequest struct {
 // was not requested. Fields, Sums, Avgs, Mins, Maxs follow the same
 // seven-element convention as tsRangeAggregateResponse.
 type tsFullAggregateResponse struct {
-	Timeline  uint16       `json:"timeline"`
+	Timeline  int64        `json:"timeline"`
 	Count     uint64       `json:"count"`
 	Fields    [7]bool      `json:"fields"`
 	Sums      [7]float64   `json:"sums"`
@@ -1162,11 +1178,16 @@ func (s *Server) HandleTSRangeAggregate(w http.ResponseWriter, r *http.Request) 
 			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
 		return
 	}
+	raTlID, raTlErr := timeseries.TimelineIDFromJSON(req.Timeline)
+	if raTlErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, raTlErr.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
 	defer cancel()
 
 	res, err := store.RangeAggregate(ctx, timeseries.RangeAllQuery{
-		Timeline:      timeseries.TimelineID(req.Timeline),
+		Timeline:      raTlID,
 		Dims:          req.Dims,
 		From:          from,
 		To:            to,
@@ -1241,12 +1262,17 @@ func (s *Server) HandleTSFullAggregate(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("query range exceeds %d days", limits.maxRangeDays))
 		return
 	}
+	rfTlID, rfTlErr := timeseries.TimelineIDFromJSON(req.Timeline)
+	if rfTlErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, rfTlErr.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), limits.timeout)
 	defer cancel()
 
 	res, err := store.RangeFullAggregate(ctx, timeseries.RangeFullQuery{
 		RangeAllQuery: timeseries.RangeAllQuery{
-			Timeline:      timeseries.TimelineID(req.Timeline),
+			Timeline:      rfTlID,
 			Dims:          req.Dims,
 			From:          from,
 			To:            to,
@@ -1283,7 +1309,7 @@ func (s *Server) HandleTSFullAggregate(w http.ResponseWriter, r *http.Request) {
 
 // tsSyncResponse is the body returned by GET /ts/timelines/{timeline_id}/sync.
 type tsSyncResponse struct {
-	TimelineID int  `json:"timeline_id"`
+	TimelineID int64 `json:"timeline_id"`
 	NoSync     bool `json:"nosync"`
 }
 
@@ -1292,7 +1318,7 @@ func (s *Server) tsParseSyncTimeline(w http.ResponseWriter, r *http.Request) (ti
 	if store == nil {
 		return nil, 0, false
 	}
-	tidInt, err := strconv.ParseUint(chi.URLParam(r, "timeline_id"), 10, 16)
+	tidInt, err := strconv.ParseUint(chi.URLParam(r, "timeline_id"), 10, 32)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS004"),
 			fmt.Sprintf("invalid timeline_id %q", chi.URLParam(r, "timeline_id")))
@@ -1317,7 +1343,7 @@ func (s *Server) HandleTSSyncGet(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := store.WriteConfig(tid)
 	s.writeJSON(w, http.StatusOK, tsSyncResponse{
-		TimelineID: int(tid),
+		TimelineID: int64(tid),
 		NoSync:     cfg.NoSync,
 	})
 }
@@ -1338,7 +1364,7 @@ func (s *Server) HandleTSSyncOn(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrTSWriteConfigSaveFailed, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int(tid), NoSync: false})
+	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int64(tid), NoSync: false})
 }
 
 // HandleTSSyncOff enables nosync mode for a timeline (NoSync=true).
@@ -1359,5 +1385,5 @@ func (s *Server) HandleTSSyncOff(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrTSWriteConfigSaveFailed, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int(tid), NoSync: true})
+	s.writeJSON(w, http.StatusOK, tsSyncResponse{TimelineID: int64(tid), NoSync: true})
 }

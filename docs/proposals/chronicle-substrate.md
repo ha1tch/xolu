@@ -41,6 +41,7 @@ admission guard — is what makes a primitive a primitive.
 | Derived index + rebuild oracle | ✓ | ✓ | ✓ | **Yes** — as a harness |
 | Admission guard (refuse on fold-violating write) | ✗ | ✓ (occupancy) | ✓ (bounds) | **Doctrine, not code** |
 | Two-phase lifecycle (propose/confirm; holds) | ✗ | ✓ | future | **Doctrine, not code** |
+| Sized-id discipline at the wire boundary | corrected (int64 wire + helper) | ✓ (string id; no numeric surface) | inherited (§9a) | **Yes — law (§4d)** |
 
 ## 3. The mathematical core
 
@@ -169,6 +170,73 @@ primitive as the annotation slot — subjects generalise to
 Corollary for high-volume immutable records (journal entries): their
 descriptive text is **inline on the record**, written and frozen with
 it — the sidecar is for long-lived mutable subjects.
+
+## 4d. Substrate law: sized ids survive the wire
+
+A fourth principle was derived the expensive way — a 32-bit CI break
+and six latent runtime truncations in /ts (2026-07-20) — and, like the
+others, was found to have already been solved correctly by *two* other
+primitives independently. It promotes to law:
+
+> **A primitive's id has one width, and that width is preserved at
+> every boundary it crosses.** An id typed `uintN` internally must
+> never be held, parsed, compared, or serialised through a narrower or
+> platform-dependent type — not `int` (which is 32-bit on some targets,
+> so a `uint32` id above 2³¹ truncates and a `uint32`-max constant
+> converted to `int` fails to compile), not a `uintM` with M < N. The
+> JSON/transport boundary is where this is lost: request and response
+> structs, path- and query-parameter parsing, and any ceiling constant
+> are the four sites where a sized id silently narrows.
+
+### The preferred structure: two identities, not one
+
+The deepest form of compliance is architectural, and **cal and bal both
+arrived at it independently**: give a subject **two identities** —
+
+- an **external identity**: a caller-chosen, opaque *string* that
+  appears at the API boundary (`cal.CalendarID` = "room-204";
+  `bal.account_id` = "warehouse:A/widget"). Strings have no numeric
+  width to truncate, so the wire boundary is trivially safe, and the
+  id is human-meaningful for operators and agents.
+- an **internal identity**: a system-allocated dense `uintN` that never
+  leaves the engine, used only for the compact storage codec
+  (`cal.CalOrdinal uint32`, allocated ascending; bal's internal account
+  key). Encoded with an explicit fixed-width codec, compared only
+  inside the engine — it never crosses a boundary, so it cannot narrow.
+
+This split is strictly superior to a single conflated id: the string
+absorbs the boundary-safety obligation while the dense int keeps storage
+compact, and the two concerns stop fighting. A primitive built this way
+satisfies the law by construction — there is no numeric id on the wire
+to protect.
+
+### The fallback: one id, carried wide (ts's corrected form)
+
+Where a primitive exposes a numeric id directly — /ts's historical
+model, where `TimelineID uint32` is both the caller-supplied id and the
+codec key — the law is satisfied defensively: carry the id as `int64`
+in every wire struct (the only integer width holding a full `uint32` on
+32-bit platforms), parse path/query ids with an explicit bit size
+(`ParseUint(s, 10, 32)`, never 16), never convert the ceiling constant
+to `int`, and route every crossing through a single validating helper
+(`timeseries.TimelineIDFromJSON`) so no call site hand-narrows. This
+works, but it is a correction, not a structure: the numeric id is still
+on the wire, and the discipline must be actively maintained at every new
+boundary rather than made impossible.
+
+Independent derivations: **cal** and **bal** use the two-identity split
+(string external id, dense `uintN` internal) and have no numeric-id
+boundary surface at all; **ts** conflates the two into one exposed
+`uint32` and, after the widening (@P item #8) left `int`/`uint16`
+boundary fields that broke the 32-bit build and truncated ids above
+65 535, now carries it as `int64` behind a validating helper.
+Retrofitting ts to the two-identity model is the correct long-term
+direction but a breaking API change (T-46, deferred); until then ts's
+corrected wide-carry form holds the line. Any future primitive that
+exposes an id must answer to this section: prefer the two-identity
+split; if a numeric id must be exposed, carry it wide behind a helper;
+and ship the range test (full `uintN` span including values above
+2^(N-1) and the ceiling) with stage 1, not as an afterthought.
 
 ## 5. Sequencing
 

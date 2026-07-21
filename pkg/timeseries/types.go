@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 )
 
 // ErrDeleteNotSupported is returned by Store implementations that do not
@@ -27,6 +29,31 @@ type TimelineID uint32
 
 // MaxTimelineID is the highest valid timeline ID.
 const MaxTimelineID TimelineID = 0xFFFFFFFF
+
+// TimelineIDFromJSON converts a JSON-decoded numeric timeline id (carried
+// as int64, the only width that holds the full uint32 range on every
+// platform including 32-bit) into a TimelineID, validating the range.
+//
+// This is the single sanctioned crossing from the JSON/transport boundary
+// into the typed id space. Callers must not hand-narrow a JSON number to
+// TimelineID directly: a plain `int` cannot hold ids above 2^31 on 32-bit
+// targets (silent truncation), and `int(MaxTimelineID)` overflows the
+// constant on those targets (compile error). Routing every boundary
+// through this function makes both failure modes impossible.
+//
+// The id must be in [1, MaxTimelineID]: 0 is reserved (registry rejects
+// it too), and anything above the uint32 ceiling is out of range.
+func TimelineIDFromJSON(v int64) (TimelineID, error) {
+	if v <= 0 {
+		return 0, fmt.Errorf("timeseries: timeline ID %d is invalid (must be 1..%d) (%s)",
+			v, uint32(MaxTimelineID), xoluerr.ErrTSReservedID)
+	}
+	if v > int64(MaxTimelineID) {
+		return 0, fmt.Errorf("timeseries: timeline ID %d exceeds maximum %d (%s)",
+			v, uint32(MaxTimelineID), xoluerr.ErrTSReservedID)
+	}
+	return TimelineID(v), nil
+}
 
 // MinDims and MaxDims bound the number of dimensions a timeline may declare.
 const (

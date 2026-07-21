@@ -143,7 +143,7 @@ type CommitRequest struct {
 // It maps directly onto timeseries.Event; the Timeline must already be defined
 // for the tenant via POST /ts/timelines before /commit is called.
 type CommitTSEvent struct {
-	Timeline uint16    `json:"timeline"`
+	Timeline int64     `json:"timeline"`
 	Dims     []uint64  `json:"dims"`
 	Time     time.Time `json:"time"`
 	Nums     []float64 `json:"nums,omitempty"`

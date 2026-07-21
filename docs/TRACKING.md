@@ -50,6 +50,8 @@ item's Trigger line.
 | T-16 | `cal` daypart rollup-prune performance validation | cal | P5 | ☐ | After: realistic occupancy distributions are available to measure against. |
 | T-42 | Dockerfile audit and refresh before wave-programme close | ops | P4 | ☐ | End-of-programme item so shipped images carry release-quality xolu, not interim wave states. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
+| T-45 | Mechanical guard for @C04d (sized-id wire discipline): a check that flags int()/uint16() narrowing of a sized-id type and ParseUint(...,16) on ids, so the law self-enforces instead of relying on review | tooling | P3 | ☐ | Enforces @C04d (chronicle §4d). Would have caught the /ts 32-bit break pre-merge. |
+| T-46 | Retrofit /ts to the two-identity model (@C04d): external string timeline id at the wire, internal uint32 as codec key — the design cal and bal already use. Breaking API change; eliminates ts's numeric-id boundary surface entirely | ts | P4 | ☐ | After: a v2 ts API window (breaking). Correct long-term direction; ts's int64+helper form holds the line until then. |
 
 ---
 
@@ -64,6 +66,53 @@ item's Trigger line.
 ## FSM read surface
 
 
+
+### T-46. Retrofit /ts to the two-identity model (@C04d)
+
+Theme: ts · Priority: P4 · Status: ☐
+Blocks/after: needs a breaking-change window (v2 ts API). Not urgent — ts's corrected int64+helper wire form (@C04d fallback) is safe today; this is the structural upgrade from "corrected" to "correct by construction".
+
+- **What:** give a ts timeline two identities like cal and bal — a
+  caller-chosen external *string* id at the API boundary, and the
+  existing `TimelineID uint32` demoted to an engine-internal dense codec
+  key allocated by the store. Removes the numeric id from the wire
+  entirely, so @C04d is satisfied by construction rather than by the
+  int64+helper discipline.
+- **Why deferred (P4, breaking):** every current ts client references
+  timelines by number; moving to a string external id changes every ts
+  endpoint's contract. It is the right model — cal and bal both chose it
+  — but it is a v2-ts-sized redesign with client/molu/wire impact, not a
+  bug fix. The 32-bit bug that motivated @C04d is already fixed by the
+  wide-carry form; this item is the architectural follow-through, done
+  when a breaking ts-API window opens.
+- **Reference:** chronicle-substrate.md §4d (the two-identity preferred
+  structure); cal (`CalendarID` string + `CalOrdinal uint32`) and bal
+  (`account_id` string + internal key) as the pattern to match.
+
+### T-45. Mechanical guard for @C04d (sized-id wire discipline)
+
+Theme: tooling · Priority: P3 · Status: ☐
+Blocks/after: enforces @C04d (chronicle-substrate §4d). Independent; can land any time. Strengthens every current and future primitive that exposes a numeric id.
+
+- **What:** a mechanical check (go vet-style analyzer, or a CI grep/lint
+  pass) that flags the four @C04d violation sites: `int(<sized-id>)` and
+  `uintM(<sized-id>)` narrowing conversions, `ParseUint(..., 10, 16)` (or
+  any bitsize narrower than the id's width) on an id parse, and
+  conversion of a sized-id ceiling constant to `int`. Sized-id types are
+  registered by name (TimelineID, CalOrdinal, future bal AccountID).
+- **Why P3, why now on the radar:** @C04d was canonised only after the
+  /ts 32-bit break (2026-07-20). A law enforced solely by review is a
+  law that will be forgotten under deadline — exactly how the /ts
+  boundary fields slipped through the wave-1 widening. A mechanical guard
+  makes the law self-enforcing and would have caught that defect
+  pre-merge. This is the "should have been an early dependency" lesson
+  turned into a standing check.
+- **Scope note:** the guard complements, does not replace, the per-
+  primitive range regression test (@C04d stage-1 obligation). The test
+  proves one primitive's boundary is correct; the guard proves no new
+  narrowing is introduced anywhere.
+- **Reference:** docs/proposals/chronicle-substrate.md §4d;
+  pkg/timeseries/timeline_id_width_test.go (the test pattern it backstops).
 
 ### T-42. Dockerfile audit and refresh (end-of-programme)
 

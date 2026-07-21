@@ -63,6 +63,18 @@ The system-wide time invariant and its package (`pkg/xolutime`, alias `ot`) are
 documented in `docs/TIME_HANDLING.md`. The following are the deliberate limits of
 that enforcement, recorded so a passing build is read honestly.
 
+- **Test-file timestamp constants overflow int on 32-bit (recorded
+  2026-07-20).** A few auth test fixtures use a far-future Unix timestamp
+  constant (`4102444800`, year 2100) in `int`-typed map literals
+  (`blob_scoped_auth_test.go`, `tenant_scoped_auth_test.go`). These
+  overflow `int` when the *test suite* is compiled for a 32-bit target.
+  This does NOT break CI: `cross-build.yml` compiles only `./cmd/...`
+  (no tests), and `ci.yml` runs the suite on a 64-bit runner. It would
+  only surface if someone ran `go test` on a 32-bit host. Low priority;
+  fix by typing those constants `int64` when convenient. Distinct from
+  the production TimelineID width bug fixed the same day (that one broke
+  the cross-build; this is test-only).
+
 - **The lint guard is a regression catcher, not a proof.** `TestNoBareWallClock`
   flags bare `time.Now()` flowing into persisted/compared wall-clock values, by
   syntactic shape: direct field set, struct literal, the address-of-temp idiom
@@ -149,6 +161,22 @@ that enforcement, recorded so a passing build is read honestly.
   enforcement and the @R05a composite-FK pushdown, which close the window
   database-natively. **Guard:** G-12 (dormant-guards table) measures the
   window now and converts to an assertion when stage 3 closes it.
+
+  **Architectural constraint discovered 2026-07-20 (a first transactional
+  fix attempt, reverted):** the naive fix — read inbound referrers from
+  the SQL edge table (`t<X>_graph`) inside the delete's transaction — does
+  NOT work as-is, because on the server's write path the SQL edge table is
+  **not the authoritative edge state**. The server maintains edges in the
+  in-memory FlatGraph via `updateGraph` (a "derived index"), and the
+  store's `syncGraphEdges` SQL path is not invoked on that flow, so the
+  edge table is empty at delete time and a transactional SQL read finds no
+  referrers. Closing the window therefore requires one of: (a) making the
+  SQL edge table authoritative and synced on every write (then the
+  transactional read works), or (b) spanning the in-memory graph's lock
+  and the store delete under one atomicity boundary across the two
+  subsystems. Both are larger than stage 3 as originally scoped; whichever
+  is chosen must be designed before code. Until then the stage-2 window
+  stands, measured by G-12.
 
 - **CascadingDelete flag coexistence (recorded 2026-07-20).** The legacy
   `CascadingDelete` config flag and stage-2 restrict enforcement coexist

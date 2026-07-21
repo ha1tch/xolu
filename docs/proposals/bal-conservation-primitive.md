@@ -203,6 +203,33 @@ Client: four typed methods in `pkg/client`; molu exposes transfer,
 balance, and entries as tools — agent commerce made safe by physics
 rather than by prompt.
 
+### 9a. Account identity: two-identity split (satisfies @C04d by construction)
+
+bal already uses the substrate-preferred two-identity model (@C04d,
+chronicle §4d), the same one cal arrived at independently:
+
+- **External identity:** `account_id` is a namespaced *string*
+  (`warehouse:A/widget`, §3) at every API boundary. Being a string, it
+  has no numeric width to truncate — bal has no id-boundary bug surface
+  at all, by construction, and the id stays human-meaningful for
+  operators and agents.
+- **Internal identity:** the dense numeric account key (uint32, the
+  wave-1 per-primitive width, @P item #8) is engine-internal, used only
+  for the compact storage codec, never exposed in JSON, encoded with an
+  explicit fixed-width codec and never narrowed to `int`.
+
+Because the number never crosses the wire, bal satisfies @C04d the strong
+way — the /ts boundary bug class (uint32 in `int`/`uint16` JSON fields;
+`int(ceiling)` overflow on 32-bit) is structurally impossible here.
+
+Implementation obligations at stage 1: keep the numeric account key off
+the JSON boundary (never add a numeric `account_id` field to a wire
+struct); encode it with an explicit fixed-width codec; and — since the
+internal key is still a sized int — ship the @C04d range regression test
+for it (full uint32 span incl. values above 2^31 and the ceiling; ceiling
+fits uint32; codec round-trip lossless), analogous to
+`pkg/timeseries/timeline_id_width_test.go`.
+
 ## 10. Future: holds
 
 Reservations (hold five units without moving them; authorise before

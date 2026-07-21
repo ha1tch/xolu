@@ -132,11 +132,18 @@ wave boundary.
 any code. (a) Sync the design corpus (seven new documents from
 2026-07-19: the six proposals and this plan) to GitHub so the source of
 truth carries what was designed. (b) Audit @C04a (guard locality),
-@C04b (finiteness), and @C04c (meta inert) against the existing tree —
-cal, ts, storelayout, meta — and file findings as either "already
-compliant" (recorded) or new register items. Existing incumbents were
-designed before the laws were canonised; assuming compliance is the
-class of guess the working agreement forbids.
+@C04b (finiteness), @C04c (meta inert), and @C04d (sized ids survive
+the wire) against the existing tree — cal, ts, storelayout, meta — and
+file findings as either "already compliant" (recorded) or new register
+items. Existing incumbents were designed before the laws were
+canonised; assuming compliance is the class of guess the working
+agreement forbids. (@C04d was itself canonised late, after a uint32
+widening broke the 32-bit build and truncated ids in /ts — a law that,
+had it existed and been audited at wave entry, would have caught the
+defect before it shipped. Its retroactive audit obligation is: every
+primitive exposing a numeric id names its boundary pattern and ships
+the range test. ts is corrected; cal is compliant by design; bal
+inherits it pre-build.)
 
 **Wave 0 — Process foundation and quick debt (≈ 5.5 days).**
 Items 1–7. Exit: register at its lowest open count since inception;
