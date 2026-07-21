@@ -1,6 +1,6 @@
 # xolu — Tracking (live register)
 
-Version: 0.16.7
+Version: 0.16.13
 Last reviewed: 2026-07-21
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and

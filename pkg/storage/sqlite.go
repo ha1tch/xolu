@@ -688,23 +688,27 @@ func (s *SQLiteStore) initV2Schema(ctx context.Context) error {
 	// Each block is guarded by CREATE TABLE IF NOT EXISTS and INSERT OR IGNORE,
 	// so running initV2Schema after a stage upgrade is safe.
 
-	// S3: entity metadata sidecar with TTL support.
+	// S3: metadata sidecar with TTL support. Since S13 (meta subject
+	// generalisation, @C04c) the address is (subject_kind, subject_key):
+	// fresh databases get the new shape here; legacy (entity, id INTEGER)
+	// tables are rebuilt by the S13 block below.
 	metaDDL := `
 		CREATE TABLE IF NOT EXISTS entity_meta (
-			tenant_id  INTEGER   NOT NULL DEFAULT 0,
-			entity     TEXT      NOT NULL,
-			id         INTEGER   NOT NULL,
-			key        TEXT      NOT NULL,
-			value      TEXT      NOT NULL,
-			expires_at TIMESTAMP NULL DEFAULT NULL,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, entity, id, key)
+			tenant_id    INTEGER   NOT NULL DEFAULT 0,
+			subject_kind TEXT      NOT NULL,
+			subject_key  TEXT      NOT NULL,
+			key          TEXT      NOT NULL,
+			value        TEXT      NOT NULL,
+			expires_at   TIMESTAMP NULL DEFAULT NULL,
+			updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, subject_kind, subject_key, key)
 		);
-		CREATE INDEX IF NOT EXISTS idx_entity_meta_entity
-			ON entity_meta(tenant_id, entity, id);
 		CREATE INDEX IF NOT EXISTS idx_entity_meta_expires
 			ON entity_meta(expires_at) WHERE expires_at IS NOT NULL;
 	`
+	// The subject index is created after the S13 block below: on a
+	// legacy database this table still has the old columns here, and an
+	// index on subject_kind would fail before the rebuild runs.
 	if _, err := s.db.ExecContext(ctx, metaDDL); err != nil {
 		return fmt.Errorf("v2 schema S3 (entity_meta) failed: %w", err)
 	}
@@ -954,7 +958,81 @@ func (s *SQLiteStore) initV2Schema(ctx context.Context) error {
 		return fmt.Errorf("v2 schema version 11 insert failed: %w", err)
 	}
 
+	// S13: meta subject-addressing generalisation (@C04c; plan item 7).
+	// entity_meta's (entity TEXT, id INTEGER) address becomes
+	// (subject_kind TEXT, subject_key TEXT): entities keep kind=name,
+	// key=decimal id; namespaced kinds (ts.timeline, cal.calendar, …)
+	// become first-class. SQLite cannot retype a column, so legacy
+	// tables are rebuilt: detect the old shape by its `id` column,
+	// copy with CAST, swap. Idempotent: the new shape is detected and
+	// left alone.
+	legacyMeta, err := s.tableHasColumn(ctx, "entity_meta", "id")
+	if err != nil {
+		return fmt.Errorf("v2 schema S13 (meta subjects) detect: %w", err)
+	}
+	if legacyMeta {
+		metaMigrate := `
+			CREATE TABLE entity_meta_new (
+				tenant_id    INTEGER   NOT NULL DEFAULT 0,
+				subject_kind TEXT      NOT NULL,
+				subject_key  TEXT      NOT NULL,
+				key          TEXT      NOT NULL,
+				value        TEXT      NOT NULL,
+				expires_at   TIMESTAMP NULL DEFAULT NULL,
+				updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (tenant_id, subject_kind, subject_key, key)
+			);
+			INSERT INTO entity_meta_new
+				(tenant_id, subject_kind, subject_key, key, value, expires_at, updated_at)
+				SELECT tenant_id, entity, CAST(id AS TEXT), key, value, expires_at, updated_at
+				FROM entity_meta;
+			DROP TABLE entity_meta;
+			ALTER TABLE entity_meta_new RENAME TO entity_meta;
+			CREATE INDEX IF NOT EXISTS idx_entity_meta_subject
+				ON entity_meta(tenant_id, subject_kind, subject_key);
+			CREATE INDEX IF NOT EXISTS idx_entity_meta_expires
+				ON entity_meta(expires_at) WHERE expires_at IS NOT NULL;
+		`
+		if _, err := s.db.ExecContext(ctx, metaMigrate); err != nil {
+			return fmt.Errorf("v2 schema S13 (meta subjects) rebuild: %w", err)
+		}
+	}
+	// By here the table is guaranteed subject-shaped (fresh via S3, or
+	// legacy via the rebuild above): the subject index is safe.
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_entity_meta_subject
+			ON entity_meta(tenant_id, subject_kind, subject_key)`); err != nil {
+		return fmt.Errorf("v2 schema S13 subject index failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 13, "S13-meta-subjects"); err != nil {
+		return fmt.Errorf("v2 schema version 13 insert failed: %w", err)
+	}
+
 	return nil
+}
+
+// tableHasColumn reports whether the named table currently has a column,
+// via PRAGMA table_info — the legacy-shape detector for rebuilds.
+func (s *SQLiteStore) tableHasColumn(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Info returns store information
@@ -1057,6 +1135,46 @@ func (s *SQLiteStore) syncGraphEdges(ctx context.Context, tx *sql.Tx, sourceEnti
 	rawEdges, err := models.ExtractEntityEdges(data)
 	if err != nil {
 		return fmt.Errorf("syncGraphEdges: %w", err)
+	}
+
+	// In-transaction REF target existence (G-12 create-side closure;
+	// @R02.3 write validation, shipped early). The handler's in-memory
+	// pre-check races the delete path: the target can vanish between
+	// that check and this transaction. Re-checking HERE, inside the
+	// write's own transaction, makes create-vs-delete linearisable under
+	// serialised writers: if the delete committed first the target row
+	// is gone and this rejects; if this commits first, the delete's own
+	// in-tx referrer check (DeleteWithRestrict) sees the new edge.
+	// Two-pronged like the delete side: adapted targets in their spec
+	// table, blob targets in the nodes table. The row being written in
+	// this very transaction is visible to these SELECTs (same tx), so
+	// self-references work.
+	checked := map[string]bool{}
+	for _, ee := range rawEdges {
+		key := fmt.Sprintf("%s/%d", ee.TargetEntity, ee.TargetID)
+		if checked[key] {
+			continue
+		}
+		checked[key] = true
+		var one int
+		var qerr error
+		if spec := s.adapted.Get(ee.TargetEntity); spec != nil {
+			qerr = tx.QueryRowContext(ctx,
+				`SELECT 1 FROM `+spec.TableName()+` WHERE id = ?`, int64(ee.TargetID)).Scan(&one)
+		} else {
+			qerr = tx.QueryRowContext(ctx,
+				`SELECT 1 FROM `+s.nodesTable()+` WHERE entity_type = ? AND id = ?`,
+				ee.TargetEntity, int64(ee.TargetID)).Scan(&one)
+		}
+		if qerr == sql.ErrNoRows {
+			return &RefTargetMissingError{
+				SourceEntity: sourceEntity, SourceID: sourceID,
+				TargetEntity: ee.TargetEntity, TargetID: int(ee.TargetID),
+			}
+		}
+		if qerr != nil {
+			return fmt.Errorf("syncGraphEdges: ref target check %s: %w", key, qerr)
+		}
 	}
 
 	// Delete old edges from this entity (always a single statement).
@@ -1460,6 +1578,23 @@ func (e *RestrictViolationError) Error() string {
 	return fmt.Sprintf("delete restricted by %d live referrer(s): %v", len(e.Referrers), e.Referrers)
 }
 
+// RefTargetMissingError reports that a write was refused because a REF
+// field names a target that does not exist at commit time — the
+// create-side sibling of RestrictViolationError, checked inside the
+// write's own transaction (G-12 create-side closure; @R02.3 shipped
+// early). Maps to XOLU-RI003 / HTTP 400 at the handler.
+type RefTargetMissingError struct {
+	SourceEntity string
+	SourceID     int
+	TargetEntity string
+	TargetID     int
+}
+
+func (e *RefTargetMissingError) Error() string {
+	return fmt.Sprintf("%s/%d references %s/%d which does not exist",
+		e.SourceEntity, e.SourceID, e.TargetEntity, e.TargetID)
+}
+
 // DeleteWithRestrict deletes entity:id, refusing with *RestrictViolationError
 // if any entity named in restrictedBy still references the target. The
 // referrer check runs INSIDE the delete's own transaction (@C04a: a guard
@@ -1556,9 +1691,10 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int, re
 	// Cascade delete v2 entity metadata (entity_meta is a global table;
 	// always attempt regardless of v2 enabled state — the table may not
 	// exist on v1-only deployments, in which case the error is ignored).
+	sub := EntitySubject(entity, id)
 	_, _ = tx.ExecContext(ctx,
-		`DELETE FROM entity_meta WHERE tenant_id=? AND entity=? AND id=?`,
-		s.config.TenantID, entity, id)
+		`DELETE FROM entity_meta WHERE tenant_id=? AND subject_kind=? AND subject_key=?`,
+		s.config.TenantID, sub.Kind, sub.Key)
 
 	return tx.Commit()
 }

@@ -67,6 +67,8 @@ func main() {
 			cmdDBStatus(os.Args[3:])
 		case "upgrade":
 			cmdDBUpgrade(os.Args[3:])
+		case "check":
+			cmdDBCheck(os.Args[3:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown db subcommand: %s\n", os.Args[2])
 			printDBUsage()
@@ -1109,6 +1111,7 @@ func printDBUsage() {
 	for _, l := range []struct{ cmd, desc string }{
 		{"init", "Create a new xolu database"},
 		{"status", "Show database status"},
+		{"check", "Run rebuild oracles: derived state == authoritative record"},
 		{"upgrade", "Apply pending schema migrations"},
 	} {
 		_, _ = fmt.Fprintf(w, "  %-10s  %s\n", l.cmd, l.desc)

@@ -939,6 +939,14 @@ func TestSQLiteStore_RebuildGraph_REFS(t *testing.T) {
 		}
 	}
 
+	// Targets first: REF targets must exist at write time (@R02.3,
+	// enforced in-tx since the G-12 create-side closure).
+	for i := 0; i < 3; i++ {
+		if _, err := store.Create(ctx, "user", map[string]interface{}{"name": fmt.Sprintf("u%d", i+1)}); err != nil {
+			t.Fatalf("Create user target: %v", err)
+		}
+	}
+
 	// One entity with a single REF, one with @REFS carrying three elements.
 	singleID, err := store.Create(ctx, "post", map[string]interface{}{
 		"title":  "Single REF post",
@@ -946,6 +954,13 @@ func TestSQLiteStore_RebuildGraph_REFS(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Create single-REF entity: %v", err)
+	}
+
+	// Sparse-id targets via the explicit-id upsert path.
+	for _, tid := range []int{10, 20, 30} {
+		if _, err := store.Save(ctx, "tag", tid, map[string]interface{}{"name": fmt.Sprintf("tag%d", tid)}); err != nil {
+			t.Fatalf("Save tag target %d: %v", tid, err)
+		}
 	}
 
 	multiID, err := store.Create(ctx, "post", map[string]interface{}{
@@ -1541,6 +1556,13 @@ func TestSQLiteStore_REFSGraphEdges(t *testing.T) {
 		makeREF("tag", 1),
 		makeREF("tag", 2),
 		makeREF("tag", 3),
+	}
+
+	// Targets first: REF targets must exist at write time (@R02.3).
+	for i := 0; i < 3; i++ {
+		if _, err := store.Create(ctx, "tag", map[string]interface{}{"name": fmt.Sprintf("t%d", i+1)}); err != nil {
+			t.Fatalf("Create tag target: %v", err)
+		}
 	}
 
 	id, err := store.Create(ctx, "post", map[string]interface{}{

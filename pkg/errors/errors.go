@@ -324,12 +324,36 @@ const (
 
 	// ErrRIValidateTarget is returned when a write-time validate check
 	// finds the referenced target missing (@R02.3). Stage 4. HTTP 400.
+	// Its in-transaction enforcement shipped early as the create-side
+	// closure of the G-12 race (2026-07-21): target existence is checked
+	// inside the write's own transaction, which with serialised writers
+	// makes create-vs-delete linearisable in either commit order.
 	ErrRIValidateTarget Code = "XOLU-RI003"
 
 	// ErrRISchemaXRef is returned when an entity's schema carries a
 	// malformed x-ref annotation (@R02.1). HTTP 400 at schema-load or
 	// registry-build time.
 	ErrRISchemaXRef Code = "XOLU-RI004"
+)
+
+const (
+	// --- bal: conservation primitive (@B) ---
+
+	// ErrBalBounds: transfer refused by the floor/ceiling guard — the
+	// CAS predicate matched zero rows (@B06). HTTP 409.
+	ErrBalBounds Code = "XOLU-BAL001"
+	// ErrBalUnknownAccount: a transfer or query names an account that
+	// does not exist (@B09). HTTP 404.
+	ErrBalUnknownAccount Code = "XOLU-BAL002"
+	// ErrBalSealedPeriod: entry dated within a sealed (closed) period
+	// (@B07). HTTP 409.
+	ErrBalSealedPeriod Code = "XOLU-BAL003"
+	// ErrBalAmountScale: amount invalid for the account's scale or not
+	// an exact integer of minor units (@B04). HTTP 400.
+	ErrBalAmountScale Code = "XOLU-BAL004"
+	// ErrBalNotPostable: transfer names a summary (non-postable)
+	// account; only leaves are imputables (@B03a). HTTP 409.
+	ErrBalNotPostable Code = "XOLU-BAL005"
 )
 
 const (

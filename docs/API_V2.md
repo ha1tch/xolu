@@ -1100,7 +1100,31 @@ convention.
 
 ---
 
-## /api/v2/meta — Entity Metadata
+## /api/v2/meta — Subject Metadata
+
+Since S13 (item 7, @C04c) the meta sidecar addresses **subjects**, not
+just entities. A subject is `{kind}/{key}` in the same two URL segments:
+
+- **Entity kinds** (no dot): kind is the entity name, key is the
+  positive integer id — the original surface, unchanged, including the
+  existence check (404 on missing entity). Responses keep the legacy
+  `entity` and integer `id` fields and gain a `subject` object.
+- **Namespaced kinds** (dotted): first-class primitive subjects.
+  Live now: `ts.timeline` (key is the uint32 timeline id, validated at
+  full width per @C04d), `cal.calendar`, `cal.booking`, `fsm.machine`
+  (opaque string keys, 1–256 chars, no whitespace or `/`). Reserved and
+  refused until their primitives land: `bal.account`, `dxp.def`,
+  `dxp.txn`. Namespaced responses carry `subject` only.
+
+Recorded v1 limits: namespaced kinds skip server-side existence checks
+(meta is engine-inert annotation; per-kind existence probes are a
+follow-up). Cascade: deleting a timeline sweeps its `ts.timeline`
+subjects best-effort (cross-store, so post-delete rather than
+transactional; orphans from a crash are harmless and TTL-reclaimable).
+cal kinds gain their sweep when cal grows delete/cancel endpoints —
+none exist today.
+
+### Entity metadata (original surface)
 
 A per-entity key/value sidecar for values that belong to an entity by
 identity but not by business model: UI state, computed derived values,

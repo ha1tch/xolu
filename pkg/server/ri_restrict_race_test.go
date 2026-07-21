@@ -44,13 +44,17 @@ func TestRIRestrict_Race(t *testing.T) {
 		}
 	}
 
-	// ASSERTION (window closed 2026-07-21 by DeleteWithRestrict's
-	// in-transaction check, ahead of the stage-3 schedule): after
-	// concurrent delete-target + create-referrer, the store must never
-	// hold a committed referrer pointing at a deleted target. On single-
-	// core hardware this cannot open the window and passes vacuously —
-	// the dormant-guard entry still owes a real-silicon multi-core run
-	// (G-12) before the closure counts as verified.
+	// ASSERTION. History: the delete-side closure alone
+	// (DeleteWithRestrict, 2026-07-21) was FALSIFIED the same day by
+	// this assertion on GitHub's multi-core runners (1/8 trials
+	// dangling) — the residual window was the create side, whose REF
+	// target check ran against the in-memory graph outside the write
+	// transaction. Both halves are now in-transaction (delete:
+	// DeleteWithRestrict; create/update/patch: target-existence check
+	// inside syncGraphEdges, @R02.3 shipped early), making the pair
+	// linearisable under serialised writers in either commit order.
+	// Single-core runs still pass near-vacuously; multi-core CI is the
+	// real exercise of this assertion.
 	if dangling > 0 {
 		t.Fatalf("RI restrict race: %d/%d trials left a dangling reference — "+
 			"the in-transaction restrict check (DeleteWithRestrict, @C04a) failed to close the window",

@@ -33,6 +33,7 @@ import (
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"strings"
 )
 
 // metaKeyRe validates metadata keys: alphanumeric plus underscore, 1–64 chars.
@@ -53,12 +54,42 @@ func (s *Server) metaDB(r *http.Request) (*sql.DB, uint16) {
 
 // ─── GET /meta/{entity}/{id} ─────────────────────────────────────────────────
 
+// sweepMetaSubject deletes every annotation for one subject — the
+// cascade hook primitive lifecycles call after a successful delete.
+// Best-effort by design: the primitive's store and entity_meta live in
+// different stores, so this cannot share the delete's transaction (the
+// entity cascade in deleteInner can and does). A crash between delete
+// and sweep leaves orphan annotations, which are harmless (meta is
+// engine-inert) and reclaimable via TTL or an explicit meta DELETE.
+func (s *Server) sweepMetaSubject(ctx context.Context, r *http.Request, kind, key string) {
+	db, tenantID := s.metaDB(r)
+	_, _ = db.ExecContext(ctx,
+		`DELETE FROM entity_meta WHERE tenant_id=? AND subject_kind=? AND subject_key=?`,
+		tenantID, kind, key)
+}
+
+// subjectFields renders a subject for response JSON: every response
+// carries "subject" {kind,key}; entity kinds additionally keep the
+// legacy "entity" and integer "id" fields for existing clients.
+func subjectFields(sub storage.MetaSubject) map[string]interface{} {
+	m := map[string]interface{}{
+		"subject": map[string]string{"kind": sub.Kind, "key": sub.Key},
+	}
+	if !strings.Contains(sub.Kind, ".") {
+		if id, err := strconv.Atoi(sub.Key); err == nil {
+			m["entity"] = sub.Kind
+			m["id"] = id
+		}
+	}
+	return m
+}
+
 func (s *Server) handleMetaList(w http.ResponseWriter, r *http.Request) {
 	entity := chi.URLParam(r, "entity")
 	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+	sub, err := storage.ParseMetaSubject(entity, idStr, validateEntityName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, err.Error())
 		return
 	}
 
@@ -66,9 +97,9 @@ func (s *Server) handleMetaList(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.QueryContext(r.Context(),
 		`SELECT key, value, expires_at, updated_at
 		 FROM entity_meta
-		 WHERE tenant_id=? AND entity=? AND id=?
+		 WHERE tenant_id=? AND subject_kind=? AND subject_key=?
 		 ORDER BY key`,
-		tenantID, entity, id)
+		tenantID, sub.Kind, sub.Key)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
@@ -103,11 +134,9 @@ func (s *Server) handleMetaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"entity":  entity,
-		"id":      id,
-		"entries": entries,
-	})
+	resp := subjectFields(sub)
+	resp["entries"] = entries
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // ─── GET /meta/{entity}/{id}/{key} ───────────────────────────────────────────
@@ -117,9 +146,9 @@ func (s *Server) handleMetaGet(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	key := chi.URLParam(r, "key")
 
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+	sub, err := storage.ParseMetaSubject(entity, idStr, validateEntityName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, err.Error())
 		return
 	}
 	if !metaKeyRe.MatchString(key) {
@@ -135,8 +164,8 @@ func (s *Server) handleMetaGet(w http.ResponseWriter, r *http.Request) {
 	err = db.QueryRowContext(r.Context(),
 		`SELECT value, expires_at, updated_at
 		 FROM entity_meta
-		 WHERE tenant_id=? AND entity=? AND id=? AND key=?`,
-		tenantID, entity, id, key).Scan(&rawVal, &expiresAt, &updatedAt)
+		 WHERE tenant_id=? AND subject_kind=? AND subject_key=? AND key=?`,
+		tenantID, sub.Kind, sub.Key, key).Scan(&rawVal, &expiresAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		s.writeError(w, http.StatusNotFound, xoluerr.ErrMetaKeyNotFound,
 			"metadata key not found")
@@ -152,12 +181,13 @@ func (s *Server) handleMetaGet(w http.ResponseWriter, r *http.Request) {
 		value = rawVal
 	}
 
-	resp := map[string]interface{}{
-		"entity":     entity,
-		"id":         id,
-		"key":        key,
+	resp := subjectFields(sub)
+	resp["key"] = key
+	for k, v := range map[string]interface{}{
 		"value":      value,
 		"updated_at": updatedAt,
+	} {
+		resp[k] = v
 	}
 	if expiresAt.Valid {
 		resp["expires_at"] = expiresAt.Time
@@ -172,9 +202,9 @@ func (s *Server) handleMetaPut(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	key := chi.URLParam(r, "key")
 
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+	sub, err := storage.ParseMetaSubject(entity, idStr, validateEntityName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, err.Error())
 		return
 	}
 	if !metaKeyRe.MatchString(key) {
@@ -229,12 +259,22 @@ func (s *Server) handleMetaPut(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	// Verify the entity exists.
-	store := s.getStore(r.Context())
-	if !store.Exists(r.Context(), entity, id) {
-		s.writeError(w, http.StatusNotFound, xoluerr.ErrMetaEntityNotFound,
-			"entity not found")
-		return
+	// Verify entity subjects exist (unchanged behaviour). Namespaced
+	// kinds skip the check in v1: meta is an engine-inert annotation
+	// surface, and per-kind existence probes are a recorded follow-up
+	// (docs/API_V2.md meta section).
+	if !strings.Contains(sub.Kind, ".") {
+		id, convErr := strconv.Atoi(sub.Key)
+		if convErr != nil {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+			return
+		}
+		store := s.getStore(r.Context())
+		if !store.Exists(r.Context(), sub.Kind, id) {
+			s.writeError(w, http.StatusNotFound, xoluerr.ErrMetaEntityNotFound,
+				"entity not found")
+			return
+		}
 	}
 
 	db, tenantID := s.metaDB(r)
@@ -242,33 +282,34 @@ func (s *Server) handleMetaPut(w http.ResponseWriter, r *http.Request) {
 
 	if expiresAt != nil {
 		_, err = db.ExecContext(r.Context(),
-			`INSERT INTO entity_meta (tenant_id, entity, id, key, value, expires_at, updated_at)
+			`INSERT INTO entity_meta (tenant_id, subject_kind, subject_key, key, value, expires_at, updated_at)
 			 VALUES (?,?,?,?,?,?,?)
-			 ON CONFLICT(tenant_id, entity, id, key)
+			 ON CONFLICT(tenant_id, subject_kind, subject_key, key)
 			 DO UPDATE SET value=excluded.value,
 			               expires_at=excluded.expires_at,
 			               updated_at=excluded.updated_at`,
-			tenantID, entity, id, key, string(req.Value), expiresAt.UTC(), now)
+			tenantID, sub.Kind, sub.Key, key, string(req.Value), expiresAt.UTC(), now)
 	} else {
 		_, err = db.ExecContext(r.Context(),
-			`INSERT INTO entity_meta (tenant_id, entity, id, key, value, expires_at, updated_at)
+			`INSERT INTO entity_meta (tenant_id, subject_kind, subject_key, key, value, expires_at, updated_at)
 			 VALUES (?,?,?,?,?,NULL,?)
-			 ON CONFLICT(tenant_id, entity, id, key)
+			 ON CONFLICT(tenant_id, subject_kind, subject_key, key)
 			 DO UPDATE SET value=excluded.value,
 			               expires_at=NULL,
 			               updated_at=excluded.updated_at`,
-			tenantID, entity, id, key, string(req.Value), now)
+			tenantID, sub.Kind, sub.Key, key, string(req.Value), now)
 	}
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
 	}
 
-	resp := map[string]interface{}{
-		"entity":     entity,
-		"id":         id,
-		"key":        key,
+	resp := subjectFields(sub)
+	resp["key"] = key
+	for k, v := range map[string]interface{}{
 		"updated_at": now,
+	} {
+		resp[k] = v
 	}
 	if expiresAt != nil {
 		resp["expires_at"] = expiresAt
@@ -283,9 +324,9 @@ func (s *Server) handleMetaDeleteKey(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	key := chi.URLParam(r, "key")
 
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+	sub, err := storage.ParseMetaSubject(entity, idStr, validateEntityName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, err.Error())
 		return
 	}
 	if !metaKeyRe.MatchString(key) {
@@ -296,8 +337,8 @@ func (s *Server) handleMetaDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 	db, tenantID := s.metaDB(r)
 	res, err := db.ExecContext(r.Context(),
-		`DELETE FROM entity_meta WHERE tenant_id=? AND entity=? AND id=? AND key=?`,
-		tenantID, entity, id, key)
+		`DELETE FROM entity_meta WHERE tenant_id=? AND subject_kind=? AND subject_key=? AND key=?`,
+		tenantID, sub.Kind, sub.Key, key)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
@@ -316,16 +357,16 @@ func (s *Server) handleMetaDeleteKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetaDeleteAll(w http.ResponseWriter, r *http.Request) {
 	entity := chi.URLParam(r, "entity")
 	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "invalid entity id")
+	sub, err := storage.ParseMetaSubject(entity, idStr, validateEntityName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, err.Error())
 		return
 	}
 
 	db, tenantID := s.metaDB(r)
 	res, err := db.ExecContext(r.Context(),
-		`DELETE FROM entity_meta WHERE tenant_id=? AND entity=? AND id=?`,
-		tenantID, entity, id)
+		`DELETE FROM entity_meta WHERE tenant_id=? AND subject_kind=? AND subject_key=?`,
+		tenantID, sub.Kind, sub.Key)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return

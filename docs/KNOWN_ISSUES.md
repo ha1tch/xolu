@@ -1,6 +1,6 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.7
+Version: 0.16.13
 Last reviewed: 2026-07-21
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
@@ -178,6 +178,17 @@ that enforcement, recorded so a passing build is read honestly.
   is chosen must be designed before code. Until then the stage-2 window
   stands, measured by G-12.
 
+  **FALSIFIED-THEN-RECLOSED 2026-07-21: the delete-side fix below was
+  necessary but not sufficient — GitHub CI's multi-core run failed the
+  assertion (1/8 dangling). The residual window was the CREATE side:
+  the REF target check ran against the in-memory graph before the write
+  transaction opened. Closed the same day by an in-transaction
+  target-existence check in syncGraphEdges (@R02.3 shipped early,
+  XOLU-RI003), covering create/update/patch/save and both batch paths.
+  With both halves in-transaction the pair is linearisable under
+  serialised writers in either commit order.** The original (partial)
+  resolution record follows.
+
   **RESOLVED 2026-07-21 — window closed by the in-transaction check; the
   2026-07-20 constraint was re-audited and found inverted.** The code's
   own comment (handlers.go, post-commit graph update) states the truth:
@@ -265,12 +276,30 @@ correctness envelope over parser/validator input space.
 - **Last exercised (pre-fix reproduction):** 2026-07-19 — T-35 reproduced under `-race`, single-CPU host, 2 winners into one window. Sufficient to confirm the defect exists.
 - **Last exercised (post-fix, real silicon):** 2026-07-20 env:m1 `GOMAXPROCS=8 -race -count=20` — 10.8 s, green. T-35 fully verified.
 
+### G-13. bal admission race harness (`pkg/bal/admission_race_stress_test.go`)
+
+- **What it guards:** the transfer admission CAS (@B06, T-34 discipline):
+  N goroutines contending for one near-floor unit — exactly one wins,
+  winners + refusals == N, balance never below floor, conservation and
+  the chain triple intact throughout.
+- **Gate:** build tag `stress`. Canonical invocation:
+  `GOMAXPROCS=<cores> go test -tags stress ./pkg/bal/ -run TestBalAdmission_Race -count=20 -race`
+- **Hardware:** meaningful evidence requires multi-core; single-core
+  passes are weak for admission races (T-34's own history).
+- **Environment contract:** the db handle needs WAL + busy_timeout +
+  `_txlock=immediate` (see Store docs) — discovered by this harness:
+  deferred read→write upgrade under WAL fails SQLITE_BUSY past the busy
+  handler.
+- **Last exercised:** 2026-07-21 env:sandbox (single-CPU, -race,
+  count=5, 32 claimants) — PASS; weak evidence per above. **Owed:**
+  multi-core exercise (operator or CI stress lane).
+
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 
 - **Gate:** none; runs by default and since 2026-07-21 **ASSERTS** the invariant: the check-then-act window was closed by `DeleteWithRestrict`'s in-transaction referrer check (@C04a), ahead of the stage-3 schedule, so any dangling reference is now a failure.
 - **Hardware:** multi-core essential; the window is a logic race between a delete's enforcement read and a concurrent referrer create, and only manifests under true parallelism. A single-core pass is not evidence either way.
 - **Invocation:** `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
-- **Last exercised:** 2026-07-21 env:sandbox (single-CPU) — asserting mode, 0/8 dangling (single-core cannot open the window; vacuous pass, not evidence). **Owed:** a real-silicon multi-core run to verify the closure under true parallelism, handed to the operator: `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`
+- **Last exercised:** 2026-07-21 env:GitHub CI (multi-core) — **FAILED 1/8**, falsifying the delete-side-only closure and confirming a residual create-side window (REF target check outside the write tx). Fixed same day: in-tx target-existence check in syncGraphEdges (@R02.3 shipped early; XOLU-RI003). Re-verification: next CI run on push exercises the assertion on multi-core; a local hammer remains valuable: `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`
 - **Conversion:** done 2026-07-21 — the harness asserts `dangling == 0`; the diagnostic mode is retired.
 
 ### G-04. Full suite with `-race` on multi-core

@@ -382,7 +382,15 @@ func (s *Server) HandleTSDeleteTimeline(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if err := store.DeleteTimeline(r.Context(), tid); err != nil {
+	err := store.DeleteTimeline(r.Context(), tid)
+	if err == nil {
+		// Cascade: sweep the timeline's meta subjects (@C04c item 7).
+		// Best-effort cross-store; see sweepMetaSubject. Key formatted
+		// at full width (@C04d).
+		s.sweepMetaSubject(r.Context(), r, "ts.timeline",
+			strconv.FormatUint(uint64(tid), 10))
+	}
+	if err != nil {
 		status := http.StatusInternalServerError
 		code := xoluerr.ErrTSInternal
 		switch {

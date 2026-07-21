@@ -111,6 +111,11 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := store.PatchValidated(r.Context(), entity, id, patchData, validate); err != nil {
+		var rtm *storage.RefTargetMissingError
+		if errors.As(err, &rtm) {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrRIValidateTarget, rtm.Error())
+			return
+		}
 		if validationFailed {
 			s.writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"error": map[string]interface{}{
@@ -338,6 +343,11 @@ func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
 	store := s.getStore(r.Context())
 	created, err := store.Save(r.Context(), entity, id, data)
 	if err != nil {
+		var rtm *storage.RefTargetMissingError
+		if errors.As(err, &rtm) {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrRIValidateTarget, rtm.Error())
+			return
+		}
 		if errors.Is(err, storage.ErrConflict) {
 			currentVer := s.fetchCurrentVersion(r.Context(), entity, id)
 			s.writeJSON(w, http.StatusConflict, map[string]interface{}{

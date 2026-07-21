@@ -1369,6 +1369,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
+		var rtm *storage.RefTargetMissingError
+		if errors.As(err, &rtm) {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrRIValidateTarget, rtm.Error())
+			return
+		}
 		s.logger.Error().Err(err).Msg("Failed to create entity")
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to create entity")
 		return
@@ -1714,6 +1719,11 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Update using tenant-scoped store
 	store := s.getStore(r.Context())
 	if err := store.Update(r.Context(), entity, id, data); err != nil {
+		var rtm *storage.RefTargetMissingError
+		if errors.As(err, &rtm) {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrRIValidateTarget, rtm.Error())
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
 				fmt.Sprintf("Resource of entity %s with id %d not found", entity, id))
