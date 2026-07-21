@@ -133,6 +133,14 @@ func tablePrefix(tenantID uint16) string {
 	return fmt.Sprintf("t%04X", tenantID)
 }
 
+// TablePrefix is the exported per-tenant table-name prefix WITH the
+// trailing underscore ("t0000_"), for primitives that own their own
+// table families (bal). Uses the same encoding as every other tenant
+// table name.
+func TablePrefix(tenantID uint16) string {
+	return tablePrefix(tenantID) + "_"
+}
+
 // GraphTableName returns the topology table name for a tenant.
 // Stores directed edges as (source_entity, source_id, target_entity, target_id,
 // relationship_name, edge_id).

@@ -6,11 +6,15 @@
 
 name: cross-build
 
+# TEMPORARILY SUSPENDED during the G-12 RI-strategy probe (see ci.yml).
+# Restore the push/pull_request triggers below once the probe concludes.
+# on:
+#   push:
+#     branches: [main, master]
+#   pull_request:
+#     branches: [main, master]
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
 
 permissions:
   contents: read

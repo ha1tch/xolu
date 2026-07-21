@@ -76,6 +76,7 @@ type Server struct {
 	s3Server          *http.Server         // non-nil only when config.S3Enabled && config.S3Port > 0
 	blobMgr           *blobManager         // nil when BlobEnabled is false
 	calMgr            *cal.Manager         // nil when CalEnabled is false (T-18)
+	balInit           sync.Map             // tenantID → *sync.Once for bal DDL (per-instance)
 	dynConfig         *dynconfig.DynConfig // nil when DynConfigEnabled is false
 	dynWatcher        *dynconfig.Watcher   // nil when DynConfigEnabled is false
 	gcWorkers         []*gcpkg.Worker      // all registered GC workers; used by admin endpoint
@@ -1361,9 +1362,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create entity using tenant-scoped store
+	// Create entity using tenant-scoped store. Under the serialise RI
+	// strategies a create carrying REF edges must hold the RI mutex so it
+	// cannot interleave with a concurrent delete of a target (G-12); the
+	// strategy layer decides. hasRefEdges is a cheap payload scan.
 	store := s.getStore(r.Context())
-	id, err := store.Create(r.Context(), entity, data)
+	hasRefs := serverPayloadHasRefs(data)
+	id, err := s.createWithRIStrategy(r.Context(), store, entity, data, hasRefs)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())

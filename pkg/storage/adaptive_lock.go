@@ -132,6 +132,17 @@ func (al *AdaptiveLock) Unlock() {
 	al.mu.Unlock()
 }
 
+// ForceLock acquires the write mutex UNCONDITIONALLY, regardless of
+// whether the adaptive throughput optimisation is engaged. Always
+// returns after acquiring; the caller must always ForceUnlock. Used by
+// the referential-integrity serialise strategy (G-12) to make
+// RI-relevant writes mutually exclusive even when the adaptive lock
+// would otherwise let them run concurrently and admit write-skew.
+func (al *AdaptiveLock) ForceLock() { al.mu.Lock() }
+
+// ForceUnlock releases a ForceLock.
+func (al *AdaptiveLock) ForceUnlock() { al.mu.Unlock() }
+
 // Stop terminates the background monitor goroutine.
 func (al *AdaptiveLock) Stop() {
 	close(al.stopCh)

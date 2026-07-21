@@ -1,6 +1,6 @@
 # xolu — Tracking (live register)
 
-Version: 0.16.13
+Version: 0.16.15
 Last reviewed: 2026-07-21
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
@@ -52,6 +52,7 @@ item's Trigger line.
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 | T-46 | Retrofit /ts to the two-identity model (@C04d): external string timeline id at the wire, internal uint32 as codec key — the design cal and bal already use. Breaking API change; eliminates ts's numeric-id boundary surface entirely | ts | P4 | ☐ | After: a v2 ts API window (breaking). Correct long-term direction; ts's int64+helper form holds the line until then. |
 | T-47 | Deflake `TestDeleteTimeline_DeletingMarker` concurrent-reader subtest | ts | P4 | ☐ | — |
+| T-48 | Choose the G-12 RI restrict strategy from the CI multi-core probe (correctness filter, then throughput) and remove the redundant strategies; restore unconditional CI (release.yml, cross-build.yml) | ri | P2 | ◐ | Blocks: restoring release/cross-build CI. After: the ri-strategy-probe report lands from multi-core CI. |
 
 ---
 
@@ -507,5 +508,20 @@ Blocks/after: Lands in the tsqlparser repo, not xolu.
   - Add a lightweight `release.sh` covering: version format validation, syncver, test run, CHANGELOG top-entry check, tag creation.
   - Both scripts live in the tsqlparser repo, not xolu.
 - **Impact:** trivial cost, guards against the four-place version bump growing into more places as tsqlparser evolves.
+
+---
+
+## Referential integrity
+
+### T-48. Choose and consolidate the G-12 RI restrict strategy
+
+Theme: ri · Priority: P2 · Status: ◐ · Blocks/after: blocks restoring release.yml + cross-build.yml unconditional CI; after the ri-strategy-probe multi-core report.
+
+- **Trigger:** G-12 falsified twice on CI multi-core. The fix introduced three switchable strategies (`serialize`, `intx-only`, `serialize-intx` via `XOLU_RI_STRATEGY`) so real multi-core silicon arbitrates, rather than guessing from the single-CPU sandbox where the write-skew anomaly cannot manifest.
+- **Decision procedure:**
+  1. Correctness filter — keep only strategies with 0 dangling across the `-race` ×20 probe on the CI runner.
+  2. Among survivors, rank by the G-14 throughput benchmark (ns/op on the RI-relevant workload); pick the fastest.
+  The report is the per-strategy summary from the `ri-strategy-probe` matrix in `ci.yml`.
+- **On completion:** delete the losing strategies' code (`ri_strategy.go` branches, unused `NoLock` store variants, redundant config enum values), keep the winner as the sole behaviour, remove the probe job, un-suspend `release.yml` and `cross-build.yml` (restore their commented triggers), and retire G-14. Update G-12 to record the winning strategy and the verifying run.
 
 ---

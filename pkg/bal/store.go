@@ -16,14 +16,14 @@ import (
 // The bounds guard's input commits-or-aborts with the entry it guards
 // (@C04a); no rollup is ever consulted by a guard.
 //
-// The db handle must carry the house SQLite contract: WAL +
-// busy_timeout + _txlock=immediate. Immediate matters specifically for
-// bal: Transfer reads account rows before its first UPDATE, and a
-// deferred transaction upgrading read→write under WAL fails
-// SQLITE_BUSY without consulting the busy handler (snapshot
-// invalidation). Taking the write lock at BEGIN makes contending
-// transfers queue under busy_timeout — the serialised-writer
-// behaviour the admission guard's correctness argument assumes.
+// The db handle must carry WAL + busy_timeout (the house defaults).
+// Transfer is deliberately WRITE-FIRST: its opening statement is the
+// guarded UPDATE itself (accounts resolved by subquery), so the
+// transaction is a writer from its first statement and contending
+// transfers queue under busy_timeout even on plain deferred
+// transactions. A read-first shape would hit WAL's snapshot
+// invalidation (SQLITE_BUSY past the busy handler) on read→write
+// upgrade — the G-13 harness caught exactly that in an earlier form.
 type Store struct {
 	db     *sql.DB
 	prefix string // tenant table prefix, e.g. "t0000_"
@@ -123,39 +123,16 @@ func (s *Store) DefineAccount(ctx context.Context, def AccountDef) (AccountKey, 
 	return AccountKey(uint32(next)), nil
 }
 
-// accountRow is the guard-relevant account state, read in-transaction.
-type accountRow struct {
-	key      int64
-	scale    uint8
-	floor    int64
-	ceiling  sql.NullInt64
-	postable bool
-}
-
-func (s *Store) accountForUpdate(ctx context.Context, tx *sql.Tx, accountID string) (*accountRow, error) {
-	var a accountRow
-	var scale int64
-	var post int64
-	err := tx.QueryRowContext(ctx,
-		`SELECT account_key, scale, floor, ceiling, postable FROM `+s.accountsTable()+` WHERE account_id = ?`,
-		accountID).Scan(&a.key, &scale, &a.floor, &a.ceiling, &post)
-	if err == sql.ErrNoRows {
-		return nil, &UnknownAccountError{AccountID: accountID}
-	}
-	if err != nil {
-		return nil, err
-	}
-	a.scale = uint8(scale)
-	a.postable = post != 0
-	return &a, nil
-}
-
 // Transfer moves amount minor units from `from` to `to` as two signed
 // journal entries (−a, +a) in ONE transaction (@B03). Admission is the
 // house CAS discipline (@B06, T-34): the decision lives inside each
 // UPDATE's predicate, rows-affected is the verdict — never
-// read-decide-write. The chain triple is captured from the same
-// guarded statement via RETURNING.
+// read-decide-write. The guarded UPDATE is the transaction's FIRST
+// statement (write-first; see Store docs), resolving the account and
+// its floor by subquery and returning the chain triple in the same
+// statement. Error discrimination (unknown vs not-postable vs bounds)
+// happens on the failure path only, where the transaction is read-only
+// and about to roll back.
 func (s *Store) Transfer(ctx context.Context, transferID, from, to string, amount int64, memo string, at time.Time) error {
 	if amount <= 0 {
 		return &AmountScaleError{Detail: "transfer amount must be positive"}
@@ -169,74 +146,77 @@ func (s *Store) Transfer(ctx context.Context, transferID, from, to string, amoun
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	src, err := s.accountForUpdate(ctx, tx, from)
-	if err != nil {
-		return err
-	}
-	dst, err := s.accountForUpdate(ctx, tx, to)
-	if err != nil {
-		return err
-	}
-	if !src.postable {
-		return &NotPostableError{AccountID: from}
-	}
-	if !dst.postable {
-		return &NotPostableError{AccountID: to}
-	}
-
-	// Debit leg: value-amount must stay >= floor. One statement decides
-	// and reports (RETURNING new value + version).
-	var srcNew, srcVer int64
+	// Debit leg — the transaction's first statement, a write. The
+	// subqueries bind account, postability, and floor into the one
+	// predicate; RETURNING yields key + chain values.
+	var srcKey, srcNew, srcVer int64
 	err = tx.QueryRowContext(ctx,
 		`UPDATE `+s.balancesTable()+`
 		 SET value = value - ?, version = version + 1
-		 WHERE account_key = ? AND value - ? >= ?
-		 RETURNING value, version`,
-		amount, src.key, amount, src.floor).Scan(&srcNew, &srcVer)
+		 WHERE account_key = (SELECT account_key FROM `+s.accountsTable()+`
+		                      WHERE account_id = ? AND postable = 1)
+		   AND value - ? >= (SELECT floor FROM `+s.accountsTable()+`
+		                     WHERE account_id = ?)
+		 RETURNING account_key, value, version`,
+		amount, from, amount, from).Scan(&srcKey, &srcNew, &srcVer)
 	if err == sql.ErrNoRows {
-		return &BoundsError{AccountID: from, Side: "floor"}
+		return s.diagnoseRefusal(ctx, tx, from, "floor")
 	}
 	if err != nil {
 		return err
 	}
 
-	// Credit leg: value+amount must stay <= ceiling (when one exists).
-	var dstNew, dstVer int64
-	if dst.ceiling.Valid {
-		err = tx.QueryRowContext(ctx,
-			`UPDATE `+s.balancesTable()+`
-			 SET value = value + ?, version = version + 1
-			 WHERE account_key = ? AND value + ? <= ?
-			 RETURNING value, version`,
-			amount, dst.key, amount, dst.ceiling.Int64).Scan(&dstNew, &dstVer)
-	} else {
-		err = tx.QueryRowContext(ctx,
-			`UPDATE `+s.balancesTable()+`
-			 SET value = value + ?, version = version + 1
-			 WHERE account_key = ?
-			 RETURNING value, version`,
-			amount, dst.key).Scan(&dstNew, &dstVer)
-	}
+	// Credit leg: ceiling guard folded the same way (NULL ceiling
+	// admits everything: `? <= COALESCE(ceiling, max)` with max the
+	// int64 ceiling constant).
+	var dstKey, dstNew, dstVer int64
+	err = tx.QueryRowContext(ctx,
+		`UPDATE `+s.balancesTable()+`
+		 SET value = value + ?, version = version + 1
+		 WHERE account_key = (SELECT account_key FROM `+s.accountsTable()+`
+		                      WHERE account_id = ? AND postable = 1)
+		   AND value + ? <= (SELECT COALESCE(ceiling, 9223372036854775807)
+		                     FROM `+s.accountsTable()+` WHERE account_id = ?)
+		 RETURNING account_key, value, version`,
+		amount, to, amount, to).Scan(&dstKey, &dstNew, &dstVer)
 	if err == sql.ErrNoRows {
-		return &BoundsError{AccountID: to, Side: "ceiling"}
+		return s.diagnoseRefusal(ctx, tx, to, "ceiling")
 	}
 	if err != nil {
 		return err
 	}
 
-	// The two entries. previous_balance derives from RETURNING values —
-	// same statement, same transaction, no separate read (@C04a).
 	atUTC := at.UTC()
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO `+s.journalTable()+`
 		 (transfer_id, account_key, amount, previous_balance, current_balance, version, memo, at)
 		 VALUES (?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?)`,
-		transferID, src.key, -amount, srcNew+amount, srcNew, srcVer, nullIfEmpty(memo), atUTC,
-		transferID, dst.key, amount, dstNew-amount, dstNew, dstVer, nullIfEmpty(memo), atUTC,
+		transferID, srcKey, -amount, srcNew+amount, srcNew, srcVer, nullIfEmpty(memo), atUTC,
+		transferID, dstKey, amount, dstNew-amount, dstNew, dstVer, nullIfEmpty(memo), atUTC,
 	); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// diagnoseRefusal names WHY a guarded UPDATE matched nothing — unknown
+// account, summary account, or a genuine bounds refusal. Runs only on
+// the failure path (the transaction rolls back regardless).
+func (s *Store) diagnoseRefusal(ctx context.Context, tx *sql.Tx, accountID, side string) error {
+	var post int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT postable FROM `+s.accountsTable()+` WHERE account_id = ?`,
+		accountID).Scan(&post)
+	if err == sql.ErrNoRows {
+		return &UnknownAccountError{AccountID: accountID}
+	}
+	if err != nil {
+		return err
+	}
+	if post == 0 {
+		return &NotPostableError{AccountID: accountID}
+	}
+	return &BoundsError{AccountID: accountID, Side: side}
 }
 
 func nullIfEmpty(s string) interface{} {
@@ -256,6 +236,71 @@ func (s *Store) Balance(ctx context.Context, accountID string) (value int64, ver
 		return 0, 0, &UnknownAccountError{AccountID: accountID}
 	}
 	return value, version, err
+}
+
+// Entry is one journal row on the API surface: external account id,
+// signed amount, the chain triple, memo, instant. Internal keys never
+// appear (@B09a).
+type Entry struct {
+	EntryID         int64     `json:"entry_id"`
+	TransferID      string    `json:"transfer_id"`
+	AccountID       string    `json:"account_id"`
+	Amount          int64     `json:"-"` // rendered as string by the handler (@B04)
+	PreviousBalance int64     `json:"-"`
+	CurrentBalance  int64     `json:"-"`
+	Version         int64     `json:"version"`
+	Memo            string    `json:"memo,omitempty"`
+	At              time.Time `json:"at"`
+}
+
+// Entries returns up to limit journal rows for an account, oldest
+// first, starting after afterEntryID (0 = from the beginning).
+func (s *Store) Entries(ctx context.Context, accountID string, afterEntryID int64, limit int) ([]Entry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT j.entry_id, j.transfer_id, a.account_id, j.amount,
+		        j.previous_balance, j.current_balance, j.version,
+		        COALESCE(j.memo,''), j.at
+		 FROM `+s.journalTable()+` j
+		 JOIN `+s.accountsTable()+` a ON a.account_key = j.account_key
+		 WHERE a.account_id = ? AND j.entry_id > ?
+		 ORDER BY j.entry_id LIMIT ?`,
+		accountID, afterEntryID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Entry
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.EntryID, &e.TransferID, &e.AccountID, &e.Amount,
+			&e.PreviousBalance, &e.CurrentBalance, &e.Version, &e.Memo, &e.At); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if out == nil {
+		// Distinguish empty journal from unknown account.
+		var one int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM `+s.accountsTable()+` WHERE account_id = ?`, accountID).Scan(&one); err == sql.ErrNoRows {
+			return nil, &UnknownAccountError{AccountID: accountID}
+		}
+	}
+	return out, rows.Err()
+}
+
+// AccountScale returns an account's scale (render support).
+func (s *Store) AccountScale(ctx context.Context, accountID string) (uint8, error) {
+	var scale int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT scale FROM `+s.accountsTable()+` WHERE account_id = ?`, accountID).Scan(&scale)
+	if err == sql.ErrNoRows {
+		return 0, &UnknownAccountError{AccountID: accountID}
+	}
+	return uint8(scale), err
 }
 
 // ─── Typed errors (XOLU-BAL family, @B09) ───────────────────────────────────

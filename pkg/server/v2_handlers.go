@@ -133,6 +133,11 @@ func (s *Server) setupV2TenantRoutes(r chi.Router) {
 	if s.config.CalEnabled {
 		s.setupV2CalRoutes(r)
 	}
+
+	// @B: bal subsystem, same opt-in gating pattern as cal.
+	if s.config.BalEnabled {
+		s.setupV2BalRoutes(r)
+	}
 }
 
 // v2Middleware attaches the X-API-Stability: experimental header and a

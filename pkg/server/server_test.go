@@ -31,12 +31,20 @@ type TestServer struct {
 	server      *server.Server
 	ts          *httptest.Server
 	cfg         *config.Config
-	t           *testing.T
+	t           testing.TB
 	sqliteStore storage.Store // Optional, for SQLite-based tests
 }
 
 // setupTestServer creates a test server with temporary storage
 func setupTestServer(t *testing.T) *TestServer {
+	return setupTestServerWithRIStrategy(t, "")
+}
+
+// setupTestServerWithRIStrategy builds a test server with an explicit
+// referential-integrity strategy (config.RIStrategy). Empty string keeps
+// the legacy behaviour. Accepts testing.TB so both tests and benchmarks
+// (the G-12 strategy benchmark) can use it.
+func setupTestServerWithRIStrategy(t testing.TB, riStrategy string) *TestServer {
 	// Create temporary directory for test data
 	tmpDir, err := os.MkdirTemp("", "xolu-test-*")
 	if err != nil {
@@ -55,6 +63,7 @@ func setupTestServer(t *testing.T) *TestServer {
 		GraphMode:           "flat",
 		FullTextEnabled:     false,
 		CascadingDelete:     false,
+		RIStrategy:          riStrategy,
 		RefEmbedDepth:       3,
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,

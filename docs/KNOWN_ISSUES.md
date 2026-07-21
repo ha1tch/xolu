@@ -1,6 +1,6 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.13
+Version: 0.16.15
 Last reviewed: 2026-07-21
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
@@ -286,21 +286,34 @@ correctness envelope over parser/validator input space.
   `GOMAXPROCS=<cores> go test -tags stress ./pkg/bal/ -run TestBalAdmission_Race -count=20 -race`
 - **Hardware:** meaningful evidence requires multi-core; single-core
   passes are weak for admission races (T-34's own history).
-- **Environment contract:** the db handle needs WAL + busy_timeout +
-  `_txlock=immediate` (see Store docs) — discovered by this harness:
-  deferred read→write upgrade under WAL fails SQLITE_BUSY past the busy
-  handler.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+  The harness first exposed WAL's read→write snapshot invalidation
+  (SQLITE_BUSY past the busy handler) in a read-first Transfer; the fix
+  was structural, not contractual — Transfer is now WRITE-FIRST (the
+  guarded UPDATE with subquery-bound accounts is the transaction's
+  opening statement), verified queueing on plain deferred transactions.
 - **Last exercised:** 2026-07-21 env:sandbox (single-CPU, -race,
   count=5, 32 claimants) — PASS; weak evidence per above. **Owed:**
   multi-core exercise (operator or CI stress lane).
 
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 
-- **Gate:** none; runs by default and since 2026-07-21 **ASSERTS** the invariant: the check-then-act window was closed by `DeleteWithRestrict`'s in-transaction referrer check (@C04a), ahead of the stage-3 schedule, so any dangling reference is now a failure.
-- **Hardware:** multi-core essential; the window is a logic race between a delete's enforcement read and a concurrent referrer create, and only manifests under true parallelism. A single-core pass is not evidence either way.
-- **Invocation:** `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
-- **Last exercised:** 2026-07-21 env:GitHub CI (multi-core) — **FAILED 1/8**, falsifying the delete-side-only closure and confirming a residual create-side window (REF target check outside the write tx). Fixed same day: in-tx target-existence check in syncGraphEdges (@R02.3 shipped early; XOLU-RI003). Re-verification: next CI run on push exercises the assertion on multi-core; a local hammer remains valuable: `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`
-- **Conversion:** done 2026-07-21 — the harness asserts `dangling == 0`; the diagnostic mode is retired.
+- **Gate:** none; runs by default and **ASSERTS** `dangling == 0`. The strategy under test is read from `XOLU_RI_STRATEGY` (default `serialize-intx`).
+- **Hardware:** multi-core essential; the anomaly is write-skew between a delete's enforcement read and a concurrent referrer create under WAL snapshot isolation, and only manifests under true parallelism. A single-core pass is not evidence either way.
+- **Invocation:** `XOLU_RI_STRATEGY=<s> GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
+- **History — two falsifications on CI multi-core:**
+  1. 2026-07-21 env:GitHub CI — **FAILED 1/8**, falsifying the delete-side-only closure. First fix (create-side in-tx target check in syncGraphEdges, XOLU-RI003) shipped.
+  2. 2026-07-21 env:GitHub CI — **FAILED AGAIN 1/8** with the create-side fix present. Deep diagnosis (instrumented dispatch + partition + Exists/pre-check probes) established the true cause: the handler's **in-memory pre-check is not authoritative** — when it races the referrer create's post-commit graph update it returns "not referenced" and permits the delete, and the two in-tx checks then read WAL snapshots each taken before the other committed (classic write-skew, which snapshot isolation does not prevent). A ForceLock-only attempt REGRESSED the metric to 5–7/8, confirming serialisation alone is insufficient without also removing the pre-check's authority to permit.
+- **Current state — three switchable strategies under probe (`XOLU_RI_STRATEGY`):** `serialize` (RI-relevant writes take one process mutex), `intx-only` (a negative pre-check never permits; the in-tx check is the sole authority), `serialize-intx` (both; default). All three pass single-core vacuously and pass the full suite. **The multi-core verdict is owed:** the temporary `ri-strategy-probe` CI matrix (ci.yml) runs the guard `-race` ×20 plus the throughput benchmark once per strategy, producing a per-strategy correctness+throughput report. Redundant strategies are removed and unconditional CI restored in the iteration after that report lands.
+
+### G-14. RI strategy throughput benchmark (`pkg/server/ri_strategy_bench_test.go`)
+
+- **What it measures:** ns/op of an RI-relevant concurrent workload (create-with-ref against delete-of-target) per `XOLU_RI_STRATEGY`, to break performance ties among strategies that are all correct on multi-core. A workload without REF edges would report false parity, so the workload is RI-relevant by construction.
+- **Gate:** build tag `ristrategybench`. Selects strategy from `XOLU_RI_STRATEGY` (default `serialize-intx`).
+- **Hardware:** multi-core essential — serialisation cost and contention only appear under true parallelism; single-core numbers rank on noise.
+- **Invocation:** `XOLU_RI_STRATEGY=<s> GOMAXPROCS=<cores> go test -tags ristrategybench ./pkg/server/ -run '^$' -bench BenchmarkRIStrategy -benchmem -benchtime=3s`.
+- **Last exercised:** 2026-07-21 env:sandbox (single-CPU, 30x) — executes and reports ns/op/B/allocs for all three; numbers not usable for ranking (single-core). **Owed:** multi-core run via the ri-strategy-probe CI matrix.
+- **Lifecycle:** temporary. Retired together with the losing strategies once the probe report selects a winner.
 
 ### G-04. Full suite with `-race` on multi-core
 

@@ -203,13 +203,17 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Referential integrity: restrict enforcement (@R02.2, wave 2 stage 2).
-	// If any live entity references this one through a ref field whose
-	// on_delete policy is restrict, refuse the delete — the SQL ON DELETE
-	// RESTRICT behaviour. Cheap pre-check (registry lookup) gates the
-	// inbound-edge query, so entities that nothing restrict-references pay
-	// nothing.
+	// The in-memory pre-check is a fast PATH TO REFUSAL: a positive result
+	// (a committed referrer found) safely refuses in every strategy, since
+	// a committed referrer cannot un-commit. A NEGATIVE result, however,
+	// races a concurrent referrer-create whose post-commit graph update
+	// may not have landed (G-12): under the named RI strategies it is NOT
+	// trusted to permit the delete — the store's in-transaction check
+	// (below, via deleteWithRIStrategy) is the authority. The legacy
+	// (unnamed) strategy needs no branch here: it simply proceeds to the
+	// delete, where an empty restrictedBy set yields a plain delete.
 	if refs, blocked := s.restrictReferrers(r.Context(), entity, id); blocked {
-		s.writeError(w, http.StatusConflict, xoluerr.ErrRIRestrictViolation,
+		s.writeError(w, httpStatusForRIRefusal(), xoluerr.ErrRIRestrictViolation,
 			fmt.Sprintf("cannot delete %s:%d — it is referenced by: %s",
 				entity, id, strings.Join(refs, ", ")))
 		return
@@ -226,21 +230,14 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		deletedRefs = refs
 	} else {
-		// Simple delete, with the authoritative in-transaction restrict
-		// check (G-12). The pre-check above is a cheap fast-path against
-		// the in-memory graph; it cannot close the check-then-act window
-		// (a concurrent referrer create can land between it and the store
-		// delete). The store-level check runs inside the delete's own
-		// transaction (@C04a), so the window is closed by SQL isolation.
+		// Restrict-aware delete under the active RI strategy (G-12). The
+		// strategy layer decides serialisation and whether the in-tx
+		// check is the sole authority; see ri_strategy.go.
 		restrictedBy := s.restrictingEntities(entity)
-		var derr error
-		if rd, ok := store.(interface {
-			DeleteWithRestrict(ctx context.Context, entity string, id int, restrictedBy []string) error
-		}); ok && len(restrictedBy) > 0 {
-			derr = rd.DeleteWithRestrict(r.Context(), entity, id, restrictedBy)
-		} else {
-			derr = store.Delete(r.Context(), entity, id)
-		}
+		s.logger.Debug().Str("entity", entity).Int("id", id).
+			Strs("restricted_by", restrictedBy).Str("ri_strategy", s.config.RIStrategy).
+			Msg("delete dispatch: RI strategy")
+		derr := s.deleteWithRIStrategy(r.Context(), store, entity, id, restrictedBy)
 		if derr != nil {
 			var rve *storage.RestrictViolationError
 			if errors.As(derr, &rve) {

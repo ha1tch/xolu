@@ -112,6 +112,17 @@ type Config struct {
 
 	// Cascade delete configuration
 	CascadingDelete     bool
+
+	// RIStrategy selects how referential-integrity restrict enforcement
+	// closes the create-vs-delete race (G-12). One of:
+	//   "serialize"      — force one process mutex across RI-relevant writes
+	//   "intx-only"      — the SQL in-transaction check is the sole authority;
+	//                      the in-memory pre-check is advisory only
+	//   "serialize-intx" — both (default; belt and braces)
+	// The knob exists so CI can arbitrate the strategies on real
+	// multi-core silicon, where the anomaly manifests (single-core
+	// passes are vacuous). Default: serialize-intx.
+	RIStrategy string
 	MaxCascadeDeletions int
 	MaxCascadeWork      int
 
@@ -342,6 +353,10 @@ type Config struct {
 	// Introduced with T-18 in v0.14.7. Default false, matching the v2
 	// subsystem posture: opt-in until stable.
 	CalEnabled bool
+
+	// BalEnabled controls whether the /api/v2/bal/* endpoints are wired
+	// (@B; opt-in until stable, like cal).
+	BalEnabled bool
 	// BlobMaxSize is the maximum blob size in bytes accepted by PUT/POST.
 	// 0 = use default (67108864 = 64 MB). Applies to both the JSON and S3 APIs.
 	BlobMaxSize int
@@ -476,6 +491,7 @@ func Default() *Config {
 		PatchNullBehavior:           "store",
 		MaxEntitySize:               1048576, // 1MB
 		CascadingDelete:             false,
+		RIStrategy:                  "serialize-intx",
 		MaxCascadeDeletions:         10000,
 		MaxCascadeWork:              100000,
 		Debug:                       false,
@@ -527,6 +543,7 @@ func Default() *Config {
 		BlobMaxSize:                 67108864, // 64 MB
 		BlobMaxTotalBytes:           0,        // no limit
 		CalEnabled:                  false,    // T-18: opt-in until stable
+		BalEnabled:                  false,    // @B: opt-in until stable
 		S3Enabled:                   false,
 		S3Host:                      "", // inherits Host at startup
 		S3Port:                      9091,
@@ -607,6 +624,12 @@ func LoadFromEnv(cfg *Config) {
 	if val := os.Getenv("XOLU_REDIS_PORT"); val != "" {
 		if port, err := strconv.Atoi(val); err == nil {
 			cfg.RedisPort = port
+		}
+	}
+	if val := os.Getenv("XOLU_RI_STRATEGY"); val != "" {
+		switch val {
+		case "serialize", "intx-only", "serialize-intx":
+			cfg.RIStrategy = val
 		}
 	}
 	if val := os.Getenv("XOLU_GRAPH_MODE"); val != "" {
@@ -923,6 +946,9 @@ func LoadFromEnv(cfg *Config) {
 
 	// Cal subsystem (T-18): the /api/v2/cal/* endpoints. Off by default
 	// until the surface is proven stable.
+	if val := os.Getenv("XOLU_BAL_ENABLED"); val != "" {
+		cfg.BalEnabled = parseBool(val)
+	}
 	if val := os.Getenv("XOLU_CAL_ENABLED"); val != "" {
 		cfg.CalEnabled = parseBool(val)
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 )
@@ -37,9 +38,19 @@ import (
 func TestRIRestrict_Race(t *testing.T) {
 	const trials = 8
 
+	// Strategy under test comes from the environment so a single CI
+	// invocation exercises exactly one strategy (the matrix supplies
+	// XOLU_RI_STRATEGY per cell). Empty locally ⇒ the strongest default,
+	// so a bare `go test` still exercises real enforcement rather than
+	// the legacy trust-the-pre-check path.
+	strategy := os.Getenv("XOLU_RI_STRATEGY")
+	if strategy == "" {
+		strategy = "serialize-intx"
+	}
+
 	dangling := 0
 	for trial := 0; trial < trials; trial++ {
-		if raceProducedDangling(t, trial) {
+		if raceProducedDanglingStrategy(t, trial, strategy) {
 			dangling++
 		}
 	}
@@ -47,30 +58,31 @@ func TestRIRestrict_Race(t *testing.T) {
 	// ASSERTION. History: the delete-side closure alone
 	// (DeleteWithRestrict, 2026-07-21) was FALSIFIED the same day by
 	// this assertion on GitHub's multi-core runners (1/8 trials
-	// dangling) — the residual window was the create side, whose REF
-	// target check ran against the in-memory graph outside the write
-	// transaction. Both halves are now in-transaction (delete:
-	// DeleteWithRestrict; create/update/patch: target-existence check
-	// inside syncGraphEdges, @R02.3 shipped early), making the pair
-	// linearisable under serialised writers in either commit order.
-	// Single-core runs still pass near-vacuously; multi-core CI is the
-	// real exercise of this assertion.
+	// dangling). The residual window was write-skew under WAL snapshot
+	// isolation: the handler's in-memory pre-check, when it races the
+	// referrer create's post-commit graph update, returns "not
+	// referenced" and permits the delete; the two in-tx checks then read
+	// snapshots each taken before the other committed. The RI strategies
+	// close it differently (serialise the write pair, and/or stop
+	// trusting a negative pre-check to permit) — this guard exercises
+	// whichever XOLU_RI_STRATEGY selects. Single-core stays vacuous;
+	// multi-core CI is the real exercise.
 	if dangling > 0 {
-		t.Fatalf("RI restrict race: %d/%d trials left a dangling reference — "+
-			"the in-transaction restrict check (DeleteWithRestrict, @C04a) failed to close the window",
-			dangling, trials)
+		t.Fatalf("RI restrict race [%s]: %d/%d trials left a dangling reference — "+
+			"the active strategy failed to close the write-skew window",
+			strategy, dangling, trials)
 	}
-	t.Logf("RI restrict race: 0/%d trials left a dangling reference (window closed; "+
-		"single-core runs pass vacuously — multi-core run still owed per G-12)", trials)
+	t.Logf("RI restrict race [%s]: 0/%d trials dangling (single-core vacuous; multi-core owed per G-12)",
+		strategy, trials)
 }
 
-// raceProducedDangling runs one trial: concurrently delete a user and
-// create a post referencing it, then check whether the store ended with
-// a post pointing at a now-deleted user. Returns true if the dangling
-// reference occurred.
-func raceProducedDangling(t *testing.T, trial int) bool {
+// raceProducedDanglingStrategy runs one trial under an explicit RI
+// strategy: concurrently delete a user and create a post referencing it,
+// then check whether the store ended with a post pointing at a
+// now-deleted user. Returns true if the dangling reference occurred.
+func raceProducedDanglingStrategy(t *testing.T, trial int, strategy string) bool {
 	t.Helper()
-	ts := setupTestServer(t)
+	ts := setupTestServerWithRIStrategy(t, strategy)
 	defer ts.cleanup()
 
 	// Schemas: users, and posts.author_id →restrict→ users.

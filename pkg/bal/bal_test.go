@@ -24,11 +24,11 @@ func testStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(tmp) })
-	// House SQLite contract: WAL + busy_timeout, matching pkg/storage's
-	// configuration — concurrent write transactions queue rather than
-	// failing SQLITE_BUSY. bal assumes this contract (see Store docs).
+	// House defaults only (WAL + busy_timeout) — deliberately NO
+	// _txlock=immediate: Transfer's write-first shape must queue
+	// correctly on plain deferred transactions (see Store docs).
 	db, err := sql.Open("sqlite",
-		tmp+"/bal.db?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+		tmp+"/bal.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -171,6 +171,46 @@ func isSQLiteBusy(err error) bool {
 		strings.Contains(err.Error(), "database is locked")
 }
 
+// withRetryNoLock is withRetry without acquiring the adaptive lock — for
+// callers already holding a serialising mutex (the RI ForceLock path).
+// Re-acquiring the same RWMutex on one goroutine would deadlock.
+func (s *SQLiteStore) withRetryNoLock(fn func() error) error {
+	err := fn()
+	if err == nil {
+		s.alock.RecordSuccess()
+		return nil
+	}
+	if !isSQLiteBusy(err) {
+		return err
+	}
+	s.alock.RecordFailure()
+	backoff := 25 * time.Millisecond
+	for attempt := 0; attempt < sqliteBusyRetries; attempt++ {
+		jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
+		time.Sleep(backoff + jitter)
+		backoff *= 2
+		err = fn()
+		if err == nil {
+			s.alock.RecordSuccess()
+			return nil
+		}
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		s.alock.RecordFailure()
+	}
+	return err
+}
+
+// RILock and RIUnlock expose the store's serialising mutex to the policy
+// layer (the server's RI strategy, G-12). The server takes RILock around
+// an RI-relevant write pair (a delete-with-restrictors against a
+// create/update carrying the same ref) so they cannot interleave into
+// write-skew under WAL snapshot isolation. Mechanism only; the server
+// owns the decision of when to call it.
+func (s *SQLiteStore) RILock()   { s.alock.ForceLock() }
+func (s *SQLiteStore) RIUnlock() { s.alock.ForceUnlock() }
+
 // withRetry executes fn, using the adaptive lock for serialisation under
 // contention and retrying on SQLITE_BUSY with exponential backoff.
 func (s *SQLiteStore) withRetry(fn func() error) error {
@@ -1053,6 +1093,19 @@ func (s *SQLiteStore) Create(ctx context.Context, entity string, data map[string
 	})
 }
 
+// CreateNoLock is Create for a caller already holding RILock (the
+// serialise strategy, when the payload carries REF edges). Skips the
+// adaptive lock to avoid re-locking the same mutex.
+func (s *SQLiteStore) CreateNoLock(ctx context.Context, entity string, data map[string]interface{}) (int, error) {
+	var out int
+	err := s.withRetryNoLock(func() error {
+		v, e := s.createInner(ctx, entity, data)
+		out = v
+		return e
+	})
+	return out, err
+}
+
 func (s *SQLiteStore) createInner(ctx context.Context, entity string, data map[string]interface{}) (int, error) {
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1617,6 +1670,15 @@ func (e *RefTargetMissingError) Error() string {
 // exactly like Delete.
 func (s *SQLiteStore) DeleteWithRestrict(ctx context.Context, entity string, id int, restrictedBy []string) error {
 	return s.withRetry(func() error {
+		return s.deleteInner(ctx, entity, id, restrictedBy)
+	})
+}
+
+// DeleteWithRestrictNoLock is DeleteWithRestrict for a caller that
+// already holds RILock (the serialise strategy). It skips the adaptive
+// lock to avoid deadlocking on the same RWMutex.
+func (s *SQLiteStore) DeleteWithRestrictNoLock(ctx context.Context, entity string, id int, restrictedBy []string) error {
+	return s.withRetryNoLock(func() error {
 		return s.deleteInner(ctx, entity, id, restrictedBy)
 	})
 }

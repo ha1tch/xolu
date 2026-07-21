@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ha1tch/xolu/pkg/bal"
 	"github.com/ha1tch/xolu/pkg/chronicle"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // cmdDBCheck runs the rebuild oracles — derive(record) == current derived
@@ -66,9 +68,16 @@ func cmdDBCheck(args []string) {
 			continue
 		}
 
-		results, err := chronicle.CheckAll(ctx, []chronicle.RebuildOracle{
-			store.GraphEdgesOracle(),
-		})
+		oracles := []chronicle.RebuildOracle{store.GraphEdgesOracle()}
+		// bal oracles join when the tenant has bal tables (@B08).
+		var balExists int
+		balTable := fmt.Sprintf("t%04X_bal_journal", tid)
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, balTable).Scan(&balExists); err == nil {
+			bs := bal.NewStore(store.DB(), tenant.TablePrefix(tid))
+			oracles = append(oracles, bs.GlobalFoldOracle(), bs.ChainOracle())
+		}
+		results, err := chronicle.CheckAll(ctx, oracles)
 		if err != nil {
 			_ = store.Close()
 			fatal("tenant %d: %v", tid, err)

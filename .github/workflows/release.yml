@@ -7,10 +7,16 @@
 
 name: Release
 
+# TEMPORARILY SUSPENDED during the G-12 RI-strategy probe (see ci.yml
+# ri-strategy-probe job). Auto-release on tags is disabled so the probe
+# window does not cut releases; restore the `push:`/tags block below when
+# the winning strategy is chosen and the redundant strategies removed.
+# on:
+#   push:
+#     tags:
+#       - 'v*'
+#   workflow_dispatch:
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
