@@ -1,6 +1,6 @@
 # xolu — Tracking (live register)
 
-Version: 0.16.5
+Version: 0.16.7
 Last reviewed: 2026-07-21
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
@@ -51,6 +51,7 @@ item's Trigger line.
 | T-42 | Dockerfile audit and refresh before wave-programme close | ops | P4 | ☐ | End-of-programme item so shipped images carry release-quality xolu, not interim wave states. |
 | T-14 | SSA-based dataflow analysis for wall-clock usage | tooling | P5 | ☐ | — |
 | T-46 | Retrofit /ts to the two-identity model (@C04d): external string timeline id at the wire, internal uint32 as codec key — the design cal and bal already use. Breaking API change; eliminates ts's numeric-id boundary surface entirely | ts | P4 | ☐ | After: a v2 ts API window (breaking). Correct long-term direction; ts's int64+helper form holds the line until then. |
+| T-47 | Deflake `TestDeleteTimeline_DeletingMarker` concurrent-reader subtest | ts | P4 | ☐ | — |
 
 ---
 
@@ -105,6 +106,32 @@ Blocks/after: needs a breaking-change window (v2 ts API). Not urgent — ts's co
   structure); cal (`CalendarID` string + `CalOrdinal uint32`) and bal
   (`account_id` string + internal key) as the pattern to match.
 
+
+
+### T-47. Deflake `TestDeleteTimeline_DeletingMarker` concurrent-reader subtest
+
+Theme: ts · Priority: P4 · Status: ☐
+Blocks/after: —
+
+Trigger: 2026-07-21 sandbox full-suite run — subtest
+`concurrent_reader_during_delete_never_sees_defined-but-empty` failed once
+("reader observed a defined-but-empty timeline during delete — marker did
+not fence the read"), then passed 5/5 isolated reruns and a full-suite
+rerun, all on the single-CPU sandbox. One spurious failure in ~4 full-suite
+runs that day.
+
+Two live hypotheses, unresolved: (a) the test's reader/delete
+choreography assumes an interleaving that single-CPU scheduling only
+sometimes produces — a test-harness timing assumption, not a product
+defect; or (b) the deleting-marker fence has a genuine narrow window that
+single-CPU scheduling occasionally exposes and multi-core would expose
+more often. The distinction matters: (a) is a deflake, (b) is a defect.
+Next step is characterisation on real multi-core silicon
+(`GOMAXPROCS=<cores> go test ./pkg/timeseries/ -run
+TestDeleteTimeline_DeletingMarker -count=200 -race`) before any code
+change; do not "fix" the test blind. Until characterised, treat sandbox
+full-suite failures of this one subtest as suspect-flake: rerun isolated
+before diagnosing unrelated work.
 
 ### T-42. Dockerfile audit and refresh (end-of-programme)
 

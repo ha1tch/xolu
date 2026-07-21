@@ -4,6 +4,14 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.7] - 2026-07-21 (Sealer lift from cal, item 12)
+
+- pkg/chronicle: Sealer lifted from cal (@C §4 extraction #2), window-generalised. Monotone frontier; Sealed once window end <= frontier (cal'''s exact rule); Guard(from,to,fn) carries the expensively-learned discipline intact — frontier advance and every seal-sensitive mutation share one mutex, so seals never observe half-applied states and mutations never land in the sealed past (SealedError). WindowFn tiling admits irregular windows: GrainWindows adapter + MonthWindows (bal'''s period shape). Deliberately not lifted: cal'''s Lifecycle binding, day/pyramid arithmetic, recovery wiring (consumer-owned). cal NOT re-plumbed (@C §5). Tests under -race: monotonicity, day/month seal semantics, boundary-straddling refusal, concurrent advance-vs-guard exercise, and Guard composed around Engine.Append (bal period-close shape: post, close June, refused June posting, correct as-of).
+
+## [0.16.6] - 2026-07-21 (chronicle read side + store contract, item 11 stage 2)
+
+- pkg/chronicle: BucketStore seam gains ordered RangeLevel; Engine gains FoldRange (mixed-grain prefix walk — coarse buckets where whole, finer at ragged edges) and AsOf (@C03 cumulative read; bal balance-as-of shape, inclusive of the instant's finest bucket). Exported RunBucketStoreContract conformance harness (presence, overwrite, delete-idempotence, level isolation, ordered half-open ranging, early stop) — bal's SQL store must pass it at wave 4. Tests: FoldRange == naive fine fold across 200 random ragged windows on 4000 appends; AsOf posting/correction semantics; MemStore passes the contract.
+
 ## [0.16.5] - 2026-07-21 (chronicle cascade engine, stage 1)
 
 - pkg/chronicle: the extracted monoid cascade engine (@C03, plan item 11 stage 1). Generic Engine[T] parameterised by Monoid[T] over a validated time-grain Hierarchy (exact-multiple nesting), with upward cascade on Append, chain Invalidate, and window Recompute via consumer-owned replay. Incumbent monoids instantiated as the correctness bar (ts sum/min/max, cal daypart BitsetOR, bal SumInt64) — property tests prove associativity/identity per instantiation, the homomorphism (coarse == fold of fine), and recompute == fresh fold. Incumbents NOT re-plumbed (@C §5: cal migrates opportunistically or never); bal rides natively at wave 4.

@@ -4,6 +4,11 @@
 
 package chronicle
 
+import (
+	"sort"
+	"time"
+)
+
 // MemStore is the in-memory BucketStore: the test vehicle and the
 // small-consumer default. Not safe for concurrent use — the engine's
 // single-writer discipline is the consumer's to enforce (@C04a).
@@ -17,6 +22,25 @@ func NewMemStore[T any]() *MemStore[T] { return &MemStore[T]{m: map[BucketKey]T{
 func (s *MemStore[T]) Get(k BucketKey) (T, bool) { v, ok := s.m[k]; return v, ok }
 func (s *MemStore[T]) Put(k BucketKey, v T)      { s.m[k] = v }
 func (s *MemStore[T]) Delete(k BucketKey)        { delete(s.m, k) }
+
+// RangeLevel visits existing buckets at level with Start in [from, to),
+// ascending. The map is unordered, so keys are collected and sorted —
+// fine for the test/small-consumer role; durable stores use an ordered
+// scan natively.
+func (s *MemStore[T]) RangeLevel(level int, from, to time.Time, fn func(k BucketKey, v T) bool) {
+	var keys []BucketKey
+	for k := range s.m {
+		if k.Level == level && !k.Start.Before(from) && k.Start.Before(to) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Start.Before(keys[j].Start) })
+	for _, k := range keys {
+		if !fn(k, s.m[k]) {
+			return
+		}
+	}
+}
 
 // Len reports the number of stored buckets (test support).
 func (s *MemStore[T]) Len() int { return len(s.m) }

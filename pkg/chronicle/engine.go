@@ -30,6 +30,12 @@ type BucketStore[T any] interface {
 	Get(k BucketKey) (T, bool)
 	Put(k BucketKey, v T)
 	Delete(k BucketKey)
+	// RangeLevel visits every existing bucket at the given level with
+	// Start in the half-open window [from, to), in ascending Start
+	// order. Returning false from fn stops the iteration. Required by
+	// the prefix-fold read path (AsOf); implementations back it with an
+	// ordered scan (SQL: ORDER BY start; Pebble: key iteration).
+	RangeLevel(level int, from, to time.Time, fn func(k BucketKey, v T) bool)
 }
 
 // Engine is the monoid-parameterised cascade over one hierarchy and one
@@ -87,6 +93,83 @@ func (e *Engine[T]) Invalidate(t time.Time) {
 	for level := 0; level < e.h.Levels(); level++ {
 		e.s.Delete(BucketKey{Level: level, Start: e.h.Grain(level).Truncate(t)})
 	}
+}
+
+// FoldRange folds the half-open window [from, to) using the coarsest
+// buckets that fit entirely inside it, descending to finer grains only
+// at the ragged edges — the classic prefix/segment walk. This is @C03's
+// cumulative read ("the fold of a prefix: the same monoid, chained
+// across sealed checkpoints"): bal's balance-as-of is FoldRange from
+// the epoch (or the last sealed checkpoint) to the as-of instant.
+//
+// Correctness rests on the homomorphism: a coarse bucket equals the
+// fold of its children, so substituting it for them changes nothing.
+// The engine's tests assert FoldRange == the naive finest-grain fold.
+//
+// Cost: O(levels × buckets-touched); for a hierarchy like 5m/hour/day
+// an as-of over a year touches ~365 day buckets + edge partials rather
+// than ~105k five-minute buckets.
+func (e *Engine[T]) FoldRange(from, to time.Time) T {
+	from, to = from.UTC(), to.UTC()
+	acc := e.m.Identity()
+	if !from.Before(to) {
+		return acc
+	}
+	e.foldRangeAt(e.h.Levels()-1, from, to, &acc)
+	return acc
+}
+
+// foldRangeAt folds [from, to) at the given level: whole buckets of this
+// grain are consumed directly; ragged leading/trailing partials recurse
+// one level finer. At level 0 the finest buckets ARE the resolution —
+// a partial finest bucket cannot occur because Append aligns everything
+// to grain 0, so [from, to) is expected grain-0-aligned by callers that
+// care about exactness (AsOf truncates accordingly).
+func (e *Engine[T]) foldRangeAt(level int, from, to time.Time, acc *T) {
+	g := e.h.Grain(level)
+	if level == 0 {
+		e.s.RangeLevel(0, from, to, func(_ BucketKey, v T) bool {
+			*acc = e.m.Combine(*acc, v)
+			return true
+		})
+		return
+	}
+	// First grain-aligned start at or after `from`; last aligned end at
+	// or before `to`.
+	alignedFrom := g.Truncate(from)
+	if alignedFrom.Before(from) {
+		alignedFrom = alignedFrom.Add(g.Width)
+	}
+	alignedTo := g.Truncate(to)
+
+	if !alignedFrom.Before(alignedTo) {
+		// No whole bucket of this grain fits; the entire window is
+		// handled one level finer.
+		e.foldRangeAt(level-1, from, to, acc)
+		return
+	}
+	// Leading partial, whole buckets, trailing partial.
+	if from.Before(alignedFrom) {
+		e.foldRangeAt(level-1, from, alignedFrom, acc)
+	}
+	e.s.RangeLevel(level, alignedFrom, alignedTo, func(_ BucketKey, v T) bool {
+		*acc = e.m.Combine(*acc, v)
+		return true
+	})
+	if alignedTo.Before(to) {
+		e.foldRangeAt(level-1, alignedTo, to, acc)
+	}
+}
+
+// AsOf folds everything from `epoch` up to (excluding) the finest
+// bucket containing t plus that bucket itself — i.e. the cumulative
+// value as of the end of t's finest bucket. Callers wanting strict
+// "before t" semantics pass to=t truncated to grain 0 via FoldRange
+// directly; AsOf is the common inclusive read (bal: balance as of a
+// posting instant includes the instant's bucket).
+func (e *Engine[T]) AsOf(epoch, t time.Time) T {
+	fineEnd := e.h.Grain(0).Truncate(t).Add(e.h.Grain(0).Width)
+	return e.FoldRange(epoch, fineEnd)
 }
 
 // Recompute rebuilds every bucket, at every level, inside the coarsest
