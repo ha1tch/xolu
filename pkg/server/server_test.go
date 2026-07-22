@@ -35,16 +35,9 @@ type TestServer struct {
 	sqliteStore storage.Store // Optional, for SQLite-based tests
 }
 
-// setupTestServer creates a test server with temporary storage
-func setupTestServer(t *testing.T) *TestServer {
-	return setupTestServerWithRIStrategy(t, "")
-}
-
-// setupTestServerWithRIStrategy builds a test server with an explicit
-// referential-integrity strategy (config.RIStrategy). Empty string keeps
-// the legacy behaviour. Accepts testing.TB so both tests and benchmarks
-// (the G-12 strategy benchmark) can use it.
-func setupTestServerWithRIStrategy(t testing.TB, riStrategy string) *TestServer {
+// setupTestServer creates a test server with temporary storage. Accepts
+// testing.TB so both tests and any benchmarks can use it.
+func setupTestServer(t testing.TB) *TestServer {
 	// Create temporary directory for test data
 	tmpDir, err := os.MkdirTemp("", "xolu-test-*")
 	if err != nil {
@@ -63,7 +56,6 @@ func setupTestServerWithRIStrategy(t testing.TB, riStrategy string) *TestServer 
 		GraphMode:           "flat",
 		FullTextEnabled:     false,
 		CascadingDelete:     false,
-		RIStrategy:          riStrategy,
 		RefEmbedDepth:       3,
 		MaxEmbedDepth:       10,
 		MaxEntitySize:       1048576,
@@ -74,7 +66,11 @@ func setupTestServerWithRIStrategy(t testing.TB, riStrategy string) *TestServer 
 	}
 
 	// Initialize components
-	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": filepath.Join(tmpDir, "test.db")})
+store, err := storage.NewStore("sqlite", map[string]interface{}{
+		"db_path":       filepath.Join(tmpDir, "test.db"),
+		"graph_enabled": true, // parity with production (NewStoreFromConfig); without this
+		//                        syncGraphEdges short-circuits and RI enforcement never runs.
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

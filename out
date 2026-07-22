@@ -1,0 +1,34 @@
+haitch@ha1mac xolu % XOLU_RI_STRATEGY=intx-only GOMAXPROCS=$(nproc) \
+  go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race -v 2>&1 | tail -30
+echo "EXIT: $?"
+2026/07/21 20:08:32 [ha1mac.local/cZ9OnNCNFj-000939] "POST http://127.0.0.1:55806/api/v1/users HTTP/1.1" from 127.0.0.1:55807 - 201 67B in 1.099833ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000941] "POST http://127.0.0.1:55806/api/v1/posts HTTP/1.1" from 127.0.0.1:55808 - 201 67B in 1.266208ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000940] "DELETE http://127.0.0.1:55806/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55807 - 409 112B in 3.44925ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000942] "GET http://127.0.0.1:55806/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55807 - 200 34B in 504µs
+{"level":"info","profile":"calibrated","goNsPerRow":44204.957,"sqlNsPerRow":34959.083,"tempBTreeNsPerRow":33813.124,"goSqlRatio":1.2644770173176454,"blobThreshold":22,"nonCoveringThreshold":100,"tempBTree1Threshold":50,"tempBTree2Threshold":200,"time":"2026-07-21T20:08:33-03:00","message":"Hardware calibration complete"}
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000943] "POST http://127.0.0.1:55809/api/v1/schema/users HTTP/1.1" from 127.0.0.1:55810 - 201 60B in 4.143042ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000944] "POST http://127.0.0.1:55809/api/v1/schema/posts HTTP/1.1" from 127.0.0.1:55810 - 201 60B in 3.425875ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000945] "POST http://127.0.0.1:55809/api/v1/users HTTP/1.1" from 127.0.0.1:55810 - 201 67B in 1.136875ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000947] "POST http://127.0.0.1:55809/api/v1/posts HTTP/1.1" from 127.0.0.1:55811 - 201 67B in 1.262375ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000946] "DELETE http://127.0.0.1:55809/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55810 - 409 112B in 3.549166ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000948] "GET http://127.0.0.1:55809/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55810 - 200 34B in 335.834µs
+{"level":"info","profile":"calibrated","goNsPerRow":41475.751,"sqlNsPerRow":34402.876,"tempBTreeNsPerRow":33465.043,"goSqlRatio":1.205589643144951,"blobThreshold":29,"nonCoveringThreshold":100,"tempBTree1Threshold":50,"tempBTree2Threshold":200,"time":"2026-07-21T20:08:33-03:00","message":"Hardware calibration complete"}
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000949] "POST http://127.0.0.1:55812/api/v1/schema/users HTTP/1.1" from 127.0.0.1:55813 - 201 60B in 4.038292ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000950] "POST http://127.0.0.1:55812/api/v1/schema/posts HTTP/1.1" from 127.0.0.1:55813 - 201 60B in 3.276458ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000951] "POST http://127.0.0.1:55812/api/v1/users HTTP/1.1" from 127.0.0.1:55813 - 201 67B in 1.131625ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000953] "POST http://127.0.0.1:55812/api/v1/posts HTTP/1.1" from 127.0.0.1:55814 - 201 67B in 1.2825ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000952] "DELETE http://127.0.0.1:55812/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55813 - 409 112B in 3.50125ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000954] "GET http://127.0.0.1:55812/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55813 - 200 34B in 316.167µs
+{"level":"info","profile":"calibrated","goNsPerRow":41218.125,"sqlNsPerRow":34580.793,"tempBTreeNsPerRow":34325.834,"goSqlRatio":1.1919369518217815,"blobThreshold":31,"nonCoveringThreshold":100,"tempBTree1Threshold":50,"tempBTree2Threshold":200,"time":"2026-07-21T20:08:33-03:00","message":"Hardware calibration complete"}
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000955] "POST http://127.0.0.1:55815/api/v1/schema/users HTTP/1.1" from 127.0.0.1:55816 - 201 60B in 4.061916ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000956] "POST http://127.0.0.1:55815/api/v1/schema/posts HTTP/1.1" from 127.0.0.1:55816 - 201 60B in 3.410875ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000957] "POST http://127.0.0.1:55815/api/v1/users HTTP/1.1" from 127.0.0.1:55816 - 201 67B in 1.115292ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000959] "POST http://127.0.0.1:55815/api/v1/posts HTTP/1.1" from 127.0.0.1:55817 - 201 67B in 1.265125ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000958] "DELETE http://127.0.0.1:55815/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55816 - 409 112B in 3.543584ms
+2026/07/21 20:08:33 [ha1mac.local/cZ9OnNCNFj-000960] "GET http://127.0.0.1:55815/api/v1/users/1 HTTP/1.1" from 127.0.0.1:55816 - 200 34B in 311.958µs
+    ri_restrict_race_test.go:71: RI restrict race [intx-only]: 1/8 trials left a dangling reference — the active strategy failed to close the write-skew window
+--- FAIL: TestRIRestrict_Race (1.64s)
+FAIL
+FAIL	github.com/ha1tch/xolu/pkg/server	33.658s
+FAIL
+EXIT: 0

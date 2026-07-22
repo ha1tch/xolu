@@ -112,17 +112,6 @@ type Config struct {
 
 	// Cascade delete configuration
 	CascadingDelete     bool
-
-	// RIStrategy selects how referential-integrity restrict enforcement
-	// closes the create-vs-delete race (G-12). One of:
-	//   "serialize"      — force one process mutex across RI-relevant writes
-	//   "intx-only"      — the SQL in-transaction check is the sole authority;
-	//                      the in-memory pre-check is advisory only
-	//   "serialize-intx" — both (default; belt and braces)
-	// The knob exists so CI can arbitrate the strategies on real
-	// multi-core silicon, where the anomaly manifests (single-core
-	// passes are vacuous). Default: serialize-intx.
-	RIStrategy string
 	MaxCascadeDeletions int
 	MaxCascadeWork      int
 
@@ -491,7 +480,6 @@ func Default() *Config {
 		PatchNullBehavior:           "store",
 		MaxEntitySize:               1048576, // 1MB
 		CascadingDelete:             false,
-		RIStrategy:                  "serialize-intx",
 		MaxCascadeDeletions:         10000,
 		MaxCascadeWork:              100000,
 		Debug:                       false,
@@ -519,7 +507,7 @@ func Default() *Config {
 		CORSOrigins:                 []string{},
 		TenantMode:                  "path",
 		TenantAuthMode:              "open",
-		TimeseriesEnabled:           false,
+		TimeseriesEnabled:           true,  // default on (mature; regression-guarded — see validateSubsystemParity)
 		TSMemtableSize:              67108864, // 64 MB
 		TSBlockSize:                 32768,    // 32 KB
 		TSCompression:               "zstd",
@@ -624,12 +612,6 @@ func LoadFromEnv(cfg *Config) {
 	if val := os.Getenv("XOLU_REDIS_PORT"); val != "" {
 		if port, err := strconv.Atoi(val); err == nil {
 			cfg.RedisPort = port
-		}
-	}
-	if val := os.Getenv("XOLU_RI_STRATEGY"); val != "" {
-		switch val {
-		case "serialize", "intx-only", "serialize-intx":
-			cfg.RIStrategy = val
 		}
 	}
 	if val := os.Getenv("XOLU_GRAPH_MODE"); val != "" {

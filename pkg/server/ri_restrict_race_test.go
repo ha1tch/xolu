@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"sync"
 	"testing"
 )
@@ -38,51 +37,44 @@ import (
 func TestRIRestrict_Race(t *testing.T) {
 	const trials = 8
 
-	// Strategy under test comes from the environment so a single CI
-	// invocation exercises exactly one strategy (the matrix supplies
-	// XOLU_RI_STRATEGY per cell). Empty locally ⇒ the strongest default,
-	// so a bare `go test` still exercises real enforcement rather than
-	// the legacy trust-the-pre-check path.
-	strategy := os.Getenv("XOLU_RI_STRATEGY")
-	if strategy == "" {
-		strategy = "serialize-intx"
-	}
-
 	dangling := 0
 	for trial := 0; trial < trials; trial++ {
-		if raceProducedDanglingStrategy(t, trial, strategy) {
+		if raceProducedDangling(t, trial) {
 			dangling++
 		}
 	}
 
-	// ASSERTION. History: the delete-side closure alone
-	// (DeleteWithRestrict, 2026-07-21) was FALSIFIED the same day by
-	// this assertion on GitHub's multi-core runners (1/8 trials
-	// dangling). The residual window was write-skew under WAL snapshot
-	// isolation: the handler's in-memory pre-check, when it races the
-	// referrer create's post-commit graph update, returns "not
-	// referenced" and permits the delete; the two in-tx checks then read
-	// snapshots each taken before the other committed. The RI strategies
-	// close it differently (serialise the write pair, and/or stop
-	// trusting a negative pre-check to permit) — this guard exercises
-	// whichever XOLU_RI_STRATEGY selects. Single-core stays vacuous;
-	// multi-core CI is the real exercise.
+	// ASSERTION. The authoritative in-transaction referrer check
+	// (DeleteWithRestrict, @C04a) closes the window: after a concurrent
+	// delete-target + create-referrer, the store must never hold a
+	// committed referrer pointing at a deleted target.
+	//
+	// Resolution history (G-12): this guard was falsified repeatedly on
+	// multi-core, and the failures were eventually traced NOT to a
+	// concurrency defect but to a test-harness misconfiguration — the
+	// map-built store defaulted the graph subsystem OFF, so syncGraphEdges
+	// short-circuited and the in-tx enforcement never ran. No amount of
+	// application-level serialisation could close a race whose enforcement
+	// code was skipped. With the graph enabled (parity with production,
+	// which always enabled it), the plain in-tx check closes the race —
+	// verified 0/80 under -race on multi-core. The parity guard in
+	// rebuildRIRegistry now makes the "x-ref present, graph disabled"
+	// combination fail loudly so this can never silently recur.
 	if dangling > 0 {
-		t.Fatalf("RI restrict race [%s]: %d/%d trials left a dangling reference — "+
-			"the active strategy failed to close the write-skew window",
-			strategy, dangling, trials)
+		t.Fatalf("RI restrict race: %d/%d trials left a dangling reference — "+
+			"the in-transaction restrict check (@C04a) failed to close the window",
+			dangling, trials)
 	}
-	t.Logf("RI restrict race [%s]: 0/%d trials dangling (single-core vacuous; multi-core owed per G-12)",
-		strategy, trials)
+	t.Logf("RI restrict race: 0/%d trials dangling (single-core vacuous; the "+
+		"closure is verified on multi-core, see G-12)", trials)
 }
 
-// raceProducedDanglingStrategy runs one trial under an explicit RI
-// strategy: concurrently delete a user and create a post referencing it,
-// then check whether the store ended with a post pointing at a
-// now-deleted user. Returns true if the dangling reference occurred.
-func raceProducedDanglingStrategy(t *testing.T, trial int, strategy string) bool {
+// raceProducedDangling runs one trial: concurrently delete a user and
+// create a post referencing it, then check whether the store ended with a
+// post pointing at a now-deleted user. Returns true if dangling.
+func raceProducedDangling(t *testing.T, trial int) bool {
 	t.Helper()
-	ts := setupTestServerWithRIStrategy(t, strategy)
+	ts := setupTestServer(t)
 	defer ts.cleanup()
 
 	// Schemas: users, and posts.author_id →restrict→ users.

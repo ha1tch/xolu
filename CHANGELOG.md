@@ -4,6 +4,14 @@ All notable changes to xolu are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.16] - 2026-07-21 (G-12 resolved: subsystem-config defect, not concurrency; strategies deleted)
+
+- ROOT CAUSE of the G-12 RI restrict race: not a concurrency defect. The test harness built its store via map-based storage.NewStore, which silently defaulted the graph subsystem OFF — so syncGraphEdges short-circuited and in-transaction RI enforcement never ran. Every strategy falsification (serialize, intx-only, serialize-intx; 1/8–4/80 on multi-core) was the same artifact: no strategy closes a race whose enforcement is skipped. Production was never affected (NewStoreFromConfig propagates GraphEnabled). Pinned by instrumentation showing zero enforcement calls per run.
+- FIX: (1) map builder honours graph_enabled and defaults it on; (2) graph + timeseries default on generally; (3) harness store enables graph (production parity); (4) parity guard in rebuildRIRegistry fails loudly — error log, fatal under XOLU_STRICT_SUBSYSTEMS — when x-ref policies exist with the graph disabled. With enforcement running, the PLAIN in-tx check closes the race: verified 0/80 under -race on multi-core (macOS), no strategy machinery.
+- DELETED as dead weight: pkg/server/ri_strategy.go (three strategies), the store RILock/RIUnlock/ForceLock/ForceUnlock/withRetryNoLock/CreateNoLock/DeleteWithRestrictNoLock, the RIStrategy config field + XOLU_RI_STRATEGY env var, and the ristrategybench benchmark (G-14 retired).
+- CI restored: release.yml and cross-build.yml triggers un-suspended; the temporary ri-strategy-probe matrix removed from ci.yml.
+- Three adversarial/embed tests corrected: they had been passing only because enforcement was silently off. Dangling REF at write time now correctly returns RI003/400; the embed-degradation case constructs a dangling REF via post-hoc target deletion. T-48 closed (RESOLVED.md); G-12 marked resolved.
+
 ## [0.16.15] - 2026-07-21 (G-12 second falsification: three switchable RI strategies + CI probe)
 
 - Root cause of the second CI falsification identified: the handler in-memory pre-check is not authoritative. When it races the referrer create'''s post-commit graph update it returns "not referenced" and permits the delete; the two in-transaction checks then read WAL snapshots each taken before the other committed — write-skew, which snapshot isolation does not prevent. A ForceLock-only attempt regressed the metric to 5–7/8, confirming serialisation alone is insufficient without also removing the pre-check'''s authority to permit.

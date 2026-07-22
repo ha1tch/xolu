@@ -1,6 +1,25 @@
 # xolu — Resolution Record
 
-Append-only record of closed register items and resolved issues. Each entry
+Append-only record of closed register items and resolved issues, newest first.
+Each entry preserves the item's full text as at closure, stamped with its
+closing version and date.
+
+## [0.16.16] T-48 — G-12 RI restrict strategy: resolved as a subsystem-config defect (v0.16.16, 2026-07-21)
+
+Theme: ri · closed 0.16.16 · 2026-07-21
+
+The G-12 RI restrict race, falsified repeatedly on multi-core CI, was traced NOT to a concurrency defect but to a test-harness misconfiguration: the map-based `storage.NewStore` silently defaulted the graph subsystem OFF, so `syncGraphEdges` short-circuited and in-transaction RI enforcement never ran. The three switchable strategies (serialize, intx-only, serialize-intx) introduced to "arbitrate on multi-core" were all falsified (1/8–4/80) because none can close a race whose enforcement code is skipped. Production was never affected (it uses `NewStoreFromConfig`, which propagates `GraphEnabled`).
+
+Resolution:
+- Map builder now honours `graph_enabled` and defaults it on; graph + timeseries default on generally.
+- Test harness store enables graph, matching production.
+- Parity guard added to `rebuildRIRegistry`: x-ref policies present with graph disabled → loud error, fatal under `XOLU_STRICT_SUBSYSTEMS`.
+- With enforcement actually running, the plain in-transaction check closes the race — verified 0/80 under -race on multi-core (macOS).
+- All strategy code removed (ri_strategy.go, RILock/ForceLock/NoLock store variants, the RIStrategy config knob + env var, the benchmark). G-14 retired. release.yml and cross-build.yml restored; the ri-strategy-probe job removed from ci.yml.
+- Three adversarial/embed tests that had been passing only because enforcement was silently off were corrected to assert enforced behaviour (RI003 on dangling REF at write time; dangling-via-post-hoc-delete for the embed-degradation case).
+
+Cross-ref: CHANGELOG 0.16.16; G-12 in KNOWN_ISSUES (resolved).
+
 is the item's full text as it stood at closure, stamped with closing version
 and date, newest first. `CHANGELOG.md` says what shipped; this file records
 what was wrong or needed and how it was resolved — the two reference, never

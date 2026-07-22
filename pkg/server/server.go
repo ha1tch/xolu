@@ -1362,13 +1362,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create entity using tenant-scoped store. Under the serialise RI
-	// strategies a create carrying REF edges must hold the RI mutex so it
-	// cannot interleave with a concurrent delete of a target (G-12); the
-	// strategy layer decides. hasRefEdges is a cheap payload scan.
+	// Create entity using tenant-scoped store.
 	store := s.getStore(r.Context())
-	hasRefs := serverPayloadHasRefs(data)
-	id, err := s.createWithRIStrategy(r.Context(), store, entity, data, hasRefs)
+	id, err := store.Create(r.Context(), entity, data)
 	if err != nil {
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())

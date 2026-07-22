@@ -1,6 +1,6 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.15
+Version: 0.16.16
 Last reviewed: 2026-07-21
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
@@ -298,22 +298,13 @@ correctness envelope over parser/validator input space.
 
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 
-- **Gate:** none; runs by default and **ASSERTS** `dangling == 0`. The strategy under test is read from `XOLU_RI_STRATEGY` (default `serialize-intx`).
-- **Hardware:** multi-core essential; the anomaly is write-skew between a delete's enforcement read and a concurrent referrer create under WAL snapshot isolation, and only manifests under true parallelism. A single-core pass is not evidence either way.
-- **Invocation:** `XOLU_RI_STRATEGY=<s> GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=20 -race`.
-- **History — two falsifications on CI multi-core:**
-  1. 2026-07-21 env:GitHub CI — **FAILED 1/8**, falsifying the delete-side-only closure. First fix (create-side in-tx target check in syncGraphEdges, XOLU-RI003) shipped.
-  2. 2026-07-21 env:GitHub CI — **FAILED AGAIN 1/8** with the create-side fix present. Deep diagnosis (instrumented dispatch + partition + Exists/pre-check probes) established the true cause: the handler's **in-memory pre-check is not authoritative** — when it races the referrer create's post-commit graph update it returns "not referenced" and permits the delete, and the two in-tx checks then read WAL snapshots each taken before the other committed (classic write-skew, which snapshot isolation does not prevent). A ForceLock-only attempt REGRESSED the metric to 5–7/8, confirming serialisation alone is insufficient without also removing the pre-check's authority to permit.
-- **Current state — three switchable strategies under probe (`XOLU_RI_STRATEGY`):** `serialize` (RI-relevant writes take one process mutex), `intx-only` (a negative pre-check never permits; the in-tx check is the sole authority), `serialize-intx` (both; default). All three pass single-core vacuously and pass the full suite. **The multi-core verdict is owed:** the temporary `ri-strategy-probe` CI matrix (ci.yml) runs the guard `-race` ×20 plus the throughput benchmark once per strategy, producing a per-strategy correctness+throughput report. Redundant strategies are removed and unconditional CI restored in the iteration after that report lands.
+- **Gate:** none; runs by default and ASSERTS `dangling == 0`.
+- **Hardware:** multi-core essential; a single-core pass is vacuous.
+- **Invocation:** `GOMAXPROCS=<cores> go test ./pkg/server/ -run TestRIRestrict_Race -count=80 -race` (macOS: `GOMAXPROCS=$(sysctl -n hw.ncpu)`).
+- **RESOLVED 2026-07-21.** The repeated multi-core falsifications were NOT a concurrency defect. Root cause: the test harness built its store via the map-based `storage.NewStore`, which silently defaulted the graph subsystem OFF — so `syncGraphEdges` short-circuited and the in-transaction RI enforcement never executed. Every strategy "failure" (serialize, intx-only, serialize-intx; all 1/8–4/80) was the same artifact: no strategy can close a race whose enforcement code is skipped. Production was never affected — it builds stores via `NewStoreFromConfig`, which propagates `GraphEnabled`. Diagnosis was pinned by instrumentation showing zero enforcement calls during a run.
+- **Fix:** (1) the map builder now honours `graph_enabled` and defaults it on; (2) graph and timeseries default on generally; (3) the harness store enables graph, matching production; (4) a parity guard in `rebuildRIRegistry` fails loudly (error log; fatal under `XOLU_STRICT_SUBSYSTEMS`) when x-ref policies exist with the graph disabled, so this cannot silently recur. With enforcement actually running, the PLAIN in-transaction check closes the race — verified 0/80 under `-race` on multi-core (macOS, no strategy machinery). All three strategies and their apparatus were removed as dead weight.
 
-### G-14. RI strategy throughput benchmark (`pkg/server/ri_strategy_bench_test.go`)
 
-- **What it measures:** ns/op of an RI-relevant concurrent workload (create-with-ref against delete-of-target) per `XOLU_RI_STRATEGY`, to break performance ties among strategies that are all correct on multi-core. A workload without REF edges would report false parity, so the workload is RI-relevant by construction.
-- **Gate:** build tag `ristrategybench`. Selects strategy from `XOLU_RI_STRATEGY` (default `serialize-intx`).
-- **Hardware:** multi-core essential — serialisation cost and contention only appear under true parallelism; single-core numbers rank on noise.
-- **Invocation:** `XOLU_RI_STRATEGY=<s> GOMAXPROCS=<cores> go test -tags ristrategybench ./pkg/server/ -run '^$' -bench BenchmarkRIStrategy -benchmem -benchtime=3s`.
-- **Last exercised:** 2026-07-21 env:sandbox (single-CPU, 30x) — executes and reports ns/op/B/allocs for all three; numbers not usable for ranking (single-core). **Owed:** multi-core run via the ri-strategy-probe CI matrix.
-- **Lifecycle:** temporary. Retired together with the losing strategies once the probe report selects a winner.
 
 ### G-04. Full suite with `-race` on multi-core
 

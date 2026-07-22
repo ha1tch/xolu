@@ -103,27 +103,32 @@ func TestAdversarial_Post_DanglingREF(t *testing.T) {
 	env := newAdversarialEnv(t)
 	defer env.cleanup()
 
-	id := mustCreate(t, env, "assets", map[string]interface{}{
+	// With the graph subsystem enabled (as production runs), a POST whose
+	// REF names a non-existent target is REFUSED at write time by the
+	// in-transaction target-existence check (XOLU-RI003, HTTP 400) — not
+	// silently stored. The adversarial intent is preserved: the server
+	// must reject cleanly, never crash or 500.
+	status, resp := env.doJSON("POST", "/api/v1/assets", map[string]interface{}{
 		"name":       "orphaned-asset",
 		"sensor_ref": map[string]interface{}{"type": "REF", "entity": "sensors", "id": float64(9999)},
 	})
-
-	// GET must succeed and return the stored REF.
-	getStatus, getResp := advGet(t, env, "assets", id)
-	if getStatus != http.StatusOK {
-		t.Fatalf("GET after dangling-REF post: want 200, got %d", getStatus)
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST with dangling REF: want 400 (RI003), got %d — %v", status, resp)
 	}
-	refField, ok := getResp["sensor_ref"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("sensor_ref missing or wrong type in GET response: %v", getResp)
-	}
-	if refField["type"] != "REF" || refField["entity"] != "sensors" {
-		t.Errorf("sensor_ref shape wrong: %v", refField)
+	errObj, _ := resp["error"].(map[string]interface{})
+	if errObj["code"] != "XOLU-RI003" {
+		t.Fatalf("want XOLU-RI003 for dangling REF, got %v", errObj)
 	}
 
-	// Graph path to the dangling target must not 500.
+	// The rejected asset must not exist afterwards.
+	getStatus, _ := advGet(t, env, "assets", 1)
+	if getStatus == http.StatusOK {
+		t.Errorf("dangling-REF asset was persisted despite RI003 refusal")
+	}
+
+	// Graph path to the (non-existent) target must not 500.
 	pathStatus, _ := env.doJSON("POST", "/api/v1/graph/path", map[string]interface{}{
-		"from":      fmt.Sprintf("assets:%d", id),
+		"from":      "assets:1",
 		"to":        "sensors:9999",
 		"max_depth": 5,
 	})
@@ -140,14 +145,25 @@ func TestAdversarial_Embed_DanglingREF_NoPanic(t *testing.T) {
 	env := newAdversarialEnv(t)
 	defer env.cleanup()
 
+	// A dangling REF can no longer be created directly (RI003 refuses it),
+	// so construct the state the legitimate way: create the target, create
+	// an asset referencing it, then delete the target. The REF now dangles;
+	// GET with embed_depth must degrade gracefully — raw REF returned, no
+	// panic or 500. (This target has no on_delete=restrict policy, so the
+	// delete is permitted.)
+	sensorID := mustCreate(t, env, "sensors", map[string]interface{}{"name": "doomed-sensor"})
 	id := mustCreate(t, env, "assets", map[string]interface{}{
 		"name":       "embed-orphan",
-		"sensor_ref": map[string]interface{}{"type": "REF", "entity": "sensors", "id": float64(8888)},
+		"sensor_ref": map[string]interface{}{"type": "REF", "entity": "sensors", "id": float64(sensorID)},
 	})
+	delStatus, _ := env.doJSON("DELETE", fmt.Sprintf("/api/v1/sensors/%d", sensorID), nil)
+	if delStatus != http.StatusOK {
+		t.Fatalf("deleting the REF target: want 200, got %d", delStatus)
+	}
 
 	getStatus, getResp := env.doJSON("GET", fmt.Sprintf("/api/v1/assets/%d?embed_depth=2", id), nil)
 	if getStatus != http.StatusOK {
-		t.Fatalf("GET with embed_depth on dangling REF: want 200, got %d", getStatus)
+		t.Fatalf("GET with embed_depth on now-dangling REF: want 200, got %d", getStatus)
 	}
 	refField, ok := getResp["sensor_ref"].(map[string]interface{})
 	if !ok {

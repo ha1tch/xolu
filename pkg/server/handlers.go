@@ -203,17 +203,16 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Referential integrity: restrict enforcement (@R02.2, wave 2 stage 2).
-	// The in-memory pre-check is a fast PATH TO REFUSAL: a positive result
-	// (a committed referrer found) safely refuses in every strategy, since
-	// a committed referrer cannot un-commit. A NEGATIVE result, however,
-	// races a concurrent referrer-create whose post-commit graph update
-	// may not have landed (G-12): under the named RI strategies it is NOT
-	// trusted to permit the delete — the store's in-transaction check
-	// (below, via deleteWithRIStrategy) is the authority. The legacy
-	// (unnamed) strategy needs no branch here: it simply proceeds to the
-	// delete, where an empty restrictedBy set yields a plain delete.
+	// The in-memory pre-check is a fast path to refusal: a positive result
+	// (a committed referrer found) refuses immediately. The authoritative
+	// check runs in-transaction inside the store's delete (DeleteWithRestrict,
+	// @C04a) — the pre-check cannot close the check-then-act window on its
+	// own, but the in-tx check does, because it reads the SQL edge state
+	// inside the delete's own transaction. This enforcement requires the
+	// graph subsystem; a schema with x-ref policies and the graph disabled
+	// is caught loudly by the parity guard in rebuildRIRegistry.
 	if refs, blocked := s.restrictReferrers(r.Context(), entity, id); blocked {
-		s.writeError(w, httpStatusForRIRefusal(), xoluerr.ErrRIRestrictViolation,
+		s.writeError(w, http.StatusConflict, xoluerr.ErrRIRestrictViolation,
 			fmt.Sprintf("cannot delete %s:%d — it is referenced by: %s",
 				entity, id, strings.Join(refs, ", ")))
 		return
@@ -230,14 +229,18 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		deletedRefs = refs
 	} else {
-		// Restrict-aware delete under the active RI strategy (G-12). The
-		// strategy layer decides serialisation and whether the in-tx
-		// check is the sole authority; see ri_strategy.go.
+		// Restrict-aware delete: the authoritative in-transaction referrer
+		// check (@C04a). restrictedBy is the set of entities that
+		// restrict-reference this one; empty ⇒ a plain delete.
 		restrictedBy := s.restrictingEntities(entity)
-		s.logger.Debug().Str("entity", entity).Int("id", id).
-			Strs("restricted_by", restrictedBy).Str("ri_strategy", s.config.RIStrategy).
-			Msg("delete dispatch: RI strategy")
-		derr := s.deleteWithRIStrategy(r.Context(), store, entity, id, restrictedBy)
+		var derr error
+		if rd, ok := store.(interface {
+			DeleteWithRestrict(ctx context.Context, entity string, id int, restrictedBy []string) error
+		}); ok && len(restrictedBy) > 0 {
+			derr = rd.DeleteWithRestrict(r.Context(), entity, id, restrictedBy)
+		} else {
+			derr = store.Delete(r.Context(), entity, id)
+		}
 		if derr != nil {
 			var rve *storage.RestrictViolationError
 			if errors.As(derr, &rve) {
@@ -1677,6 +1680,29 @@ func (s *Server) rebuildRIRegistry() {
 		}
 	}
 	s.riRegistry = reg
+
+	// Parity guard (defensive regression check): if any schema carries an
+	// x-ref policy but the graph subsystem is disabled, RI enforcement
+	// silently does not run — restrictReferrers can't discover referrers
+	// and syncGraphEdges short-circuits, so deletes that should be
+	// refused succeed and dangling references form. This exact
+	// misconfiguration (a map-built store defaulting graph off) hid a
+	// referential-integrity gap through several debugging cycles. Make it
+	// loud: error-log always, and fail hard when XOLU_STRICT_SUBSYSTEMS
+	// is set (CI and tests set it, so the combination cannot ship).
+	if reg.HasAnyPolicy() && !s.config.GraphEnabled {
+		s.logger.Error().
+			Str("code", string(xoluerr.ErrRISchemaXRef)).
+			Msg("referential integrity: x-ref policies are present but the graph " +
+				"subsystem is DISABLED — restrict/cascade enforcement will NOT run; " +
+				"enable the graph subsystem or remove the x-ref annotations")
+		if os.Getenv("XOLU_STRICT_SUBSYSTEMS") != "" {
+			s.logger.Fatal().
+				Str("code", string(xoluerr.ErrRISchemaXRef)).
+				Msg("referential integrity: x-ref present with graph disabled and " +
+					"XOLU_STRICT_SUBSYSTEMS set — refusing to run with silent RI gap")
+		}
+	}
 }
 
 // restrictingEntities returns the names of entities that reference `entity`

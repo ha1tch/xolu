@@ -90,6 +90,9 @@ func init() {
 			CacheSize:         2000, // 2MB
 			BusyTimeout:       5000, // 5 seconds
 			FullTextEnabled:   false,
+			GraphEnabled:      true, // default on: RI/edge enforcement must not be
+			//                         silently absent (the graph_enabled=false default
+			//                         was invisible and disabled RI in map-built stores).
 		}
 
 		// Allow overriding config options
@@ -110,6 +113,9 @@ func init() {
 		}
 		if pft, ok := config["per_file_tenants"].(bool); ok {
 			sqliteConfig.PerFileTenants = pft
+		}
+		if ge, ok := config["graph_enabled"].(bool); ok {
+			sqliteConfig.GraphEnabled = ge
 		}
 
 		return NewSQLiteStore(dbPath, sqliteConfig)

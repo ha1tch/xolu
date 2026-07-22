@@ -124,6 +124,23 @@ func (r *Registry) ReferrersOf(targetEntity string) []ReferrerPolicy {
 	return r.byTarget[targetEntity]
 }
 
+// HasAnyPolicy reports whether the registry holds any referential-
+// integrity policy at all. Used by the startup parity guard: if any
+// schema carries an x-ref but the graph subsystem is disabled,
+// enforcement would silently not run — the guard turns that into a loud
+// failure rather than a data-integrity gap discovered later.
+func (r *Registry) HasAnyPolicy() bool {
+	if r == nil {
+		return false
+	}
+	for _, ps := range r.byTarget {
+		if len(ps) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // HasRestrictReferrers reports whether any referrer of targetEntity
 // carries the restrict policy — the cheap pre-check the delete path
 // uses to decide whether an inbound-edge query is even necessary.
