@@ -11,7 +11,7 @@
 // Scope, deliberately narrowed from what T-120 was originally filed
 // with: max_weight_kg/max_volume_m3 enforcement is NOT built here.
 // Two real, unresolved questions block it (confirmed directly with
-// the team before writing this file, not assumed): what a contained
+// Horacio before writing this file, not assumed): what a contained
 // subject itself contributes to its container's load, and units
 // (kg/m3 hardcoded into field names doesn't accommodate L/mL/cm3,
 // imperial, or whatever a given deployment actually uses). What ships

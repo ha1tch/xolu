@@ -287,7 +287,7 @@ count ≤ ceiling, mirroring `bal`'s own admission-race test shape
 directly. Per the testing-discipline convention: this needs true
 multi-core parallelism to mean anything (a single-core sandbox pass is
 not evidence), so it's stress-tagged, registered in the dormant-guards
-table in this same session, and handed to the team with its exact
+table in this same session, and handed to Horacio with its exact
 invocation rather than trusted from a sandbox run. A second test
 proves the multi-target atomicity rule directly: a synthetic move
 where the leaf CAS succeeds and a fence CAS is forced to fail,
@@ -308,7 +308,7 @@ someone notices a busy warehouse is slow.
 **Gate:** none beyond Stage 1. **Exit:** leaf and fence capacity CAS
 both proven correct in single-threaded tests; multi-target atomicity
 proven; the race harness exists, is registered, and has a sandbox pass
-recorded — full multi-core confirmation is the team's to run and report
+recorded — full multi-core confirmation is Horacio's to run and report
 back, per the house convention for this defect class; a write-path
 throughput number recorded, however rough.
 
@@ -363,7 +363,7 @@ yet, since T-129's own bar ("a number, however rough") is met by what's
 recorded above, but worth naming as the natural next step if a
 calibrated comparison is ever wanted.
 
-**Settled, 2026-08-02, same day — the team ran both benchmarks on his
+**Settled, 2026-08-02, same day — Horacio ran both benchmarks on his
 own M1 (`darwin/arm64`, `cpu: Apple M1`), `-benchtime=1s`, plus a
 `-count=5` repeat pass:**
 

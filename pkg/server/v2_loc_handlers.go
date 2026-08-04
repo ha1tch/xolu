@@ -1036,7 +1036,7 @@ func (s *Server) handleLocFenceList(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var id string

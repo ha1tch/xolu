@@ -580,16 +580,16 @@ func (s *Store) ReconcileFence(ctx context.Context, fenceID string) (FenceReconc
 	for rows.Next() {
 		var subj string
 		if err := rows.Scan(&subj); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return res, err
 		}
 		members = append(members, subj)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return res, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	res.RecordedCount = len(members)
 	for _, subj := range members {
@@ -636,12 +636,12 @@ func (s *Store) ResolveFenceMembership(ctx context.Context, lat, lon float64) ([
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		candidates = append(candidates, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var member []FenceKey
 	for _, fk := range candidates {
@@ -696,12 +696,12 @@ func (s *Store) Report(ctx context.Context, subjectRef string, lat, lon float64)
 	for oldRows.Next() {
 		var fk int64
 		if err := oldRows.Scan(&fk); err != nil {
-			oldRows.Close()
+			_ = oldRows.Close()
 			return err
 		}
 		oldSet[FenceKey(uint32(fk))] = true
 	}
-	oldRows.Close()
+	_ = oldRows.Close()
 	if err := oldRows.Err(); err != nil {
 		return err
 	}

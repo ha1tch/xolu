@@ -80,7 +80,7 @@ func (s *Store) ListPatterns(ctx context.Context) ([]Pattern, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Pattern
 	for rows.Next() {
 		var p Pattern

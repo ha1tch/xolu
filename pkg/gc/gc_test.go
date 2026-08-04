@@ -35,7 +35,13 @@ func newLogger() zerolog.Logger {
 }
 
 func TestWorker_RunOnce(t *testing.T) {
-	s := &countSweeper{report: gc.Report{Examined: 10, Collected: 3}}
+	// delay for the same reason as TestWorker_SweepErrorLogged's own
+	// comment (the M1 clock-granularity flake): a bare Duration != 0
+	// assertion on a zero-work sweep can genuinely fail on a 24 MHz
+	// monotonic clock. This test carried the identical fragile
+	// assertion and simply hadn't fired yet.
+	const delay = time.Millisecond
+	s := &countSweeper{report: gc.Report{Examined: 10, Collected: 3}, delay: delay}
 	w := gc.NewWorker("test", s, time.Hour, newLogger())
 
 	r, err := w.RunOnce(context.Background())
@@ -48,8 +54,8 @@ func TestWorker_RunOnce(t *testing.T) {
 	if r.Collected != 3 {
 		t.Errorf("Collected: want 3, got %d", r.Collected)
 	}
-	if r.Duration == 0 {
-		t.Error("Duration should be non-zero")
+	if r.Duration < delay {
+		t.Errorf("Duration: want >= %v, got %v", delay, r.Duration)
 	}
 	if s.count.Load() != 1 {
 		t.Errorf("Sweep call count: want 1, got %d", s.count.Load())
@@ -142,14 +148,31 @@ func TestWorker_RunOnceDuration(t *testing.T) {
 }
 
 func TestWorker_SweepErrorLogged(t *testing.T) {
-	s := &countSweeper{err: context.DeadlineExceeded}
+	// The sweeper carries a real delay so the assertion below can
+	// demand Duration >= delay instead of merely != 0. The original
+	// != 0 form was clock-granularity-fragile, and failed for real,
+	// intermittently, on an M1 (`make test`, 2026-08-04): Apple
+	// Silicon's monotonic clock ticks at 24 MHz -- one tick = 41.67ns
+	// -- and a warm, zero-work Sweep (interface dispatch plus one
+	// atomic add) genuinely starts and finishes inside a single tick,
+	// making time.Since read exactly 0. Measured directly on the Linux
+	// sandbox: 97.3% of these windows are under 42ns (min 29ns); that
+	// platform's finer clock never reads 0, which is why the failure
+	// never reproduced there across hundreds of runs. Cold first-call
+	// overhead usually pushes the M1's one measurement over a tick --
+	// hence intermittent, not constant. The delay makes the assertion
+	// hold by construction on any platform clock, and still proves what
+	// this test is actually for: RunOnce assigns Duration on the error
+	// path too.
+	const delay = time.Millisecond
+	s := &countSweeper{err: context.DeadlineExceeded, delay: delay}
 	w := gc.NewWorker("test", s, time.Hour, newLogger())
 	r, err := w.RunOnce(context.Background())
 	if err == nil {
 		t.Error("expected error from RunOnce when sweeper returns error")
 	}
-	if r.Duration == 0 {
-		t.Error("Duration should be set even on sweep error")
+	if r.Duration < delay {
+		t.Errorf("Duration should be measured even on sweep error: want >= %v, got %v", delay, r.Duration)
 	}
 }
 
@@ -157,5 +180,33 @@ func TestReport_ZeroValues(t *testing.T) {
 	var r gc.Report
 	if r.Examined != 0 || r.Collected != 0 || r.Quarantined != 0 || r.Errors != 0 {
 		t.Errorf("zero Report should have all-zero fields, got %+v", r)
+	}
+}
+
+// ─── Lifecycle guards (same unsafety family as pkg/server's T-140) ──────────
+
+func TestWorker_StartTwicePanics(t *testing.T) {
+	w := gc.NewWorker("test", &countSweeper{}, time.Hour, newLogger())
+	w.Start()
+	defer w.Stop()
+	defer func() {
+		if recover() == nil {
+			t.Error("second Start must panic, per its own documented contract; without the guard it silently launches a second run() goroutine whose eventual symptom is a close-of-closed-channel panic far from the cause")
+		}
+	}()
+	w.Start()
+}
+
+func TestWorker_StopBeforeStartReturnsImmediately(t *testing.T) {
+	w := gc.NewWorker("test", &countSweeper{}, time.Hour, newLogger())
+	returned := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop on a never-started worker blocked forever instead of returning -- the old documented-footgun behaviour, same shape as pre-T-140 Shutdown-before-Start")
 	}
 }

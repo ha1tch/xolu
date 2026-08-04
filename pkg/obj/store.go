@@ -212,13 +212,6 @@ func (s *Store) Get(ctx context.Context, subjectRef string) (*Subject, error) {
 	return getQ(ctx, s.db, subjectRef)
 }
 
-// getInTx is Get's transaction-scoped twin, used by containment.go's
-// own guard so existence checks read the same transaction's own view
-// throughout, never a snapshot taken before the guard opened.
-func (s *Store) getInTx(ctx context.Context, tx *sql.Tx, subjectRef string) (*Subject, error) {
-	return getQ(ctx, tx, subjectRef)
-}
-
 func getQ(ctx context.Context, q queryer, subjectRef string) (*Subject, error) {
 	var sub Subject
 	sub.Ref = subjectRef

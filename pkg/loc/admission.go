@@ -130,7 +130,7 @@ func (s *Store) treeAlignedFenceKeys(ctx context.Context, locationKey int64) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []FenceKey
 	for rows.Next() {
 		var fk int64

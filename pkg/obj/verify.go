@@ -65,7 +65,7 @@ func (s *Store) PositionFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			return foldFingerprint(rows)
 		},
 		Current: func(ctx context.Context) (string, error) {
@@ -74,7 +74,7 @@ func (s *Store) PositionFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			return foldFingerprint(rows)
 		},
 	}

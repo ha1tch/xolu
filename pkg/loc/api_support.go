@@ -43,7 +43,7 @@ func (s *Store) CurrentFenceKeys(ctx context.Context, subjectRef string) ([]Fenc
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []FenceKey
 	for rows.Next() {
 		var fk int64
@@ -132,8 +132,8 @@ func (s *Store) SubjectPosition(ctx context.Context, subjectRef string) (Subject
 type HistoryEntry struct {
 	At      string
 	Kind    string
-	From    *string // move only
-	To      *string // move only
+	From    *string  // move only
+	To      *string  // move only
 	Entered []string // report only (or a tree-aligned move, which also carries fence deltas)
 	Exited  []string
 }
@@ -150,7 +150,7 @@ func (s *Store) SubjectHistory(ctx context.Context, subjectRef string, limit int
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []HistoryEntry
 	for rows.Next() {
@@ -294,12 +294,12 @@ func (s *Store) nearbyFences(ctx context.Context, lat, lon, radiusMeters float64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		candidates = append(candidates, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var out []NearbyFence
 	for _, fk := range candidates {

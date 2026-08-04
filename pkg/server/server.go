@@ -629,7 +629,7 @@ func New(
 	}
 
 	// Deliberately small and not currently configurable: export work is
-	// explicitly meant to be low-priority (the team's own framing when
+	// explicitly meant to be low-priority (Horacio's own framing when
 	// this was designed, 2026-08-03) -- it should never meaningfully
 	// compete with normal request traffic for CPU/IO, regardless of
 	// how many tenants try to export concurrently. Per-tenant

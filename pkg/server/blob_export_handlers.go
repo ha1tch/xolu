@@ -5,7 +5,7 @@
 package server
 
 // blob_export_handlers.go — async, tenant-scoped, blob-backed export
-// (design settled directly with the team, 2026-08-03, replacing the
+// (design settled directly with Horacio, 2026-08-03, replacing the
 // earlier synchronous, non-tenant-scoped GET /api/v1/export -- see
 // T-149 and pkg/tenantexport's own doc comment for the full history).
 //

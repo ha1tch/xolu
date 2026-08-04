@@ -197,12 +197,12 @@ func TestExport_JobFailure(t *testing.T) {
 	defer func() { blobExportPollInterval = originalInterval }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"exp_fail","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"ticket":"exp_fail","status":"failed","error":"disk full"}`))
@@ -247,12 +247,12 @@ func TestExport_ContextCancelledDuringPoll(t *testing.T) {
 	defer func() { blobExportPollInterval = originalInterval }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"exp_slow","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			// Always "running" -- this job never completes, forcing
 			// Export into its poll loop until the context cancels it.
 			w.Header().Set("Content-Type", "application/json")

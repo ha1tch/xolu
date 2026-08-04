@@ -45,26 +45,26 @@ func PackageAndStore(ctx context.Context, srcDir string, bs *blob.Store, key str
 	if err != nil {
 		return nil, fmt.Errorf("tenantexport: create %s: %w", zipPath, err)
 	}
-	defer os.Remove(zipPath) // the zip is a staging artifact once it's in blob storage; removed regardless of outcome below
+	defer func() { _ = os.Remove(zipPath) }() // the zip is a staging artifact once it's in blob storage; removed regardless of outcome below
 
 	zw := zip.NewWriter(zf)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			zw.Close()
-			zf.Close()
+			_ = zw.Close()
+			_ = zf.Close()
 			return nil, fmt.Errorf("tenantexport: packaging cancelled: %w", err)
 		}
 		if entry.IsDir() {
 			continue // srcDir is expected flat; a subdirectory would be a caller bug, not silently recursed into
 		}
 		if err := addFileToZip(zw, filepath.Join(srcDir, entry.Name()), entry.Name()); err != nil {
-			zw.Close()
-			zf.Close()
+			_ = zw.Close()
+			_ = zf.Close()
 			return nil, fmt.Errorf("tenantexport: add %s to zip: %w", entry.Name(), err)
 		}
 	}
 	if err := zw.Close(); err != nil {
-		zf.Close()
+		_ = zf.Close()
 		return nil, fmt.Errorf("tenantexport: finalize zip: %w", err)
 	}
 	if err := zf.Close(); err != nil {
@@ -75,7 +75,7 @@ func PackageAndStore(ctx context.Context, srcDir string, bs *blob.Store, key str
 	if err != nil {
 		return nil, fmt.Errorf("tenantexport: reopen %s for upload: %w", zipPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -95,7 +95,7 @@ func addFileToZip(zw *zip.Writer, srcPath, nameInZip string) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	w, err := zw.Create(nameInZip)
 	if err != nil {

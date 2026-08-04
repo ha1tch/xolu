@@ -49,7 +49,7 @@ func ExportPebbleStore(ctx context.Context, dir, name, outDir string) (int, erro
 	if err != nil {
 		return 0, fmt.Errorf("tenantexport: open pebble store %s: %w", dir, err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return 0, fmt.Errorf("tenantexport: mkdir %s: %w", outDir, err)
@@ -59,13 +59,13 @@ func ExportPebbleStore(ctx context.Context, dir, name, outDir string) (int, erro
 	if err != nil {
 		return 0, fmt.Errorf("tenantexport: create %s: %w", outPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	iter, err := db.NewIter(nil)
 	if err != nil {
 		return 0, fmt.Errorf("tenantexport: iterate %s: %w", dir, err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	enc := json.NewEncoder(f)
 	if _, err := f.WriteString("[\n"); err != nil {

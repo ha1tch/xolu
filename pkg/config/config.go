@@ -5,13 +5,12 @@
 package config
 
 import (
+	"github.com/ha1tch/xolu/pkg/authconfig"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/ha1tch/xolu/pkg/authconfig"
 )
 
 // Config holds application configuration
@@ -176,7 +175,7 @@ type Config struct {
 	// X-Forwarded-For headers. When empty (default), header-based IP
 	// spoofing is refused and the TCP peer is authoritative. See T-38.
 	TrustedProxies string `json:"trusted_proxies"`
-	RateLimitByKey bool   // Rate limit by API key or JWT subject
+	RateLimitByKey   bool // Rate limit by API key or JWT subject
 
 	// Metrics
 	MetricsEnabled bool
@@ -448,7 +447,7 @@ type Config struct {
 	// Default: 900 (15 minutes).
 	BlobExportSweepIntervalSecs int
 	// BlobExportTTLSecs is how long (in seconds) a completed export blob
-	// is kept before the sweep deletes it -- the team's own framing when
+	// is kept before the sweep deletes it -- Horacio's own framing when
 	// this was designed (2026-08-03): "a TTL so that the export expires
 	// in the next few hours".
 	// Default: 14400 (4 hours).
@@ -549,7 +548,7 @@ func Default() *Config {
 		CORSOrigins:                 []string{},
 		TenantMode:                  "path",
 		TenantAuthMode:              "open",
-		TimeseriesEnabled:           true,     // default on (mature; regression-guarded — see validateSubsystemParity)
+		TimeseriesEnabled:           true,  // default on (mature; regression-guarded — see validateSubsystemParity)
 		TSMemtableSize:              67108864, // 64 MB
 		TSBlockSize:                 32768,    // 32 KB
 		TSCompression:               "zstd",
@@ -610,7 +609,7 @@ func LoadFromEnv(cfg *Config) {
 	if val := os.Getenv("XOLU_TRUSTED_PROXIES"); val != "" {
 		cfg.TrustedProxies = val
 	}
-	if val := os.Getenv("XOLU_ADDR"); val != "" {
+		if val := os.Getenv("XOLU_ADDR"); val != "" {
 		if h, p, err := net.SplitHostPort(val); err == nil {
 			cfg.Host = h
 			if port, err := strconv.Atoi(p); err == nil {

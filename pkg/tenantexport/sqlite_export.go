@@ -9,7 +9,7 @@
 // file: every row or key/value pair in that source, serialized, no
 // schema/constraint/index fidelity attempted or needed.
 //
-// Design settled directly with the team (2026-08-03), correcting an
+// Design settled directly with Horacio (2026-08-03), correcting an
 // earlier, substantially overcomplicated draft that tried to
 // reconstruct a byte-valid SQLite file containing only one tenant's
 // tables (ATTACH + CREATE TABLE AS SELECT, preserving schema/indexes).
@@ -150,7 +150,7 @@ func ExportSQLiteTable(ctx context.Context, db *sql.DB, tenantID uint16, spec SQ
 		}
 		return 0, fmt.Errorf("tenantexport: query %s: %w", realTable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -162,7 +162,7 @@ func ExportSQLiteTable(ctx context.Context, db *sql.DB, tenantID uint16, spec SQ
 	if err != nil {
 		return 0, fmt.Errorf("tenantexport: create %s: %w", outPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := json.NewEncoder(f)
 	if _, err := f.WriteString("[\n"); err != nil {

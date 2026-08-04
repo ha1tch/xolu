@@ -43,7 +43,8 @@ type Worker struct {
 	interval time.Duration
 	logger   zerolog.Logger
 
-	mu         sync.Mutex // protects stopped
+	mu         sync.Mutex // protects started, stopped, lastReport, lastAt
+	started    bool
 	stopped    bool
 	stop       chan struct{}
 	done       chan struct{}
@@ -65,12 +66,39 @@ func NewWorker(name string, s Sweeper, interval time.Duration, logger zerolog.Lo
 
 // Start launches the background sweep goroutine. Calling Start more than
 // once on the same Worker panics.
+//
+// The panic was always this method's documented contract, but the guard
+// itself was never implemented: a second Start silently launched a second
+// run() goroutine, and the eventual symptom was a "close of closed
+// channel" panic in run()'s own deferred close(w.done) -- in a background
+// goroutine, crashing the whole process, far from the call that caused
+// it (demonstrated live by TestWorker_StartTwicePanics's own pre-fix
+// run, which took down the test binary mid-suite attributed to a
+// different test's name). Same lifecycle-unsafety family as pkg/server's
+// own pre-T-140 Start/Shutdown race.
 func (w *Worker) Start() {
+	w.mu.Lock()
+	if w.started {
+		w.mu.Unlock()
+		panic("gc: Worker.Start called twice on worker " + w.name)
+	}
+	w.started = true
+	w.mu.Unlock()
 	go w.run()
 }
 
-// Stop signals the worker to stop and blocks until it has exited.
-// Calling Stop on a worker that has not been started blocks indefinitely.
+// Stop signals the worker to stop and blocks until the background
+// goroutine has exited. Idempotent. Calling Stop on a worker that was
+// never started returns immediately -- there is nothing to wait for.
+//
+// The previous behaviour, documented and implemented, was to block
+// forever on <-w.done in that case: the same sharp edge as pkg/server's
+// own pre-T-140 Shutdown-before-Start, kept alive here purely by its
+// documentation. Not a live bug on any known call path (every worker
+// the server registers is Started at registration, checked directly),
+// but a footgun with no upside. A Start after such a Stop launches a
+// goroutine that observes the already-closed stop channel and exits at
+// once -- harmless by construction.
 func (w *Worker) Stop() {
 	w.mu.Lock()
 	if w.stopped {
@@ -78,9 +106,12 @@ func (w *Worker) Stop() {
 		return
 	}
 	w.stopped = true
+	started := w.started
 	w.mu.Unlock()
 	close(w.stop)
-	<-w.done
+	if started {
+		<-w.done
+	}
 }
 
 // RunOnce executes a single sweep synchronously. Used by the admin endpoint

@@ -287,7 +287,7 @@ single-leaf half written (`admission_test.go`'s own `BenchmarkMove`,
 its own comment confirms it was this exact exit criterion) but never
 run or recorded — the gap was narrower than it looked when filed. Item
 53's sandbox numbers were followed up with a same-hardware run on
-the team's own M1, confirming the gap was environment (sandbox vs real
+Horacio's own M1, confirming the gap was environment (sandbox vs real
 silicon), not algorithm — see `loc-02-implementation.md`'s own
 recorded comparison. A real bug found and fixed during item 55's own
 testing: `loc_patterns.pattern_id` is a table's actual `PRIMARY KEY`
@@ -297,7 +297,7 @@ constraint code checked alongside the usual one — see `CHANGELOG.md`
 
 Not proposed as items here, tracked separately: G-14's multi-core
 confirmation (`docs/KNOWN_ISSUES.md`) — since resolved for real on
-the team's M1, `env:m1` `PASS`, closing that record — and distinct
+Horacio's M1, `env:m1` `PASS`, closing that record — and distinct
 `XOLU-LOC` codes for `ValidationError`'s two named triggers (the
 design docs themselves treat the shared generic 400 as acceptable for
 now).
@@ -326,7 +326,7 @@ tied to patterns (§4a), the one substantial piece of
 likely-orphaned code from an earlier draft — never described in the
 document's own prose, `patterns/extract`'s own "source doesn't
 resolve" case uses `XOLU-OBJ001` instead. Patterns itself deferred
-deliberately, confirmed directly with the team rather than silently
+deliberately, confirmed directly with Horacio rather than silently
 built or silently dropped — filed as its own item, **T-134**, not
 part of wave 10's own six. `obj-01-rest-api.md` earned the
 reconciliation banner its own header predicted, mirroring
@@ -343,7 +343,7 @@ proven on both collapsed and phased paths" was never achievable for
 `EngineHomogeneous` requires the literal string `"sql"`, so any
 transaction touching `/obj` always dispatches phased. Corrected in
 `obj-00-design.md` §10, `obj-02-implementation.md`'s Stage 6, and this
-item's own filed exit criterion, confirmed directly with the team
+item's own filed exit criterion, confirmed directly with Horacio
 rather than assumed. A real bug caught by the new event-feed tests,
 not shipped broken: the shared event-type whitelist had no `obj.*`
 entries at all, silently rejecting every obj subscription attempt

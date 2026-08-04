@@ -5,7 +5,7 @@
 // v2_obj_promote_handlers.go — T-121 (wave 10), Stage 3: promote/
 // demote (obj-00-design.md §9, obj-01-rest-api.md §5). Two real
 // wire-contract corrections against the original proposal, both
-// confirmed directly with the team before building, not assumed:
+// confirmed directly with Horacio before building, not assumed:
 //
 //  1. bal has no single-sided decrement/increment — only two-sided
 //     Transfer(from, to, amount). The original proposal's own example
@@ -29,7 +29,7 @@
 // promote is not built here.
 //
 // Two parametrized system defs bootstrap lazily, once per tenant, not
-// one per call (the team's own insight: dxp/def is already a reusable
+// one per call (Horacio's own insight: dxp/def is already a reusable
 // template mechanism via $ref bindings — reuse it as designed rather
 // than registering a fresh def on every promote). A third handles
 // demote. entity.create vs entity.existing_key need genuinely
@@ -120,7 +120,7 @@ func objDemoteDefSpec() dxpDefSpec {
 
 // ensureSystemDxpDef finds an existing def by name for this tenant,
 // or registers spec fresh if none exists — lazy, once per tenant, not
-// once per promote/demote call (the team's own insight: dxp/def is
+// once per promote/demote call (Horacio's own insight: dxp/def is
 // already a reusable, parametrized template; reuse it as designed).
 // A small, accepted race on true first-use concurrency: dxp_defs.name
 // carries no unique constraint, so two simultaneous first calls could

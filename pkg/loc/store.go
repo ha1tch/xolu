@@ -402,7 +402,7 @@ func (s *Store) List(ctx context.Context) ([]*Location, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []*Location
 	for rows.Next() {
 		loc, err := scanLocation(rows)
@@ -609,12 +609,12 @@ func deleteSubtree(ctx context.Context, tx *sql.Tx, table string, key int64) err
 	for rows.Next() {
 		var ck int64
 		if err := rows.Scan(&ck); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		children = append(children, ck)
 	}
-	rows.Close()
+	_ = rows.Close()
 	for _, ck := range children {
 		if err := deleteSubtree(ctx, tx, table, ck); err != nil {
 			return err

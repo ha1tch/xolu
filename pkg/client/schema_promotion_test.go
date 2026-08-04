@@ -252,12 +252,12 @@ func TestPromoteStrict_FullFlow_Complete(t *testing.T) {
 
 	var statusCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"prm_flow","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			n := atomic.AddInt32(&statusCalls, 1)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -292,12 +292,12 @@ func TestPromoteStrict_FullFlow_Rejected_NoError(t *testing.T) {
 	defer func() { promoteStrictPollInterval = originalInterval }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"prm_rej","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"ticket":"prm_rej","status":"rejected","failures":[{"id":1,"errors":["bad"]}]}`))
@@ -326,12 +326,12 @@ func TestPromoteStrict_FullFlow_Failed_IsError(t *testing.T) {
 	defer func() { promoteStrictPollInterval = originalInterval }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"prm_fail","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"ticket":"prm_fail","status":"failed","error":"disk full"}`))
@@ -355,12 +355,12 @@ func TestPromoteStrict_ContextCancelledDuringPoll(t *testing.T) {
 	defer func() { promoteStrictPollInterval = originalInterval }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"ticket":"prm_slow","status":"running"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"ticket":"prm_slow","status":"running"}`))

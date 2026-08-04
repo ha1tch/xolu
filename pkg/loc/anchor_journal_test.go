@@ -71,7 +71,7 @@ func TestPatch_AnchorChange_AppendsOneJournalEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after anchor patch: %v", err)
 	}
-	if got.Placement.Anchor == nil || !approxEqual(got.Placement.Anchor.Lat, -34.95) {
+	if got.Anchor == nil || !approxEqual(got.Anchor.Lat, -34.95) {
 		t.Errorf("live location row not updated: %+v", got.Placement)
 	}
 }
@@ -133,7 +133,7 @@ func TestPatch_OffsetOnlyChange_NeverTouchesAnchorJournal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after offset patch: %v", err)
 	}
-	if !approxEqual(got.Placement.OffsetX, 100) || !approxEqual(got.Placement.OffsetY, 200) {
+	if !approxEqual(got.OffsetX, 100) || !approxEqual(got.OffsetY, 200) {
 		t.Errorf("offset not actually updated: %+v", got.Placement)
 	}
 }

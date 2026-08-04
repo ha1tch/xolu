@@ -40,7 +40,7 @@ func (s *Store) AssignmentFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var subj string
@@ -62,7 +62,7 @@ func (s *Store) AssignmentFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var subj string
@@ -100,7 +100,7 @@ func (s *Store) OccupancyFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var key, count int64
@@ -120,7 +120,7 @@ func (s *Store) OccupancyFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var key, count int64
@@ -169,7 +169,7 @@ func (s *Store) FenceMembershipFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var subj string
@@ -190,7 +190,7 @@ func (s *Store) FenceMembershipFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var subj string
@@ -217,7 +217,7 @@ func (s *Store) FenceOccupancyFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var fk, count int64
@@ -237,7 +237,7 @@ func (s *Store) FenceOccupancyFoldOracle() chronicle.RebuildOracle {
 			if err != nil {
 				return "", err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var lines []string
 			for rows.Next() {
 				var fk, count int64

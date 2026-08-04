@@ -53,7 +53,7 @@ func (s *Server) handleLocPatternsDef(w http.ResponseWriter, r *http.Request) {
 		s.writeLocError(w, err)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, locPatternResponse{Name: req.Name, Capacity: req.Capacity})
+	s.writeJSON(w, http.StatusCreated, locPatternResponse(req))
 }
 
 func (s *Server) handleLocPatternsList(w http.ResponseWriter, r *http.Request) {
