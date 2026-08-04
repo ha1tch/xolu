@@ -389,11 +389,18 @@ func TestAuthHeader(t *testing.T) {
 		t.Errorf("expected no Authorization header without API key, got %q", capturedAuth)
 	}
 
-	// With API key: Authorization: Bearer <key>.
+	// With API key: Authorization: ApiKey <key> -- NOT "Bearer". T-160
+	// (2026-08-04, reported by the xoluman team): this assertion used
+	// to check for "Bearer test-key-abc", actively enshrining a real
+	// bug as expected behaviour -- the mock server here just captures
+	// whatever the client sends, so a wrong assertion stayed green
+	// indefinitely. Confirmed directly against the real server's own
+	// pkg/authmw.validateAPIKey before fixing this: it never accepts
+	// a Bearer-prefixed key for apikey auth type.
 	clientWithAuth := New(server.URL, WithAPIKey("test-key-abc"))
 	clientWithAuth.Create(context.Background(), "assets", map[string]any{"name": "x"})
-	if capturedAuth != "Bearer test-key-abc" {
-		t.Errorf("expected Authorization: Bearer test-key-abc, got %q", capturedAuth)
+	if capturedAuth != "ApiKey test-key-abc" {
+		t.Errorf("expected Authorization: ApiKey test-key-abc, got %q", capturedAuth)
 	}
 }
 
@@ -832,7 +839,9 @@ func TestAuthNoneSendsNoAuthorizationHeader(t *testing.T) {
 	}
 }
 
-func TestWithAPIKeySendsBearer(t *testing.T) {
+func TestWithAPIKeySendsApiKeyScheme(t *testing.T) {
+	// Renamed from TestWithAPIKeySendsBearer -- T-160 (2026-08-04):
+	// that name and its own assertion both enshrined the actual bug.
 	var got string
 	server := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("Authorization")
@@ -844,8 +853,8 @@ func TestWithAPIKeySendsBearer(t *testing.T) {
 	c := New(server.URL, WithAPIKey("key-abc"))
 	_, _ = c.Get(context.Background(), "users", 1)
 
-	if got != "Bearer key-abc" {
-		t.Errorf("expected Authorization %q, got %q", "Bearer key-abc", got)
+	if got != "ApiKey key-abc" {
+		t.Errorf("expected Authorization %q, got %q", "ApiKey key-abc", got)
 	}
 	if c.authMode != AuthAPIKey {
 		t.Errorf("expected authMode AuthAPIKey, got %v", c.authMode)
@@ -1080,4 +1089,81 @@ func TestReadyDoesNotSendAuthHeader(t *testing.T) {
 // like errors.As for the shapes we return.
 func errorsAs(err error, target **Error) bool {
 	return errors.As(err, target)
+}
+
+// ─── TestConnection (T-161: Client.Health cannot verify a credential) ──────
+
+func TestTestConnection_Success(t *testing.T) {
+	server := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schemas" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":0,"schemas":[]}`))
+	})
+	defer server.Close()
+
+	c := New(server.URL)
+	if err := c.TestConnection(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTestConnection_RejectedCredential(t *testing.T) {
+	server := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"code":"XOLU-AU001","message":"Authentication required","status":401}}`))
+	})
+	defer server.Close()
+
+	c := New(server.URL, WithAPIKey("wrong-key"))
+	err := c.TestConnection(context.Background())
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusUnauthorized {
+		t.Errorf("HTTPStatus: got %d, want 401", xoluErr.HTTPStatus)
+	}
+}
+
+func TestTestConnection_TenantConfigured_NotTenantPrefixed(t *testing.T) {
+	// Same class of bug as T-158: must hit the global /schemas path,
+	// not a tenant-prefixed one, so a connection can be tested before
+	// a tenant is even chosen.
+	server := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schemas" {
+			t.Errorf("path should not be tenant-prefixed: got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":0,"schemas":[]}`))
+	})
+	defer server.Close()
+
+	c := New(server.URL, WithTenant("acme"))
+	if err := c.TestConnection(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTestConnection_UsesApiKeyScheme(t *testing.T) {
+	var got string
+	server := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":0,"schemas":[]}`))
+	})
+	defer server.Close()
+
+	c := New(server.URL, WithAPIKey("test-key"))
+	if err := c.TestConnection(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "ApiKey test-key" {
+		t.Errorf("Authorization: got %q, want %q", got, "ApiKey test-key")
+	}
 }

@@ -60,6 +60,59 @@ type integrationEnv struct {
 	c   *client.Client
 }
 
+// TestIntegration_SchemaEndpoints_TenantConfigured is the direct
+// regression test for the xoluman-reported bug: a tenant-scoped client
+// (the normal, expected configuration for any real multi-tenant
+// deployment) calling any of the three schema methods must reach the
+// server's actual global schema endpoints, not a mis-routed
+// tenant-prefixed URL. Uses a second client against the same live
+// server as bootServer's own default client, configured with a tenant
+// that is never actually provisioned -- deliberately, since these
+// calls must succeed without ever touching tenant resolution at all
+// once correctly routed to the tenant-independent endpoint.
+func TestIntegration_SchemaEndpoints_TenantConfigured(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+	tenantClient := client.New(env.ts.URL, client.WithTenant("acme_crm_unprovisioned"))
+
+	schema := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}},
+		"required":   []string{"name"},
+	}
+	if err := tenantClient.DefineEntitySchema(ctx, "companies", schema); err != nil {
+		t.Fatalf("DefineEntitySchema with a tenant configured: %v", err)
+	}
+
+	got, err := tenantClient.GetEntitySchema(ctx, "companies")
+	if err != nil {
+		t.Fatalf("GetEntitySchema with a tenant configured: %v", err)
+	}
+	foundName := false
+	for _, f := range got.Fields {
+		if f.Name == "name" && f.Required {
+			foundName = true
+		}
+	}
+	if !foundName {
+		t.Errorf("GetEntitySchema did not read back the 'name' field as required: %+v", got.Fields)
+	}
+
+	types, err := tenantClient.ListEntityTypes(ctx)
+	if err != nil {
+		t.Fatalf("ListEntityTypes with a tenant configured: %v", err)
+	}
+	found := false
+	for _, ty := range types {
+		if ty.Name == "companies" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListEntityTypes did not include 'companies': %+v", types)
+	}
+}
+
 func bootServer(t *testing.T) *integrationEnv {
 	t.Helper()
 	cfg := config.Default()
@@ -98,6 +151,76 @@ func bootServer(t *testing.T) *integrationEnv {
 		store.Close()
 	})
 	return &integrationEnv{srv: srv, ts: ts, c: client.New(ts.URL)}
+}
+
+// TestIntegration_APIKeyAuth_CorrectAndWrongCredential is the direct
+// end-to-end proof for T-160 (the client's own apikey auth header
+// format was wrong -- "Bearer", never accepted by the server's own
+// apikey validator) and T-161 (TestConnection, which needed T-160
+// fixed to be able to tell a valid credential from an invalid one at
+// all) together, against a real, credential-enforcing server -- not
+// a mock that would just capture whatever the client sends.
+func TestIntegration_APIKeyAuth_CorrectAndWrongCredential(t *testing.T) {
+	env := bootServerWithAPIKeyAuth(t, "the-real-key")
+	ctx := context.Background()
+
+	if err := env.c.TestConnection(ctx); err != nil {
+		t.Fatalf("TestConnection with the correct key: %v", err)
+	}
+
+	wrongClient := client.New(env.ts.URL, client.WithAPIKey("a-wrong-key"))
+	err := wrongClient.TestConnection(ctx)
+	if err == nil {
+		t.Fatal("TestConnection with a wrong key should fail, got nil error")
+	}
+	xoluErr, ok := err.(*client.Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusUnauthorized {
+		t.Errorf("HTTPStatus: got %d, want 401", xoluErr.HTTPStatus)
+	}
+
+	noCredClient := client.New(env.ts.URL)
+	if err := noCredClient.TestConnection(ctx); err == nil {
+		t.Fatal("TestConnection with no credential configured against an apikey-enforcing server should fail, got nil error")
+	}
+}
+
+// configured server-side instead of AuthType "none" -- for testing
+// T-160 (the client's own apikey auth header format) and T-161
+// (TestConnection) together against a real, credential-enforcing
+// server, not a mock that would just capture whatever the client
+// happens to send.
+func bootServerWithAPIKeyAuth(t *testing.T, validKey string) *integrationEnv {
+	t.Helper()
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	cfg.AuthType = "apikey"
+	cfg.APIKeys = []string{validKey}
+	cfg.APIV2Enabled = true
+
+	dbPath := sl.SharedStorePath(cfg.BaseDir)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store, err := storage.NewStore("sqlite", map[string]interface{}{"db_path": dbPath})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	memCache := cache.NewMemoryCache(1000, 300*time.Second)
+	g := graph.NewFlatGraph()
+	validator := validation.NewJSONSchemaValidator(filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas"))
+	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
+
+	srv := server.New(cfg, store, memCache, g, validator, logger)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Stop()
+		store.Close()
+	})
+	return &integrationEnv{srv: srv, ts: ts, c: client.New(ts.URL, client.WithAPIKey(validKey))}
 }
 
 // seedJSON posts a raw JSON body to a server path and fails the test on a

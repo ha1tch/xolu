@@ -11,9 +11,12 @@ package timeseries
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 )
 
 // TestRetentionWorker_StartStop verifies that the worker goroutine starts,
@@ -249,4 +252,146 @@ func TestRetentionWorker_ConcurrentSweepAndAppend(t *testing.T) {
 	wg.Wait()
 	w.Stop()
 	// No assertion needed — the test passes if no race or panic occurs.
+}
+
+// ─── Purge-failure path (regression: CI panic, 2026-08-04) ────────────────
+//
+// manager.stores' own keys are tenant.TenantID (a distinct named type over
+// uint16, see pkg/tenant.TenantID), not bare uint16 -- confirmed directly
+// against Provision's own parameter type before writing this. Both
+// sweep() and its gc.Sweeper twin Sweep() type-asserted the sync.Map key
+// as key.(uint16), which panics unconditionally the instant any store's
+// Purge genuinely returns an error: "interface conversion: interface {}
+// is tenant.TenantID, not uint16". Never caught before because every
+// existing RetentionWorker test uses a real, working Pebble-backed store
+// whose Purge never fails -- the error path itself had no test coverage
+// at all. Severe beyond the test failure: RetentionWorker runs as a
+// registered gc.Worker in the real server with no panic recovery
+// anywhere in that chain, so any genuine Purge failure in production
+// would have crashed the whole process, not just this goroutine.
+
+// failingStore wraps the real Store interface (embedded, nil) and
+// overrides only Purge -- the one method these tests actually exercise.
+// Any other method call would panic on the nil embedded interface, which
+// is fine: RetentionWorker's sweep functions only ever call Purge.
+type failingStore struct {
+	Store
+	purgeErr error
+}
+
+func (f *failingStore) Purge(ctx context.Context) error {
+	return f.purgeErr
+}
+
+// Close is overridden as a no-op alongside Purge: DefaultManager.Close
+// (called by every test's own defer) ranges over every store and calls
+// Close on each -- falling through to the embedded nil Store otherwise
+// panics on cleanup, unrelated to what these tests actually verify.
+func (f *failingStore) Close() error {
+	return nil
+}
+
+func failingStoreFactory(purgeErr error) StoreFactory {
+	return func(dir string, cfg StoreConfig, tenantName string) (Store, error) {
+		return &failingStore{purgeErr: purgeErr}, nil
+	}
+}
+
+// TestRetentionWorker_SweepPurgeError_DoesNotPanic is the direct
+// regression test: sweep() (the path RetentionWorker.run actually
+// takes) must survive a genuine Purge failure without panicking.
+func TestRetentionWorker_SweepPurgeError_DoesNotPanic(t *testing.T) {
+	baseDir := t.TempDir()
+	mgr, err := NewManager(baseDir, failingStoreFactory(errors.New("simulated purge failure")), testStoreConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+	if err := mgr.Provision(ctx, 1, "acme"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewRetentionWorker(mgr, time.Hour) // interval irrelevant -- sweep() called directly
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("sweep() panicked on a genuine Purge error: %v", r)
+			}
+		}()
+		w.sweep()
+	}()
+}
+
+// TestRetentionWorker_Sweep_GCInterface_PurgeError_DoesNotPanic is the
+// same regression, through the gc.Sweeper interface method (Sweep) --
+// the copy of this bug that actually crashed CI, since RetentionWorker
+// is registered as a gc.Worker in the real server and driven through
+// this method, not sweep() directly.
+func TestRetentionWorker_Sweep_GCInterface_PurgeError_DoesNotPanic(t *testing.T) {
+	baseDir := t.TempDir()
+	mgr, err := NewManager(baseDir, failingStoreFactory(errors.New("simulated purge failure")), testStoreConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+	if err := mgr.Provision(ctx, 1, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Provision(ctx, 2, "beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewRetentionWorker(mgr, time.Hour)
+	var report gcpkg.Report
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Sweep() panicked on a genuine Purge error: %v", r)
+			}
+		}()
+		report, err = w.Sweep(ctx)
+	}()
+	if err != nil {
+		t.Fatalf("Sweep itself returned an error (it shouldn't -- per-store errors are counted in the Report): %v", err)
+	}
+	if report.Examined != 2 {
+		t.Errorf("Examined: got %d, want 2", report.Examined)
+	}
+	if report.Errors != 2 {
+		t.Errorf("Errors: got %d, want 2 (both stores' Purge failed)", report.Errors)
+	}
+	if report.Collected != 0 {
+		t.Errorf("Collected: got %d, want 0", report.Collected)
+	}
+}
+
+// TestRetentionWorker_SweepPurgeSuccess_StillWorks is a quick sanity
+// check alongside the two panic regressions above -- the success path
+// (a store whose Purge succeeds) must be completely unaffected by the
+// type-assertion fix.
+func TestRetentionWorker_SweepPurgeSuccess_StillWorks(t *testing.T) {
+	baseDir := t.TempDir()
+	mgr, err := NewManager(baseDir, failingStoreFactory(nil), testStoreConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+	if err := mgr.Provision(ctx, 1, "acme"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewRetentionWorker(mgr, time.Hour)
+	report, err := w.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Examined != 1 || report.Collected != 1 || report.Errors != 0 {
+		t.Errorf("got %+v, want Examined=1 Collected=1 Errors=0", report)
+	}
 }

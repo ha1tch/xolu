@@ -1,6 +1,6 @@
 # Known Issues and Intentional Limits
 
-Version: 0.26.1
+Version: 0.27.2
 Last reviewed: 2026-08-04
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
@@ -345,7 +345,7 @@ records the skip explicitly.
 
 Convention: **Last exercised** is `YYYY-MM-DD env:<where>` — env values
 `sandbox` (single-core Linux, this project's default CI runner class),
-`m1` (Horacio's Apple M1, 8-core), `gh-runner` (GitHub Actions
+`m1` (the team's Apple M1, 8-core), `gh-runner` (GitHub Actions
 `ubuntu-latest`, multi-core). Race-class tests that only manifest
 under true parallelism require `m1` or `gh-runner`.
 
@@ -406,7 +406,7 @@ correctness envelope over parser/validator input space.
   opening statement), verified queueing on plain deferred transactions.
 - **Last exercised:** 2026-07-21 env:sandbox (single-CPU, -race,
   count=5, 32 claimants) — PASS; weak evidence per above. **2026-08-02:
-  Horacio's first real multi-core attempt (env:m1) never ran** — a
+  the team's first real multi-core attempt (env:m1) never ran** — a
   sibling stress-tagged file in the same package,
   `dxp_cross_path_race_stress_test.go`, failed to build (stale
   `Reserve` call, missing the `participantID` argument T-109 added;
@@ -531,7 +531,7 @@ correctness envelope over parser/validator input space.
 ### G-17. dxp/bal lock-order deadlock (T-138) — multi-core rerun of the reproducer
 
 - **What it guards:** the AB/BA lock-order inversion T-138 diagnosed
-  from Horacio's own M1 goroutine dump: `bal.Adapter.Execute` (holding
+  from the team's own M1 goroutine dump: `bal.Adapter.Execute` (holding
   the coordinator's open `*sql.Tx` on the `MaxOpenConns=1` writer
   pool) acquired the tenant `MemCache` lock while `bal`
   Reserve/Validate/Transfer held that lock waiting for the same pool —
@@ -551,14 +551,14 @@ correctness envelope over parser/validator input space.
   detector silent.
 - **Environment contract:** WAL + busy_timeout (house defaults) only.
 - **Last exercised:** 2026-08-03 env:m1 (real Apple M1 silicon,
-  Horacio's own run) — `GOMAXPROCS=8 go test ./pkg/server/ -run
+  the team's own run) — `GOMAXPROCS=8 go test ./pkg/server/ -run
   TestObjAdversarial_EnsureSystemDxpDef_ConcurrentFirstUse -race
   -count=20 -v` — **PASS, 20/20, 15.962s total (~0.8s/run), zero 60s-
   class timeouts, race detector silent throughout.** Against the
   pre-fix log's 9-of-10 failures at 60.5s each on the same hardware.
   Both halves of the guard's own pass condition met — correctness and
-  throughput judged acceptable by Horacio directly, closing the "probe"
-  framing his own decision named. T-138 and T-136 closed this release
+  throughput judged acceptable by the team directly, closing the "probe"
+  framing our own decision named. T-138 and T-136 closed this release
   (`docs/RESOLVED.md`). Bonus same-session confirmation: G-13 (`bal`
   admission race, `-tags stress`, count=20) also re-run on the M1,
   PASS, 48.518s — not itself re-recorded here since G-13 owns its own

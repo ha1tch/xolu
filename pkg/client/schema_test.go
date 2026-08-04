@@ -748,7 +748,7 @@ func TestCreateMachineDefValidationRejected(t *testing.T) {
 	defer server.Close()
 
 	c := New(server.URL)
-	_, err := c.CreateMachineDef(context.Background(), MachineSpec{Name: "bad"})
+	_, err := c.CreateMachineDef(context.Background(), MachineSpec{Name: "bad", Initial: "start"})
 	xoluErr, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("expected *client.Error, got %T: %v", err, err)
@@ -776,7 +776,7 @@ func TestReplaceMachineDefHappyPath(t *testing.T) {
 	defer server.Close()
 
 	c := New(server.URL)
-	result, err := c.ReplaceMachineDef(context.Background(), 7, MachineSpec{Name: "updated"})
+	result, err := c.ReplaceMachineDef(context.Background(), 7, MachineSpec{Name: "updated", Initial: "start"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestReplaceMachineDefNotFound(t *testing.T) {
 	defer server.Close()
 
 	c := New(server.URL)
-	_, err := c.ReplaceMachineDef(context.Background(), 999, MachineSpec{Name: "x"})
+	_, err := c.ReplaceMachineDef(context.Background(), 999, MachineSpec{Name: "x", Initial: "start"})
 	xoluErr, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("expected *client.Error, got %T: %v", err, err)
@@ -967,5 +967,131 @@ func TestParsedAnalysis_Malformed(t *testing.T) {
 	_, err := def.ParsedAnalysis()
 	if err == nil {
 		t.Fatal("expected an error for malformed Analysis JSON")
+	}
+}
+
+// ─── Schema endpoints are not tenant-scoped (regression: xoluman letter, 2026-08-04) ───
+//
+// GetEntitySchema/DefineEntitySchema/ListEntityTypes must never send a
+// /tenant/{id}/ prefix, even when a tenant is configured on the client --
+// the server registers these routes only outside the tenant router group
+// (pkg/server/server.go: "Schema operations (tenant-independent, always
+// available)"). Every test below configures a tenant specifically to
+// prove this negative -- the exact combination no prior test exercised,
+// which is how the bug shipped unnoticed.
+
+func TestGetEntitySchema_TenantConfigured_URLNotTenantPrefixed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schema/companies" {
+			t.Errorf("path: got %s, want /api/v1/schema/companies (must NOT contain /tenant/acme_crm/)", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"type":"object","properties":{"name":{"type":"string"}}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL, WithTenant("acme_crm"))
+	_, err := c.GetEntitySchema(context.Background(), "companies")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDefineEntitySchema_TenantConfigured_URLNotTenantPrefixed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schema/companies" {
+			t.Errorf("path: got %s, want /api/v1/schema/companies (must NOT contain /tenant/acme_crm/)", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message":"ok"}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL, WithTenant("acme_crm"))
+	err := c.DefineEntitySchema(context.Background(), "companies", map[string]interface{}{"type": "object"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListEntityTypes_TenantConfigured_URLNotTenantPrefixed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schemas" {
+			t.Errorf("path: got %s, want /api/v1/schemas (must NOT contain /tenant/acme_crm/)", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":1,"schemas":[{"name":"companies"}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL, WithTenant("acme_crm"))
+	types, err := c.ListEntityTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(types) != 1 {
+		t.Errorf("got %d types, want 1", len(types))
+	}
+}
+
+// TestBuildURLRoot_NeverTenantPrefixed is the direct unit test for the
+// new builder itself, mirroring TestBuildURLv2RootIgnoresTenant's own
+// shape for its already-proven v2 sibling.
+func TestBuildURLRoot_NeverTenantPrefixed(t *testing.T) {
+	c := New("http://example.com", WithTenant("0007"))
+	got := c.buildURLRoot("/schema/widgets")
+	want := "http://example.com/api/v1/schema/widgets"
+	if got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+func TestBuildURLRoot_NoTenantConfigured(t *testing.T) {
+	c := New("http://example.com")
+	got := c.buildURLRoot("/schema/widgets")
+	want := "http://example.com/api/v1/schema/widgets"
+	if got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+// ─── CreateMachineDef/ReplaceMachineDef: cheap client-side pre-checks ───────
+//
+// T-162 (2026-08-04): suggested by the Seam AMS team's own local patch --
+// Name/Initial are trivially always-invalid on the server too, so
+// failing locally saves a round trip for the most common mistake.
+
+func TestCreateMachineDef_EmptyName_RejectedClientSide(t *testing.T) {
+	c := New("http://example.com")
+	_, err := c.CreateMachineDef(context.Background(), MachineSpec{Initial: "start"})
+	if err == nil {
+		t.Fatal("expected an error for an empty Name")
+	}
+}
+
+func TestCreateMachineDef_EmptyInitial_RejectedClientSide(t *testing.T) {
+	c := New("http://example.com")
+	_, err := c.CreateMachineDef(context.Background(), MachineSpec{Name: "door"})
+	if err == nil {
+		t.Fatal("expected an error for an empty Initial")
+	}
+}
+
+func TestReplaceMachineDef_EmptyName_RejectedClientSide(t *testing.T) {
+	c := New("http://example.com")
+	_, err := c.ReplaceMachineDef(context.Background(), 1, MachineSpec{Initial: "start"})
+	if err == nil {
+		t.Fatal("expected an error for an empty Name")
+	}
+}
+
+func TestReplaceMachineDef_EmptyInitial_RejectedClientSide(t *testing.T) {
+	c := New("http://example.com")
+	_, err := c.ReplaceMachineDef(context.Background(), 1, MachineSpec{Name: "door"})
+	if err == nil {
+		t.Fatal("expected an error for an empty Initial")
 	}
 }

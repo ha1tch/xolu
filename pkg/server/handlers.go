@@ -24,10 +24,10 @@ import (
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/oql"
 	"github.com/ha1tch/xolu/pkg/qs"
+	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/storage"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/sulpher"
-	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/version"
@@ -93,7 +93,12 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			delete(merged, key)
 		}
 
-		valid, errs := s.validator.Validate(entity, merged)
+		// Schema validation must not see "id"/"_version" -- see
+		// stripSystemFieldsForValidation's own doc comment (T-159).
+		// Validated on a filtered copy, not merged itself: merged
+		// still needs both intact for graph-edge validation just
+		// below and for the store write this callback gates.
+		valid, errs := s.validator.Validate(entity, stripSystemFieldsForValidation(merged))
 		if !valid {
 			validationFailed = true
 			validationErrors = errs
@@ -313,9 +318,13 @@ func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate
+	// Validate. data itself keeps "id" (needed for the store call
+	// below) and any caller-supplied "_version" (needed for the
+	// optimistic-concurrency check below) intact -- schema validation
+	// runs on a filtered copy instead; see
+	// stripSystemFieldsForValidation's own doc comment (T-159).
 	data["id"] = id
-	if valid, errors := s.validator.Validate(entity, data); !valid {
+	if valid, errors := s.validator.Validate(entity, stripSystemFieldsForValidation(data)); !valid {
 		s.writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    string(xoluerr.ErrValidationFailed),
@@ -1794,6 +1803,39 @@ func validateEntityName(entity string) error {
 		return fmt.Errorf("invalid entity name: must start with a letter and contain only letters, numbers, and underscores")
 	}
 	return nil
+}
+
+// stripSystemFieldsForValidation returns a shallow copy of doc with
+// "id" and "_version" removed. Both are system fields xolu itself
+// injects or merges in -- "id" always (assigned at create, echoed
+// back on every read, explicitly set before update/save), "_version"
+// whenever a stored or merged document is involved (PATCH's own
+// merge always carries it; a caller may also include it in a save
+// body for optimistic concurrency) -- never something a user schema
+// declares. A schema with additionalProperties:false correctly
+// rejects any undeclared field per its own spec, so neither field
+// may be present at validation time.
+//
+// This is the fix for T-159 (2026-08-04, reported by the xoluman
+// team): every additionalProperties:false schema failed PUT/PATCH/
+// save outright, "id: unexpected field" (and "_version: unexpected
+// field" wherever the merged document carried one), regardless of
+// what the caller actually changed -- confirmed directly, and
+// confirmed NOT specific to ref fields or an undeclared ref target
+// despite that being xoluman's own working theory: a plain schema
+// with no ref fields at all reproduced it identically, and declaring
+// a ref target did not fix it. handleCreate never had this problem
+// by construction -- a not-yet-created entity has no id yet, so
+// there was nothing to strip there in the first place.
+func stripSystemFieldsForValidation(doc map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(doc))
+	for k, v := range doc {
+		if k == "id" || k == "_version" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // validateFieldName checks that a filter field name is safe for use in

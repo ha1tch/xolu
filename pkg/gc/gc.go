@@ -10,10 +10,18 @@
 // once so that each sweeper only needs to implement the Sweeper interface.
 // Workers are registered at server startup and exposed via the admin API
 // at POST /api/v1/admin/gc/{name}/run and GET /api/v1/admin/gc.
+//
+// A panic in any registered Sweeper's own Sweep method is recovered by
+// Worker.RunOnce, logged at Error level with a stack trace, and turned
+// into a normal error -- one GC subsystem's bug degrades to a logged
+// failure for that subsystem's own sweeps, never a crash of the whole
+// server. See RunOnce's own doc comment for why this exists.
 package gc
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -116,9 +124,37 @@ func (w *Worker) Stop() {
 
 // RunOnce executes a single sweep synchronously. Used by the admin endpoint
 // and by tests. Safe to call concurrently with the background goroutine.
-func (w *Worker) RunOnce(ctx context.Context) (Report, error) {
+//
+// Recovers a panic from the underlying Sweeper's own Sweep method,
+// logs it at Error level with a full stack trace, and returns it as a
+// normal error instead of letting it propagate -- added 2026-08-04
+// (T-156: a real type-assertion panic in pkg/timeseries's
+// RetentionWorker, registered as exactly this kind of Sweeper, crashed
+// CI outright). A server should never go down because one GC
+// subsystem has a bug; the worker survives a panicking sweep and keeps
+// ticking on schedule, the same way it already survives a sweep that
+// returns a normal error.
+func (w *Worker) RunOnce(ctx context.Context) (r Report, err error) {
 	t := time.Now()
-	r, err := w.sweeper.Sweep(ctx)
+	defer func() {
+		if p := recover(); p != nil {
+			stack := debug.Stack()
+			r = Report{Duration: time.Since(t)}
+			err = fmt.Errorf("gc: sweeper %q panicked: %v", w.name, p)
+			w.mu.Lock()
+			w.lastReport = r
+			w.lastAt = t
+			w.mu.Unlock()
+			w.logger.Error().
+				Str("worker", w.name).
+				Interface("panic", p).
+				Str("stack", string(stack)).
+				Dur("duration", r.Duration).
+				Msg("GC sweep panicked")
+		}
+	}()
+
+	r, err = w.sweeper.Sweep(ctx)
 	r.Duration = time.Since(t)
 	w.mu.Lock()
 	w.lastReport = r

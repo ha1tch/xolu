@@ -5,7 +5,9 @@
 package gc_test
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +30,26 @@ func (c *countSweeper) Sweep(_ context.Context) (gc.Report, error) {
 		time.Sleep(c.delay)
 	}
 	return c.report, c.err
+}
+
+// panicSweeper always panics from Sweep, simulating a genuine bug in a
+// third-party Sweeper implementation -- the exact shape of T-156's own
+// real bug (a bad type assertion inside pkg/timeseries's
+// RetentionWorker.Sweep).
+type panicSweeper struct {
+	value any // the value passed to panic(); a string, an error, anything
+}
+
+func (p *panicSweeper) Sweep(_ context.Context) (gc.Report, error) {
+	panic(p.value)
+}
+
+// newCapturingLogger returns a logger writing to buf, so a test can
+// inspect the actual log content -- newLogger's own zerolog.Nop()
+// discards everything, which is right for tests that only care whether
+// something panics, wrong for a test verifying what got logged.
+func newCapturingLogger(buf *bytes.Buffer) zerolog.Logger {
+	return zerolog.New(buf)
 }
 
 func newLogger() zerolog.Logger {
@@ -209,4 +231,122 @@ func TestWorker_StopBeforeStartReturnsImmediately(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop on a never-started worker blocked forever instead of returning -- the old documented-footgun behaviour, same shape as pre-T-140 Shutdown-before-Start")
 	}
+}
+
+// ─── Panic recovery (T-157: "a server should never panic") ────────────────
+
+// TestWorker_RunOnce_SweeperPanic_DoesNotPanic is the direct proof: a
+// Sweeper whose Sweep panics must not take down the caller. Runs
+// RunOnce with no recover of its own around the call -- if RunOnce's
+// own internal recovery didn't work, this test process itself would
+// crash, not just fail.
+func TestWorker_RunOnce_SweeperPanic_DoesNotPanic(t *testing.T) {
+	s := &panicSweeper{value: "simulated bug: index out of range"}
+	w := gc.NewWorker("test", s, time.Hour, newLogger())
+
+	r, err := w.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected a non-nil error when the sweeper panics")
+	}
+	if !strings.Contains(err.Error(), "simulated bug: index out of range") {
+		t.Errorf("error should carry the panic value, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "test") {
+		t.Errorf("error should name the worker, got: %v", err)
+	}
+	if r.Duration == 0 {
+		t.Error("Duration should still be measured even when the sweep panicked")
+	}
+}
+
+// TestWorker_RunOnce_SweeperPanic_LogsErrorWithStack verifies the log
+// entry itself: Error level, the panic value present, and a real stack
+// trace -- not just "didn't crash" but "gave an operator enough to
+// actually diagnose it," matching what CI's own crash trace (T-156)
+// gave for free before this recovery existed.
+func TestWorker_RunOnce_SweeperPanic_LogsErrorWithStack(t *testing.T) {
+	var buf bytes.Buffer
+	s := &panicSweeper{value: "boom"}
+	w := gc.NewWorker("ts-retention", s, time.Hour, newCapturingLogger(&buf))
+
+	_, _ = w.RunOnce(context.Background())
+
+	logLine := buf.String()
+	if !strings.Contains(logLine, `"level":"error"`) {
+		t.Errorf("expected Error level, got: %s", logLine)
+	}
+	if !strings.Contains(logLine, "GC sweep panicked") {
+		t.Errorf("expected the panic-specific message, got: %s", logLine)
+	}
+	if !strings.Contains(logLine, "ts-retention") {
+		t.Errorf("expected the worker name, got: %s", logLine)
+	}
+	if !strings.Contains(logLine, "boom") {
+		t.Errorf("expected the panic value, got: %s", logLine)
+	}
+	if !strings.Contains(logLine, "goroutine") {
+		t.Errorf("expected a real stack trace (should contain 'goroutine'), got: %s", logLine)
+	}
+}
+
+// TestWorker_RunOnce_ErrorVsPanic_LogsDistinctMessages confirms a
+// normal Sweep error and a Sweep panic produce distinguishable log
+// messages -- an operator scanning logs needs to tell "a subsystem
+// reported a routine failure" apart from "a subsystem crashed and had
+// to be caught."
+func TestWorker_RunOnce_ErrorVsPanic_LogsDistinctMessages(t *testing.T) {
+	var errBuf, panicBuf bytes.Buffer
+
+	errSweeper := &countSweeper{err: context.DeadlineExceeded, delay: time.Millisecond}
+	errWorker := gc.NewWorker("err-worker", errSweeper, time.Hour, newCapturingLogger(&errBuf))
+	_, _ = errWorker.RunOnce(context.Background())
+
+	panicSweeper := &panicSweeper{value: "boom"}
+	panicWorker := gc.NewWorker("panic-worker", panicSweeper, time.Hour, newCapturingLogger(&panicBuf))
+	_, _ = panicWorker.RunOnce(context.Background())
+
+	if strings.Contains(errBuf.String(), "panicked") {
+		t.Errorf("a normal sweep error must not be logged as a panic: %s", errBuf.String())
+	}
+	if !strings.Contains(panicBuf.String(), "panicked") {
+		t.Errorf("a sweep panic must be logged distinctly from a normal error: %s", panicBuf.String())
+	}
+}
+
+// TestWorker_PeriodicLoop_SurvivesSweeperPanic is the end-to-end proof:
+// the background ticker goroutine (the actual production path, via
+// Start/run, not a direct RunOnce call) survives a panicking sweep and
+// keeps ticking afterward -- the exact scenario a registered gc.Worker
+// hits in the real server.
+func TestWorker_PeriodicLoop_SurvivesSweeperPanic(t *testing.T) {
+	s := &countSweeper{err: nil}
+	// Wrap countSweeper to panic on the first call only, succeed after --
+	// proving the worker recovers AND continues ticking normally.
+	first := true
+	sweep := panicOnceThenSucceed{first: &first, ok: s}
+	w := gc.NewWorker("test", sweep, 20*time.Millisecond, newLogger())
+	w.Start()
+	defer w.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.count.Load() >= 2 {
+			return // panicked once, then ticked again and succeeded -- worker survived
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("worker did not continue ticking after its sweeper panicked once")
+}
+
+type panicOnceThenSucceed struct {
+	first *bool
+	ok    *countSweeper
+}
+
+func (p panicOnceThenSucceed) Sweep(ctx context.Context) (gc.Report, error) {
+	if *p.first {
+		*p.first = false
+		panic("first-call simulated panic")
+	}
+	return p.ok.Sweep(ctx)
 }

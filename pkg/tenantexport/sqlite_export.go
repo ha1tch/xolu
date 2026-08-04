@@ -9,7 +9,7 @@
 // file: every row or key/value pair in that source, serialized, no
 // schema/constraint/index fidelity attempted or needed.
 //
-// Design settled directly with Horacio (2026-08-03), correcting an
+// Design settled directly with the team (2026-08-03), correcting an
 // earlier, substantially overcomplicated draft that tried to
 // reconstruct a byte-valid SQLite file containing only one tenant's
 // tables (ATTACH + CREATE TABLE AS SELECT, preserving schema/indexes).

@@ -133,8 +133,13 @@ func TestRawRejectsPathWithoutLeadingSlash(t *testing.T) {
 }
 
 func TestRawAppliesAuth(t *testing.T) {
+	// T-160 (2026-08-04): asserted "Bearer test-key" before, the same
+	// wrong expectation as client_test.go's own two auth tests. Auth
+	// mode is orthogonal to Raw's own "no envelope, no tenant prefix"
+	// contract -- it still goes through the normal auth header logic,
+	// which for apikey mode is "ApiKey <key>", not "Bearer <key>".
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+		if got := r.Header.Get("Authorization"); got != "ApiKey test-key" {
 			t.Errorf("Authorization: got %q", got)
 		}
 		w.WriteHeader(http.StatusOK)

@@ -12,7 +12,7 @@
 > `pkg/server/v2_obj_promote_handlers.go`, and `pkg/obj/errors.go`:
 >
 > - **§4a, Patterns — not built at all.** Deferred deliberately as its
->   own item (T-134), confirmed directly with Horacio rather than
+>   own item (T-134), confirmed directly with the team rather than
 >   silently built or silently dropped, once its real scope (five
 >   endpoints plus `attach`-time wiring plus two new `GET` response
 >   fields) was clear against the time remaining in T-124. `XOLU-OBJ013`

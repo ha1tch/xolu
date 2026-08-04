@@ -312,9 +312,9 @@ type SearchParams struct {
 
 // OQLResult represents the result of an OQL query.
 type OQLResult struct {
-	Status string                   `json:"status"`
-	Data   []map[string]any         `json:"data"`
-	Stats  OQLStats                 `json:"stats"`
+	Status string           `json:"status"`
+	Data   []map[string]any `json:"data"`
+	Stats  OQLStats         `json:"stats"`
 }
 
 // OQLStats contains OQL execution statistics.
@@ -430,6 +430,35 @@ func (c *Client) buildURL(path string) string {
 	return fmt.Sprintf("%s/api/v1%s", c.baseURL, path)
 }
 
+// buildURLRoot constructs a URL under /api/v1 that is NOT tenant-scoped.
+// Used for the schema endpoints (GET/POST /api/v1/schema/{entity}, GET
+// /api/v1/schemas) -- confirmed directly against the server's own route
+// registration (pkg/server/server.go, "Schema operations
+// (tenant-independent, always available)"): no tenant-scoped duplicate
+// exists for these, by deliberate design, since a schema applies across
+// the whole server, not per tenant.
+//
+// Added 2026-08-04 (a real bug reported by the xoluman team, reproduced
+// directly): GetEntitySchema/DefineEntitySchema/ListEntityTypes
+// previously went through plain buildURL, which unconditionally applies
+// the tenant prefix whenever one is configured. A tenant-scoped client
+// asking for a schema sent /api/v1/tenant/{id}/schema/{entity} -- a path
+// that doesn't exist as such; chi's router matched it against the
+// entity-by-id pattern instead (/tenant/{id}/{entity}/{id}), landing
+// "schema" in {entity} and the real entity name in the numeric {id}
+// slot, failing strconv.Atoi and returning XOLU-ST004 "Invalid ID". Not
+// caught by any existing test: every test for these three methods,
+// unit and integration, constructed its client via New(url) with no
+// tenant configured -- the specific combination (tenant set + a schema
+// call) had never been exercised. Mirrors buildURLv2Root's own,
+// already-proven pattern for the identical problem on the v2 side
+// (GET /api/v2/, the availability endpoint) rather than teaching the
+// generic, shared buildURL about one endpoint's business, or inlining
+// URL construction separately in each of the three affected methods.
+func (c *Client) buildURLRoot(path string) string {
+	return fmt.Sprintf("%s/api/v1%s", c.baseURL, path)
+}
+
 // buildURLv2 constructs the full URL for a /api/v2 endpoint. v2 routes are
 // tenant-scoped exactly like v1: /api/v2/tenant/{id}/... when a tenant is
 // set, /api/v2/... otherwise. The stateless generator endpoints
@@ -452,19 +481,32 @@ func (c *Client) buildURLv2Root(path string) string {
 // authHeader returns the value of the Authorization header for the client's
 // current auth mode, or "" if no auth was configured.
 //
-// xolu accepts a "Bearer <token>" prefix for all three configured auth modes
-// (apikey, bearertoken, jwt) — its middleware/auth dispatches on the server's
-// AuthType setting, not on a per-request scheme name. The client therefore
-// emits the same "Bearer <token>" shape regardless of which mode the caller
-// configured; what differs is the token's content and how the server validates
-// it.
+// Not a uniform scheme across all three modes -- checked directly
+// against the server's own pkg/authmw validators before writing this
+// (2026-08-04, T-160): "bearertoken" and "jwt" both genuinely use
+// "Bearer <token>", but "apikey" uses "ApiKey <key>" -- the server's
+// own validateAPIKey never accepts a Bearer-prefixed key. This
+// comment previously claimed all three used "Bearer" uniformly; that
+// was wrong, and every AuthAPIKey-configured client was silently
+// unauthenticated on every request until this was caught and fixed.
 func (c *Client) authHeader() string {
 	switch c.authMode {
 	case AuthAPIKey:
 		if c.apiKey == "" {
 			return ""
 		}
-		return "Bearer " + c.apiKey
+		// "ApiKey ", not "Bearer " -- confirmed directly against the
+		// server's own pkg/authmw.validateAPIKey (2026-08-04, T-160,
+		// reported by the xoluman team): it checks X-API-Key first,
+		// then falls back to Authorization: ApiKey <key>, then a
+		// ?api_key= query param -- it never accepts a Bearer-prefixed
+		// Authorization header for apikey auth type. Every request
+		// made with AuthAPIKey configured was silently rejected as
+		// unauthenticated, regardless of how correct the key itself
+		// was; this client's own doc comment claiming "Bearer" works
+		// for all three configured auth modes was simply wrong for
+		// this one, and was corrected alongside this fix.
+		return "ApiKey " + c.apiKey
 	case AuthBearer:
 		if c.bearer == "" {
 			return ""
@@ -847,7 +889,9 @@ func (c *Client) Commit(ctx context.Context, req CommitRequest) (*CommitResult, 
 
 // List retrieves entities from a collection with optional pagination.
 // xolu returns a PagedResponse envelope:
-//   {"data":[…],"pagination":{"page":N,"per_page":N,"total_items":N,"total_pages":N}}
+//
+//	{"data":[…],"pagination":{"page":N,"per_page":N,"total_items":N,"total_pages":N}}
+//
 // Pagination parameters: xolu uses page/per_page; Limit maps to per_page, Offset
 // is converted to a page number (Offset/Limit + 1, floored at 1).
 func (c *Client) List(ctx context.Context, entity string, params *ListParams) (*ListResult, error) {
@@ -870,7 +914,7 @@ func (c *Client) List(ctx context.Context, entity string, params *ListParams) (*
 	}
 
 	var envelope struct {
-		Data []map[string]any `json:"data"`
+		Data       []map[string]any `json:"data"`
 		Pagination struct {
 			Page       int `json:"page"`
 			PerPage    int `json:"per_page"`
@@ -967,11 +1011,11 @@ func (c *Client) Search(ctx context.Context, entity string, params SearchParams)
 // OQL executes an OQL (SQL-like) query.
 func (c *Client) OQL(ctx context.Context, query string) (*OQLResult, error) {
 	path := "/oql/query"
-	
+
 	body := map[string]string{"query": query}
-	
+
 	var resp OQLResult
-	
+
 	if err := c.do(ctx, http.MethodPost, path, body, &resp); err != nil {
 		return nil, err
 	}
@@ -1012,6 +1056,20 @@ func (c *Client) Sulpher(ctx context.Context, query string) (*GraphQueryResult, 
 //
 // Health is appropriate for liveness probes (is the process alive?). For
 // readiness probes (is the process ready to serve traffic?) use Ready instead.
+//
+// Health does NOT apply the client's configured auth header, and never
+// will: confirmed directly against the server's own auth middleware
+// (2026-08-04, T-161, reported by the xoluman team) -- /health is
+// deliberately exempt from auth server-side, alongside /ready,
+// /version, and /metrics, the standard convention for liveness/
+// readiness probes (an orchestrator checking whether to restart a
+// process shouldn't need a credential to ask). Sending an auth header
+// here would be a pure no-op: the server ignores it for this route
+// regardless of what the client sends, valid or not. A connection
+// with a wrong or expired credential looks identical to a correctly
+// configured one through Health alone -- that is inherent to what
+// /health checks, not a client-side gap. Use TestConnection instead
+// to verify a credential is actually accepted.
 func (c *Client) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
@@ -1029,6 +1087,29 @@ func (c *Client) Health(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// TestConnection verifies both that the server is reachable and that
+// the client's configured credential is actually accepted -- the
+// check Health cannot do (see Health's own doc comment for why).
+//
+// Hits GET /api/v1/schemas: authenticated like any other v1 request
+// (goes through the normal request pipeline, unlike /health), cheap
+// (a schema listing, no heavy work), and tenant-independent (works
+// regardless of whether a tenant is configured on the client, so a
+// connection can be tested before a tenant is even chosen).
+//
+// Returns nil only on a genuine 200. Returns *client.Error on non-2xx
+// -- in particular HTTPStatus 401/403 for a rejected or missing
+// credential, the exact distinction Health cannot make. Suited to a
+// "Test connection" UI action: unlike Health, a wrong or expired
+// credential here is reported, not silently accepted.
+func (c *Client) TestConnection(ctx context.Context) error {
+	var envelope struct {
+		Schemas []EntityTypeSummary `json:"schemas"`
+		Count   int                 `json:"count"`
+	}
+	return c.doURL(ctx, http.MethodGet, c.buildURLRoot("/schemas"), nil, &envelope)
 }
 
 // Ready checks if the xolu server is ready to serve traffic.

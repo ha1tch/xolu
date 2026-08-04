@@ -1388,9 +1388,164 @@ func TestMultipleRefsOnEntity(t *testing.T) {
 	})
 }
 
-// ============================================================================
-// helpers
-// ============================================================================
+// ─── T-159: additionalProperties:false schemas failed every update ────────
+//
+// Reported by the xoluman team (2026-08-04): a schema with
+// additionalProperties:false failed PUT/PATCH/save outright,
+// "id: unexpected field", regardless of what the caller actually
+// changed. Their own working theory was that this was specific to a
+// "format":"ref" property with no declared "target" -- checked
+// directly before trusting it: a plain schema with no ref fields at
+// all reproduces the identical failure, and declaring a ref target
+// does not fix it. The real mechanism: PUT/save explicitly inject
+// "id" into the document before validating it, and PATCH validates
+// the merged (existing + patch) document, which always carries both
+// "id" and "_version" -- neither is ever declared in a user schema,
+// so additionalProperties:false correctly rejected them per its own
+// spec. handleCreate never had this problem: a not-yet-created entity
+// has no id yet, so there was nothing to strip there in the first
+// place.
+
+func newStrictSchemaEnv(t *testing.T) *integrationEnv {
+	t.Helper()
+	env := newIntegrationEnv(t)
+	status, result := env.doJSON("POST", "/api/v1/schema/strict_widgets", map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string"},
+		},
+		"required":             []string{"name"},
+		"additionalProperties": false,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("schema registration: expected 201, got %d: %v", status, result)
+	}
+	return env
+}
+
+func TestPatch_AdditionalPropertiesFalse_NameOnlyPatch_Succeeds(t *testing.T) {
+	env := newStrictSchemaEnv(t)
+	defer env.cleanup()
+
+	id := env.createEntity("/api/v1/strict_widgets", map[string]interface{}{"name": "first"})
+
+	status, result := env.doJSON("PATCH", fmt.Sprintf("/api/v1/strict_widgets/%d", id),
+		map[string]interface{}{"name": "second"})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH: expected 200, got %d: %v", status, result)
+	}
+
+	_, got := env.doJSON("GET", fmt.Sprintf("/api/v1/strict_widgets/%d", id), nil)
+	if got["name"] != "second" {
+		t.Errorf("update did not take effect: got %v", got)
+	}
+}
+
+func TestPut_AdditionalPropertiesFalse_FullReplace_Succeeds(t *testing.T) {
+	env := newStrictSchemaEnv(t)
+	defer env.cleanup()
+
+	id := env.createEntity("/api/v1/strict_widgets", map[string]interface{}{"name": "first"})
+
+	status, result := env.doJSON("PUT", fmt.Sprintf("/api/v1/strict_widgets/%d", id),
+		map[string]interface{}{"name": "replaced"})
+	if status != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %v", status, result)
+	}
+
+	_, got := env.doJSON("GET", fmt.Sprintf("/api/v1/strict_widgets/%d", id), nil)
+	if got["name"] != "replaced" {
+		t.Errorf("update did not take effect: got %v", got)
+	}
+}
+
+func TestSave_AdditionalPropertiesFalse_UpsertAndConditionalUpdate_Succeeds(t *testing.T) {
+	env := newStrictSchemaEnv(t)
+	defer env.cleanup()
+
+	status, result := env.doJSON("POST", "/api/v1/strict_widgets/save/9",
+		map[string]interface{}{"name": "created via save"})
+	if status != http.StatusCreated {
+		t.Fatalf("save (create): expected 201, got %d: %v", status, result)
+	}
+
+	// Caller-supplied "_version" for optimistic concurrency -- must
+	// also survive validation, not just the server-injected "id".
+	status, result = env.doJSON("POST", "/api/v1/strict_widgets/save/9",
+		map[string]interface{}{"name": "updated via save", "_version": 1})
+	if status != http.StatusOK {
+		t.Fatalf("save (conditional update): expected 200, got %d: %v", status, result)
+	}
+}
+
+func TestPatch_AdditionalPropertiesFalse_UndeclaredTargetRefField_Succeeds(t *testing.T) {
+	// The exact original report shape, kept as its own test even
+	// though the root cause turned out to be broader: a
+	// "format":"ref" property with no "target" key at all -- the
+	// precise pattern examples/crm's own seed script uses.
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+
+	status, result := env.doJSON("POST", "/api/v1/schema/ref_owner", map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("ref_owner schema: expected 201, got %d: %v", status, result)
+	}
+	status, result = env.doJSON("POST", "/api/v1/schema/ref_holder", map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name":  map[string]interface{}{"type": "string"},
+			"owner": map[string]interface{}{"type": "object", "format": "ref"}, // no target
+		},
+		"required":             []string{"name", "owner"},
+		"additionalProperties": false,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("ref_holder schema: expected 201, got %d: %v", status, result)
+	}
+
+	ownerID := env.createEntity("/api/v1/ref_owner", map[string]interface{}{"name": "Acme"})
+	holderID := env.createEntity("/api/v1/ref_holder", map[string]interface{}{
+		"name":  "widget",
+		"owner": map[string]interface{}{"type": "REF", "entity": "ref_owner", "id": ownerID},
+	})
+
+	status, result = env.doJSON("PATCH", fmt.Sprintf("/api/v1/ref_holder/%d", holderID),
+		map[string]interface{}{"name": "widget-renamed"})
+	if status != http.StatusOK {
+		t.Fatalf("PATCH on an entity with an existing undeclared-target ref value: expected 200, got %d: %v", status, result)
+	}
+}
+
+func TestPatch_AdditionalPropertiesFalse_GenuinelyUnknownField_StillRejected(t *testing.T) {
+	// Regression guard the other direction: the fix must not make
+	// additionalProperties:false stop enforcing anything at all.
+	env := newStrictSchemaEnv(t)
+	defer env.cleanup()
+
+	id := env.createEntity("/api/v1/strict_widgets", map[string]interface{}{"name": "first"})
+
+	status, result := env.doJSON("PATCH", fmt.Sprintf("/api/v1/strict_widgets/%d", id),
+		map[string]interface{}{"totally_not_a_real_field": "x"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a genuinely unknown field, got %d: %v", status, result)
+	}
+}
+
+func TestPatch_AdditionalPropertiesFalse_WrongType_StillRejected(t *testing.T) {
+	env := newStrictSchemaEnv(t)
+	defer env.cleanup()
+
+	id := env.createEntity("/api/v1/strict_widgets", map[string]interface{}{"name": "first"})
+
+	status, result := env.doJSON("PATCH", fmt.Sprintf("/api/v1/strict_widgets/%d", id),
+		map[string]interface{}{"name": 12345})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a wrong-typed field, got %d: %v", status, result)
+	}
+}
 
 // toFloat64 safely extracts a float64 from an interface{}, handling int and
 // float64 types as returned by JSON unmarshaling and OQL aggregates.

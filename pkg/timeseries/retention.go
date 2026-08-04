@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gcpkg "github.com/ha1tch/xolu/pkg/gc"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/rs/zerolog/log"
 )
 
@@ -65,7 +66,7 @@ func (w *RetentionWorker) sweep() {
 	w.manager.stores.Range(func(key, value any) bool {
 		store := value.(Store)
 		if err := store.Purge(ctx); err != nil {
-			log.Warn().Err(err).Uint16("tenant", key.(uint16)).Msg("ts retention purge failed")
+			log.Warn().Err(err).Uint16("tenant", uint16(key.(tenant.TenantID))).Msg("ts retention purge failed")
 		}
 		return true
 	})
@@ -80,7 +81,7 @@ func (w *RetentionWorker) Sweep(ctx context.Context) (gcpkg.Report, error) {
 		r.Examined++
 		store := value.(Store)
 		if err := store.Purge(ctx); err != nil {
-			log.Warn().Err(err).Uint16("tenant", key.(uint16)).Msg("ts retention purge failed")
+			log.Warn().Err(err).Uint16("tenant", uint16(key.(tenant.TenantID))).Msg("ts retention purge failed")
 			r.Errors++
 		} else {
 			r.Collected++

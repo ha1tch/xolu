@@ -116,7 +116,7 @@ class Register:
         # items this way). RESOLVED.md is append-only and never purged,
         # so it must be included in the max() every single time.
         if RESOLVED.exists():
-            ids += [int(t) for t in re.findall(r"^## \[.*?\] T-(\d+)", RESOLVED.read_text(), re.M)]
+            ids += [int(t) for t in re.findall(r"^## \[.*?\] T-(\d+)\s", RESOLVED.read_text(), re.M)]
         return f"T-{(max(ids) + 1) if ids else 1:02d}"
 
     def check(self, r) -> None:

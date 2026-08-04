@@ -43,11 +43,12 @@ func (c *Client) GetEntitySchema(ctx context.Context, entityType string) (*Entit
 		return nil, fmt.Errorf("entityType is required")
 	}
 
-	// This endpoint is on v1 and uses the existing v1 pipeline.
+	// This endpoint is on v1 and is NOT tenant-scoped (see
+	// buildURLRoot's own doc comment for why and how this was found).
 	path := "/schema/" + url.PathEscape(entityType)
 
 	var raw json.RawMessage
-	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+	if err := c.doURL(ctx, http.MethodGet, c.buildURLRoot(path), nil, &raw); err != nil {
 		return nil, err
 	}
 
@@ -165,11 +166,12 @@ func (c *Client) DefineEntitySchema(ctx context.Context, entityType string, sche
 	if err := validateEntityTypeName(entityType); err != nil {
 		return err
 	}
+	// Not tenant-scoped -- see buildURLRoot's own doc comment.
 	path := "/schema/" + url.PathEscape(entityType)
 	var result struct {
 		Message string `json:"message"`
 	}
-	return c.do(ctx, http.MethodPost, path, schema, &result)
+	return c.doURL(ctx, http.MethodPost, c.buildURLRoot(path), schema, &result)
 }
 
 // EntityIndex describes one index on an adapted entity type's table.
@@ -260,7 +262,8 @@ func (c *Client) ListEntityTypes(ctx context.Context) ([]EntityTypeSummary, erro
 		Schemas []EntityTypeSummary `json:"schemas"`
 		Count   int                 `json:"count"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/schemas", nil, &envelope); err != nil {
+	// Not tenant-scoped -- see buildURLRoot's own doc comment.
+	if err := c.doURL(ctx, http.MethodGet, c.buildURLRoot("/schemas"), nil, &envelope); err != nil {
 		return nil, err
 	}
 	if envelope.Schemas == nil {
@@ -308,6 +311,12 @@ func (c *Client) GetMachineDef(ctx context.Context, id int64) (*MachineDef, erro
 // (422 with an XOLU-FSM* code for a spec that fails validation, per
 // the same rules ValidateMachineDef checks without storing).
 func (c *Client) CreateMachineDef(ctx context.Context, spec MachineSpec) (*MachineDefCreateResult, error) {
+	if spec.Name == "" {
+		return nil, fmt.Errorf("xolu: spec.Name is required")
+	}
+	if spec.Initial == "" {
+		return nil, fmt.Errorf("xolu: spec.Initial is required")
+	}
 	var result MachineDefCreateResult
 	if err := c.doURL(ctx, http.MethodPost, c.buildURLv2("/fsm/def"), spec, &result); err != nil {
 		return nil, err
@@ -331,6 +340,12 @@ func (c *Client) CreateMachineDef(ctx context.Context, spec MachineSpec) (*Machi
 func (c *Client) ReplaceMachineDef(ctx context.Context, id int64, spec MachineSpec) (*MachineDefReplaceResult, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("xolu: id must be positive")
+	}
+	if spec.Name == "" {
+		return nil, fmt.Errorf("xolu: spec.Name is required")
+	}
+	if spec.Initial == "" {
+		return nil, fmt.Errorf("xolu: spec.Initial is required")
 	}
 	path := fmt.Sprintf("/fsm/def/%d", id)
 	var result MachineDefReplaceResult

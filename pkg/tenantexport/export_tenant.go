@@ -121,7 +121,7 @@ var ObjStoreTables = []SQLiteTableSpec{
 //
 // Staging happens in a fresh temp directory created directly under the
 // tenant's own root (storelayout.TenantRoot) -- not the OS temp
-// directory -- per the design settled directly with Horacio: keeping
+// directory -- per the design settled directly with the team: keeping
 // staging co-located with the tenant's own data rather than a shared
 // system temp path. Removed unconditionally on return, success or
 // failure, via defer -- a failed export must not leave partial JSON

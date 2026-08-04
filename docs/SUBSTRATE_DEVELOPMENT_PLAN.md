@@ -281,7 +281,7 @@ work itself is new but its storage substrate is de-risked). Client
 library and `iolu` CLI are explicit v1 non-goals, matching `bal`'s own
 T-67 deferral. Exit: item 41's multi-target atomicity race harness
 registered as a dormant guard (sandbox pass only — multi-core
-confirmation is Horacio's to run, same convention as `bal`'s G-13);
+confirmation is the team's to run, same convention as `bal`'s G-13);
 all 15 endpoints from loc-01-rest-api.md's index green; a write-path
 throughput number recorded for the guard-bearing core, however rough
 (loc-00-design.md §13's own named gap).

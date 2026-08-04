@@ -32,7 +32,7 @@ package server
 // migrating every row of a large entity population is not a
 // sub-second operation the way flex's registration step is.
 //
-// Route shape (Horacio's own design, not this implementation's
+// Route shape (the team's own design, not this implementation's
 // invention): /entities/promote/{flex,strict}/{type}, not
 // /entity/{type}/promote/{flex,strict} -- the action is a stable
 // prefix independent of entity type specifically so a future RBAC

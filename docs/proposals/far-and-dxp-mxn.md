@@ -306,7 +306,7 @@ operator-driven, that is expected to route through nolu specifically
 — nolu already owns the cross-instance identity/registry problem
 (`GlobalID` ↔ `LocalRef`), and instance discovery is the same shape of
 problem, not a new one `/far` should invent its own answer to
-(2026-08-01, Horacio). One more reason implementation here can wait
+(2026-08-01, the team). One more reason implementation here can wait
 for nolu's own bandwidth rather than being independently workable
 without it. It is not a replacement for `tenant-access-control.md`'s own
 local-caller-to-local-tenant model — that remains the answer to "can
