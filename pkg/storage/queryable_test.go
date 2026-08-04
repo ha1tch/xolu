@@ -130,7 +130,7 @@ func TestSQLiteStore_QueryWithPlan_MatchesList(t *testing.T) {
 	}
 
 	planResults, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ? ORDER BY id",
+		"SELECT data, _version FROM "+tenant.TenantID(0).NodesTableName()+" WHERE entity_type = ? ORDER BY id",
 		[]interface{}{"items"},
 	)
 	if err != nil {
@@ -172,7 +172,7 @@ func TestSQLiteStore_QueryWithPlan_WithWhereClause(t *testing.T) {
 
 	// Push-down WHERE: status = 'active'
 	results, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ? AND json_extract(data, '$.status') = ?",
+		"SELECT data, _version FROM "+tenant.TenantID(0).NodesTableName()+" WHERE entity_type = ? AND json_extract(data, '$.status') = ?",
 		[]interface{}{"sensors", "active"},
 	)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestSQLiteStore_QueryWithPlan_EmptyResult(t *testing.T) {
 	ctx := context.Background()
 
 	results, err := store.QueryWithPlan(ctx,
-		"SELECT data, _version FROM "+tenant.NodesTableName(0)+" WHERE entity_type = ?",
+		"SELECT data, _version FROM "+tenant.TenantID(0).NodesTableName()+" WHERE entity_type = ?",
 		[]interface{}{"nonexistent"},
 	)
 	if err != nil {

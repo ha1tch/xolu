@@ -17,23 +17,23 @@ import (
 // string containing the expected tenant prefix, and that different tenant IDs
 // produce different table names.
 func TestTableNames(t *testing.T) {
-	const tid0 uint16 = 0
-	const tid1 uint16 = 1
-	const tidMax uint16 = 0xFFFE
+	const tid0 TenantID = 0
+	const tid1 TenantID = 1
+	const tidMax TenantID = 0xFFFE
 
 	cases := []struct {
 		name string
-		fn   func(uint16) string
+		fn   func(TenantID) string
 		want string // substring expected in result
 	}{
-		{"NodesTableName", NodesTableName, "_nodes"},
-		{"NodeSeqTableName", NodeSeqTableName, "_nseq"},
-		{"NodeFTSTableName", NodeFTSTableName, "_nfts"},
-		{"EdgePropsTableName", EdgePropsTableName, "_edges"},
-		{"EdgeSeqTableName", EdgeSeqTableName, "_eseq"},
-		{"NodeSchemaTableName", NodeSchemaTableName, "_n_sch"},
-		{"EdgeSchemaTableName", EdgeSchemaTableName, "_e_sch"},
-		{"EdgeFTSTableName", EdgeFTSTableName, "_efts"},
+		{"NodesTableName", TenantID.NodesTableName, "_nodes"},
+		{"NodeSeqTableName", TenantID.NodeSeqTableName, "_nseq"},
+		{"NodeFTSTableName", TenantID.NodeFTSTableName, "_nfts"},
+		{"EdgePropsTableName", TenantID.EdgePropsTableName, "_edges"},
+		{"EdgeSeqTableName", TenantID.EdgeSeqTableName, "_eseq"},
+		{"NodeSchemaTableName", TenantID.NodeSchemaTableName, "_n_sch"},
+		{"EdgeSchemaTableName", TenantID.EdgeSchemaTableName, "_e_sch"},
+		{"EdgeFTSTableName", TenantID.EdgeFTSTableName, "_efts"},
 	}
 
 	for _, tc := range cases {
@@ -60,28 +60,28 @@ func TestTableNames(t *testing.T) {
 
 // TestAdaptedTableNames verifies AdaptedNodeTableName and AdaptedEdgeTableName.
 func TestAdaptedTableNames(t *testing.T) {
-	n := AdaptedNodeTableName(0, "person")
+	n := TenantID(0).AdaptedNodeTableName("person")
 	if n == "" {
 		t.Error("AdaptedNodeTableName returned empty string")
 	}
 	if !strings.Contains(n, "person") {
 		t.Errorf("AdaptedNodeTableName(0,person) = %q, want it to contain entity name", n)
 	}
-	if AdaptedNodeTableName(0, "person") == AdaptedNodeTableName(1, "person") {
+	if TenantID(0).AdaptedNodeTableName("person") == TenantID(1).AdaptedNodeTableName("person") {
 		t.Error("AdaptedNodeTableName: different tenant IDs must produce different names")
 	}
-	if AdaptedNodeTableName(0, "person") == AdaptedNodeTableName(0, "dept") {
+	if TenantID(0).AdaptedNodeTableName("person") == TenantID(0).AdaptedNodeTableName("dept") {
 		t.Error("AdaptedNodeTableName: different entity types must produce different names")
 	}
 
-	e := AdaptedEdgeTableName(0, "KNOWS")
+	e := TenantID(0).AdaptedEdgeTableName("KNOWS")
 	if e == "" {
 		t.Error("AdaptedEdgeTableName returned empty string")
 	}
-	if AdaptedEdgeTableName(0, "KNOWS") == AdaptedEdgeTableName(1, "KNOWS") {
+	if TenantID(0).AdaptedEdgeTableName("KNOWS") == TenantID(1).AdaptedEdgeTableName("KNOWS") {
 		t.Error("AdaptedEdgeTableName: different tenant IDs must produce different names")
 	}
-	if AdaptedEdgeTableName(0, "KNOWS") == AdaptedEdgeTableName(0, "LIKES") {
+	if TenantID(0).AdaptedEdgeTableName("KNOWS") == TenantID(0).AdaptedEdgeTableName("LIKES") {
 		t.Error("AdaptedEdgeTableName: different rel types must produce different names")
 	}
 }
@@ -90,15 +90,15 @@ func TestAdaptedTableNames(t *testing.T) {
 func TestIndexNames(t *testing.T) {
 	indexCases := []struct {
 		name string
-		fn   func(uint16) string
+		fn   func(TenantID) string
 	}{
-		{"NodesIndexEntityType", NodesIndexEntityType},
-		{"NodesIndexUpdatedAt", NodesIndexUpdatedAt},
-		{"NodeSeqIndexEntityType", NodeSeqIndexEntityType},
-		{"EdgeSeqIndexRelType", EdgeSeqIndexRelType},
-		{"GraphIndexSource", GraphIndexSource},
-		{"GraphIndexTarget", GraphIndexTarget},
-		{"GraphIndexRel", GraphIndexRel},
+		{"NodesIndexEntityType", TenantID.NodesIndexEntityType},
+		{"NodesIndexUpdatedAt", TenantID.NodesIndexUpdatedAt},
+		{"NodeSeqIndexEntityType", TenantID.NodeSeqIndexEntityType},
+		{"EdgeSeqIndexRelType", TenantID.EdgeSeqIndexRelType},
+		{"GraphIndexSource", TenantID.GraphIndexSource},
+		{"GraphIndexTarget", TenantID.GraphIndexTarget},
+		{"GraphIndexRel", TenantID.GraphIndexRel},
 	}
 	for _, tc := range indexCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,22 +113,22 @@ func TestIndexNames(t *testing.T) {
 	}
 
 	// Multi-argument index functions.
-	if AdaptedNodeIndexTenant(0, "person") == "" {
+	if TenantID(0).AdaptedNodeIndexTenant("person") == "" {
 		t.Error("AdaptedNodeIndexTenant returned empty string")
 	}
-	if AdaptedNodeIndexTenant(0, "person") == AdaptedNodeIndexTenant(1, "person") {
+	if TenantID(0).AdaptedNodeIndexTenant("person") == TenantID(1).AdaptedNodeIndexTenant("person") {
 		t.Error("AdaptedNodeIndexTenant: different tenants must differ")
 	}
-	if AdaptedNodeIndexField(0, "person", "name") == "" {
+	if TenantID(0).AdaptedNodeIndexField("person", "name") == "" {
 		t.Error("AdaptedNodeIndexField returned empty string")
 	}
-	if AdaptedNodeIndexField(0, "person", "name") == AdaptedNodeIndexField(0, "person", "age") {
+	if TenantID(0).AdaptedNodeIndexField("person", "name") == TenantID(0).AdaptedNodeIndexField("person", "age") {
 		t.Error("AdaptedNodeIndexField: different fields must produce different index names")
 	}
-	if AdaptedEdgeIndexField(0, "KNOWS", "since") == "" {
+	if TenantID(0).AdaptedEdgeIndexField("KNOWS", "since") == "" {
 		t.Error("AdaptedEdgeIndexField returned empty string")
 	}
-	if AdaptedEdgeIndexField(0, "KNOWS", "since") == AdaptedEdgeIndexField(0, "LIKES", "since") {
+	if TenantID(0).AdaptedEdgeIndexField("KNOWS", "since") == TenantID(0).AdaptedEdgeIndexField("LIKES", "since") {
 		t.Error("AdaptedEdgeIndexField: different rel types must produce different index names")
 	}
 }
@@ -140,8 +140,8 @@ func TestNodeIDStripped(t *testing.T) {
 		want  string
 	}{
 		// NodeID format: "0000@entity:id"
-		{NodeID(0, "person", 1), "person:1"},
-		{NodeID(1, "dept", 42), "dept:42"},
+		{TenantID(0).NodeID("person", 1), "person:1"},
+		{TenantID(1).NodeID("dept", 42), "dept:42"},
 		// Already stripped (no prefix).
 		{"person:1", "person:1"},
 		// Empty.

@@ -385,7 +385,7 @@ func TestQueryWithFields_BasicPushDown(t *testing.T) {
 	defer env.cleanup()
 	fq := env.fq(t)
 
-	sql := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = 'users' AND json_extract(data, '$.active') = 1`
+	sql := `SELECT data, _version FROM ` + tenant.TenantID(0).NodesTableName() + ` WHERE entity_type = 'users' AND json_extract(data, '$.active') = 1`
 
 	results, err := fq.QueryWithFields(env.ctx, sql, nil, []string{"name", "email"})
 	if err != nil {
@@ -425,7 +425,7 @@ func TestQueryWithFields_MatchesQueryWithPlan(t *testing.T) {
 		t.Skip("store does not implement Queryable")
 	}
 
-	sql := `SELECT data, _version FROM ` + tenant.NodesTableName(0) + ` WHERE entity_type = 'users' AND json_extract(data, '$.age') > 25`
+	sql := `SELECT data, _version FROM ` + tenant.TenantID(0).NodesTableName() + ` WHERE entity_type = 'users' AND json_extract(data, '$.age') > 25`
 	fields := []string{"name", "age", "score"}
 
 	selective, err := fq.QueryWithFields(env.ctx, sql, nil, fields)

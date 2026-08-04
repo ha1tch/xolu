@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // Manager is the per-tenant assembly point for cal: it binds each tenant's
@@ -27,7 +28,7 @@ type Manager struct {
 	reuse   bool
 
 	mu      sync.Mutex
-	tenants map[uint16]*tenantCal
+	tenants map[tenant.TenantID]*tenantCal
 }
 
 type tenantCal struct {
@@ -43,7 +44,7 @@ func NewManager(baseDir string, db *sql.DB) *Manager {
 	return &Manager{
 		baseDir: baseDir,
 		db:      db,
-		tenants: map[uint16]*tenantCal{},
+		tenants: map[tenant.TenantID]*tenantCal{},
 	}
 }
 
@@ -57,7 +58,7 @@ func (m *Manager) SetOrdinalReuse(reuse bool) {
 }
 
 // assemble builds (or returns the cached) per-tenant cal assembly.
-func (m *Manager) assemble(tenantID uint16) (*tenantCal, error) {
+func (m *Manager) assemble(tenantID tenant.TenantID) (*tenantCal, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if tc, ok := m.tenants[tenantID]; ok {
@@ -86,7 +87,7 @@ func (m *Manager) assemble(tenantID uint16) (*tenantCal, error) {
 
 // CalFor returns the lifecycle engine for a tenant, assembling it on first use.
 // Idempotent: repeated calls for the same tenant return the same lifecycle.
-func (m *Manager) CalFor(tenantID uint16) (*Lifecycle, error) {
+func (m *Manager) CalFor(tenantID tenant.TenantID) (*Lifecycle, error) {
 	tc, err := m.assemble(tenantID)
 	if err != nil {
 		return nil, err
@@ -97,7 +98,7 @@ func (m *Manager) CalFor(tenantID uint16) (*Lifecycle, error) {
 // SourceFor returns the tenant's SQLite booking source (assembling if needed).
 // Returns nil only if assembly fails, which CalFor surfaces with an error; use
 // CalFor when an error path is needed.
-func (m *Manager) SourceFor(tenantID uint16) *SQLiteBookingSource {
+func (m *Manager) SourceFor(tenantID tenant.TenantID) *SQLiteBookingSource {
 	tc, err := m.assemble(tenantID)
 	if err != nil {
 		return nil
@@ -106,7 +107,7 @@ func (m *Manager) SourceFor(tenantID uint16) *SQLiteBookingSource {
 }
 
 // IndexFor returns the tenant's occupancy index store (assembling if needed).
-func (m *Manager) IndexFor(tenantID uint16) *IndexStore {
+func (m *Manager) IndexFor(tenantID tenant.TenantID) *IndexStore {
 	tc, err := m.assemble(tenantID)
 	if err != nil {
 		return nil
@@ -138,7 +139,7 @@ func (m *Manager) IndexFor(tenantID uint16) *IndexStore {
 // ErrCalendarExists (wrapped by the source layer).
 //
 // Introduced in v0.14.10.
-func (m *Manager) CreateCalendar(tenantID uint16, c Calendar) (Calendar, error) {
+func (m *Manager) CreateCalendar(tenantID tenant.TenantID, c Calendar) (Calendar, error) {
 	tc, err := m.assemble(tenantID)
 	if err != nil {
 		return Calendar{}, err

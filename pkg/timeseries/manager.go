@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // DefaultManager manages per-tenant Store lifecycle.
@@ -68,7 +69,7 @@ func NewManager(baseDir string, factory StoreFactory, cfg StoreConfig) (*Default
 
 // Provision creates a timeseries store for a tenant. Idempotent.
 // tenantName is stored for use as the dynconfig namespace scope.
-func (m *DefaultManager) Provision(ctx context.Context, tenantID uint16, tenantName string) error {
+func (m *DefaultManager) Provision(ctx context.Context, tenantID tenant.TenantID, tenantName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -89,7 +90,7 @@ func (m *DefaultManager) Provision(ctx context.Context, tenantID uint16, tenantN
 
 // StoreFor returns the Store for a tenant, opening it lazily if needed.
 // On lazy open, uses the tenant name previously recorded by Provision (if any).
-func (m *DefaultManager) StoreFor(tenantID uint16) (Store, error) {
+func (m *DefaultManager) StoreFor(tenantID tenant.TenantID) (Store, error) {
 	if v, ok := m.stores.Load(tenantID); ok {
 		return v.(Store), nil
 	}
@@ -121,7 +122,7 @@ func (m *DefaultManager) StoreFor(tenantID uint16) (Store, error) {
 }
 
 // IsProvisioned reports whether a tenant has timeseries storage.
-func (m *DefaultManager) IsProvisioned(tenantID uint16) bool {
+func (m *DefaultManager) IsProvisioned(tenantID tenant.TenantID) bool {
 	_, ok := m.known.Load(tenantID)
 	return ok
 }
@@ -141,6 +142,6 @@ func (m *DefaultManager) Close() error {
 
 // --- Internal ---
 
-func (m *DefaultManager) tenantDir(tenantID uint16) string {
+func (m *DefaultManager) tenantDir(tenantID tenant.TenantID) string {
 	return sl.TenantTSDir(m.baseDir, tenantID)
 }

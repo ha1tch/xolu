@@ -1,15 +1,18 @@
 # Known Issues and Intentional Limits
 
-Version: 0.16.16
-Last reviewed: 2026-07-21
+Version: 0.26.0
+Last reviewed: 2026-08-04
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
 open actionable items live in `docs/TRACKING.md`; closed items and resolved
 defects are recorded append-only in `docs/RESOLVED.md`.
 
-There are currently **no known open defects**. When open defects exist, they
-are indexed here with one line each and tracked in `docs/TRACKING.md`.
+**Known open defect:** `chronicle.Engine.Append` has no locking around its
+read-modify-write — a lost-update race under concurrent same-bucket appends,
+currently masked for its only production consumer (bal's rollup plane) by
+SQL commit latency naturally spacing the calls. Tracked as T-66 in
+`docs/TRACKING.md`.
 
 ---
 
@@ -115,6 +118,50 @@ that enforcement, recorded so a passing build is read honestly.
 
 ---
 
+## Tenant ID width — recorded decision (closed 2026-08-01)
+
+**Decision: `TenantID` stays `uint16` (max 65,535 tenants per instance).
+Not revisited unless a named consumer's projected tenant count
+approaches the ceiling with a concrete timeline, not a hypothetical
+one.**
+
+This closes a question `SUBSTRATE_DEVELOPMENT_PLAN.md` §1 had already
+answered in its own rationale text but that a 2026-08-01 tracking pass
+briefly reopened by mistake (see `docs/SUBSTRATE_TRACKING.md` §3's
+second discipline note — an item labelled "tenant ID → uint32" was
+misread as targeting the tenant count, when the plan's own words
+already say tenant ID stays `uint16` and the actual widened field is
+`/ts`'s `TimelineID`, a per-tenant object count, already `uint32` since
+v0.16.3).
+
+**Reasoning, reconfirmed 2026-08-01 against `nolu` (github.com/ha1tch/nolu,
+v0.7.9) directly, not just against the plan's own prose:**
+
+- A single xolu instance hits its throughput or storage ceiling long
+  before 65,535 tenants for the workloads this project targets.
+- If that ceiling is ever reached, the answer is a second xolu
+  instance, not a wider ID — and that answer is not hypothetical.
+  `nolu`'s own `LocalRef.TenantID` (`pkg/identity/identity.go`)
+  independently encodes `uint16`, arrived at separately from xolu's own
+  design — two independent passes landing on the same ceiling is
+  stronger evidence than either alone.
+- `nolu` ships a real, tested tenant hotswap mechanism
+  (`pkg/hotswap`, ~2,500 lines, unit + e2e coverage): a full state
+  machine (`REQUESTED → PREPARING → QUIESCING → MIGRATING → VALIDATING
+  → CUTTING_OVER → COMPLETE`, with rollback) that live-migrates a
+  tenant to a new xolu instance with a brief write-outage window,
+  GlobalIDs cut over atomically so nothing client-facing changes. This
+  is operational tooling, not an architectural intention on paper.
+
+**What this decision does not claim:** that 65,535 is provably enough
+forever, or that xolu has ever had a real deployment approaching it.
+It closes the question of whether to pre-emptively widen `TenantID` —
+the answer is no, because the actual escape valve (federation via
+nolu) already exists and works, so there is nothing to hedge against by
+widening speculatively.
+
+---
+
 ## `cal` design — recorded decisions
 
 - **Intent preservation vs grid occupancy (recorded 2026-07-18).** Booking
@@ -142,6 +189,71 @@ that enforcement, recorded so a passing build is read honestly.
   tenant_id column discriminates in shared-file mode and is a constant 0 in
   per-file mode, the same as every other v2 table.
 
+
+## `bal` design — recorded decisions
+
+- **Journal stays SQL-resident; Pebble-native was assessed and set aside
+  (recorded 2026-07-28).** `bal`'s admission guard is genuinely complex —
+  `transferInTx`'s guarded `UPDATE` spans three tables (`balances`,
+  `accounts`, `journal`) in one statement: resolving `account_key` from
+  `account_id`, checking `postable`, computing the new balance against a
+  dynamically-read `floor`/`ceiling`, and a correlated `NOT EXISTS`
+  subquery against the journal itself refusing backdated writes unless
+  the account's policy allows them. SQL gives all of that as one atomic
+  round-trip with the engine's own locking making it race-free by
+  construction. Checked directly against the vendored Pebble source
+  (`cockroachdb/pebble@v1.1.5/batch.go`): every `Batch` write method
+  (`Set`/`Merge`/`Delete`/`DeleteRange`/`RangeKeySet`) is unconditional —
+  no CAS, no unfamiliar-value guard, nothing. A Pebble-native journal
+  would need the same guard built from hand-rolled application-level
+  locking (per-account, ordered consistently across both legs of a
+  transfer to avoid deadlock) plus an atomic batch for the durable
+  write — buildable, but a genuinely new concurrency-control design, not
+  a storage-engine swap of an interface that was already engine-agnostic
+  (contrast the rollup plane, T-62, which needed exactly that swap and
+  nothing more).
+  The throughput case for switching is weaker than "Pebble is faster"
+  suggests: `bal`'s own cited "~5–6k/s per tenant"
+  (`bal-conservation-primitive.md`) is an explicitly-flagged *proxy*
+  borrowed from `cal`'s stress harness, not bal's own measured code, and
+  SQLite's single-writer ceiling is **per tenant file** in this
+  substrate (each tenant already gets its own file) — the doc's own
+  throughput line notes twenty busy tenants already add roughly
+  linearly to ~100k+/s. The only throughput case Pebble-native actually
+  wins on principle is finer-than-tenant-file locking (per-account
+  rather than per-file), which is a real, distinct win — but it is a
+  concurrency-granularity argument, not a "Pebble beats SQLite" one, and
+  a tenant-scoped lock (the natural first cut, matching
+  `dxp.MemCache`'s own granularity) would likely land at roughly the
+  same ceiling SQLite already gives for free.
+  What a migration would give up, concretely: the ledger's existing OQL
+  queryability, the relational-model RI infrastructure it inherits for
+  free, and a guard that is one readable, auditable SQL statement, in
+  exchange for hand-written lock-and-batch logic in the one primitive
+  where a subtle race means money moving wrong.
+  **Not pursued now.** Revisit only against a concrete, measured
+  throughput problem in bal specifically — not a general instinct that
+  Pebble is faster, and not without a per-account (not per-tenant)
+  locking design done first, since that is where the actual upside
+  would have to come from.
+
+- **PruneJournal is Go-only, not exposed over HTTP (recorded
+  2026-07-28).** Item 16's prefix-collapse retention
+  (chronicle-substrate.md §4b) ships as `bal.Store.PruneJournal`, called
+  from Go (tests, and `cmd/iolu`'s `bal prune` command) but with no
+  `/bal/prune` REST route. Deliberate, not an oversight: pruning is
+  irreversibly destructive (unlike `bal/close`, which only writes —
+  seal-frontier enforcement blocks bad writes going forward but changes
+  nothing already committed), reads more like an operations action than
+  a routine API call a client should be able to trigger casually, and
+  `cmd/iolu` already owns the equivalent-shaped `db check`/oracle
+  surface. If usage patterns later show a real need for programmatic,
+  in-process triggering (e.g. an automated retention job running
+  inside the server rather than as a separate `iolu` invocation), add
+  `POST bal/prune` then, with an explicit confirmation/dry-run
+  parameter shaped for that risk — don't retrofit HTTP access onto a
+  destructive operation without designing that safety surface
+  deliberately.
 
 ## Referential integrity — recorded decisions and stage boundaries
 
@@ -233,7 +345,7 @@ records the skip explicitly.
 
 Convention: **Last exercised** is `YYYY-MM-DD env:<where>` — env values
 `sandbox` (single-core Linux, this project's default CI runner class),
-`m1` (Horacio's Apple M1, 8-core), `gh-runner` (GitHub Actions
+`m1` (the team's Apple M1, 8-core), `gh-runner` (GitHub Actions
 `ubuntu-latest`, multi-core). Race-class tests that only manifest
 under true parallelism require `m1` or `gh-runner`.
 
@@ -249,7 +361,7 @@ under true parallelism require `m1` or `gh-runner`.
 - **Gate:** build tag `integration`.
 - **Hardware:** any; boots an in-process server, no external services.
 - **Invocation:** `go test -tags integration ./pkg/client/ -count=1`.
-- **Last exercised:** 2026-07-19 env:sandbox — full suite green.
+- **Last exercised:** 2026-08-04 env:sandbox, go1.26.5, T-153's own verification — run repeatedly for the FSM definition write surface (T-153), both -short and -tags integration, all passing Previous: 2026-08-04 env:sandbox, go1.26.5, this session's own repeated runs — run repeatedly throughout this session (blob/export/promotion feature work), both -short and -tags integration, all passing
 
 ### G-03. Fuzz targets
 
@@ -293,8 +405,192 @@ correctness envelope over parser/validator input space.
   guarded UPDATE with subquery-bound accounts is the transaction's
   opening statement), verified queueing on plain deferred transactions.
 - **Last exercised:** 2026-07-21 env:sandbox (single-CPU, -race,
-  count=5, 32 claimants) — PASS; weak evidence per above. **Owed:**
+  count=5, 32 claimants) — PASS; weak evidence per above. **2026-08-02:
+  the team's first real multi-core attempt (env:m1) never ran** — a
+  sibling stress-tagged file in the same package,
+  `dxp_cross_path_race_stress_test.go`, failed to build (stale
+  `Reserve` call, missing the `participantID` argument T-109 added;
+  invisible until now because `-tags stress` is never part of a normal
+  build). Fixed same session, filed and closed as T-133 — see
+  `docs/RESOLVED.md`. **2026-08-02 env:m1, re-run against the fix**
+  (`GOMAXPROCS=8 go test -tags stress ./pkg/bal/ -run
+  TestBalAdmission_Race -count=20 -race`) — **PASS, 53.336s, real
+  multi-core.** Owed status closed for real: this guard has now
+  actually executed under true parallelism, not just been reproduced
+  and inferred-fixed on single-core evidence. **2026-08-03 env:m1,
+  re-run unprompted alongside G-17's own confirmation** (same
+  invocation) — **PASS, 48.518s.** This session's `pkg/bal/dxp_adapter.go`
+  change (T-138) touches Reserve/Validate/Execute in the same file as
+  this guard's own admission CAS; re-confirms no regression to the
+  adjacent path.
+
+### G-14. loc admission race harness (`pkg/loc/admission_race_stress_test.go`)
+
+- **What it guards:** the leaf/fence capacity CAS and multi-target
+  atomicity (loc-02-implementation.md Stage 2, T-115): N goroutines
+  contending for one near-ceiling leaf (`TestLocAdmission_Race`) and,
+  separately, for a shared near-ceiling fence while a leaf move rides
+  along in the same transaction (`TestLocAdmission_Race_MultiTarget`)
+  — exactly one wins each time, winners + refusals == N, and (for the
+  multi-target case specifically) the leaf's own count matches the
+  number of actual winners exactly, never winners+refusals, which is
+  what a partial-application bug under contention would produce.
+- **Gate:** build tag `stress`. Canonical invocation:
+  `GOMAXPROCS=<cores> go test -tags stress ./pkg/loc/ -run TestLocAdmission_Race -count=20 -race`
+- **Hardware:** meaningful evidence requires multi-core; single-core
+  passes are weak for admission races, same as G-13's own history.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+  This harness reproduced G-13's own historical failure mode on its
+  first sandbox run: `Move` originally resolved `location_id` via a
+  preceding `SELECT` before the guarded `UPDATE`, a read-first shape
+  that hit WAL's snapshot invalidation (`SQLITE_BUSY` past the busy
+  handler) under 32-way contention. Fixed the same way `bal.Transfer`
+  was: `Move` is now WRITE-FIRST — the leaf entry CAS, with
+  `location_id` resolved via subquery, is the transaction's opening
+  statement; diagnosis of *why* a refusal happened (unknown location
+  vs. at capacity) runs only on the failure path, after the write.
+- **Last exercised:** 2026-08-01 env:sandbox (single-CPU, -race,
+  count=5, 32 claimants, both tests) — PASS; weak evidence per above.
+  **2026-08-02 env:m1** (`GOMAXPROCS=8 go test -tags stress ./pkg/loc/
+  -run TestLocAdmission_Race -count=20 -race`) — **PASS, 109.276s, real
+  multi-core.** This closes the "owed" status: the T-34-class defect
+  this guards has now been exercised under true parallelism, not just
+  reproduced-then-assumed-fixed on single-core evidence.
+
+### G-15. obj containment/capacity race harness (`pkg/obj/containment_race_stress_test.go`)
+
+- **What it guards:** the universal cycle-safety guard and the
+  `max_count` capacity CAS (obj-00-design.md §5/§7, T-120): concurrent
+  cycle-construction attempted from multiple directions at once —
+  `TestObjContainment_CycleRace` (a direct 2-node race: many goroutines
+  racing `a→b`, many others racing `b→a`, simultaneously; at most one
+  direction may ever succeed, never both) and
+  `TestObjContainment_TransitiveCycleRace` (a 3-node chain already
+  established, many goroutines racing to close the loop while many
+  unrelated, legal moves happen concurrently in the same container) —
+  plus `TestObjCapacity_CountRace`, the identical shape to G-13/G-14's
+  own admission-race proof, applied to `obj_subjects.cur_count`.
+- **Gate:** build tag `stress`. Canonical invocation:
+  `GOMAXPROCS=<cores> go test -tags stress ./pkg/obj/ -run TestObjContainment_CycleRace -count=20 -race`
+  (also run `TestObjContainment_TransitiveCycleRace` and
+  `TestObjCapacity_CountRace` the same way).
+- **Hardware:** meaningful evidence requires multi-core; single-core
+  passes are weak for admission/cycle races, same as G-13/G-14's own
+  history.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+  This harness reproduced G-13/G-14's own historical failure mode on
+  its first sandbox run: `MoveToContainer` originally checked subject/
+  container existence and walked the cycle check *before* any write —
+  real `SQLITE_BUSY` failures under 32-goroutine contention, not
+  assumed. Fixed the identical way `loc.Move`/`bal.Transfer` were:
+  the `max_count` CAS is now the transaction's opening statement;
+  diagnosis of *why* a refusal happened (container never attached vs.
+  genuinely at capacity) runs only on the failure path, after the
+  write, mirroring `loc.diagnoseLeafRefusal` exactly.
+- **Last exercised:** 2026-08-02 env:sandbox (single-CPU, -race,
+  count=10, 16 goroutines per direction/32 claimants) — PASS, all
+  three tests, 10/10 runs each. Weak evidence per above. **Owed:**
   multi-core exercise (operator or CI stress lane).
+
+### G-16. dxp coordinator adversarial race (`pkg/server/v2_obj_adversarial_test.go`)
+
+- **What it guards:** two real, confirmed data races in foundational
+  `dxp`/storage coordinator code, found via `/obj` adversarial testing
+  (T-135) but neither specific to `/obj` — both affect every
+  primitive's own `dxp` transactions. (1) `SQLiteStore.dxpClaims`, a
+  shared-instance field read/written across concurrent HTTP requests,
+  now `atomic.Pointer[dxp.MemCache]`. (2) All six
+  `cache.ConfirmTxn`/`ReleaseTxn` call sites in `dispatchPhased`
+  (`v2_dxp_dispatch.go`) were missing the lock both functions' own
+  doc comments require ("requires the caller to hold tenant's lock")
+  — a systemic bug across the phased path's own success, failure, and
+  torn-commit branches, not one isolated spot. `TestObjAdversarial_
+  EnsureSystemDxpDef_ConcurrentFirstUse` (12-way concurrent `POST
+  /obj/promote`, each a real 3-leg `bal`+`entity`+`obj` `dxp`
+  transaction) is the harness: the race detector fired on its very
+  first run before the fix, silent on repeated re-runs after.
+- **Gate:** ordinary build, no tag — `-race` is the gate here, not a
+  separate build constraint. Canonical invocation:
+  `go test ./pkg/server/ -run TestObjAdversarial_EnsureSystemDxpDef_ConcurrentFirstUse -race -count=5`
+- **Hardware:** meaningful evidence for the two fixed races does not
+  require multi-core — a data race is a data race under `-race`
+  regardless of core count, unlike the admission-CAS races G-13/G-14/
+  G-15 guard. Multi-core did matter for the separate contention lead
+  this same harness surfaced (T-136) — see G-17, confirmed and closed
+  2026-08-03.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+- **Last exercised:** 2026-08-02 env:sandbox (-race, count=5) — PASS,
+  race detector silent across all 5 runs post-fix. **Separate lead
+  found the same session, since resolved:** 1 of those 5 runs hit a
+  60s server-side request timeout on some requests despite the race
+  detector staying silent — not a correctness failure. Filed as T-136,
+  its connection-pool hypothesis refuted and the real cause (a lock-
+  order deadlock) diagnosed, fixed, and confirmed on real M1 hardware
+  as T-138 / G-17, closed 2026-08-03.
+
+### G-17. dxp/bal lock-order deadlock (T-138) — multi-core rerun of the reproducer
+
+- **What it guards:** the AB/BA lock-order inversion T-138 diagnosed
+  from the team's own M1 goroutine dump: `bal.Adapter.Execute` (holding
+  the coordinator's open `*sql.Tx` on the `MaxOpenConns=1` writer
+  pool) acquired the tenant `MemCache` lock while `bal`
+  Reserve/Validate/Transfer held that lock waiting for the same pool —
+  presenting as ~60s full-tenant stalls, 9-of-10 runs on 8 real cores
+  vs 1-in-5 in the single-vCPU sandbox. Fixed by moving Execute's
+  claim sums to a `pendingTransfer` snapshot (captured at Reserve,
+  refreshed at Validate); Execute now takes no tenant lock at all,
+  pinned by `TestDxpSnapshot_ExecuteTakesNoTenantLock` (deadlocks by
+  construction if the acquisition is ever reintroduced).
+- **Gate:** ordinary build, no tag — the dormant part is the hardware:
+  the interleaving needs true multi-core parallelism, per the same
+  reasoning as G-13/G-14/G-15. A sandbox pass is necessary but
+  explicitly NOT sufficient evidence for this guard. Canonical
+  invocation (identical to the run that produced the diagnosing dump):
+  `GOMAXPROCS=8 go test ./pkg/server/ -run TestObjAdversarial_EnsureSystemDxpDef_ConcurrentFirstUse -race -count=20`
+  Pass condition: 20/20, zero 60s-class request timeouts, race
+  detector silent.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+- **Last exercised:** 2026-08-03 env:m1 (real Apple M1 silicon,
+  the team's own run) — `GOMAXPROCS=8 go test ./pkg/server/ -run
+  TestObjAdversarial_EnsureSystemDxpDef_ConcurrentFirstUse -race
+  -count=20 -v` — **PASS, 20/20, 15.962s total (~0.8s/run), zero 60s-
+  class timeouts, race detector silent throughout.** Against the
+  pre-fix log's 9-of-10 failures at 60.5s each on the same hardware.
+  Both halves of the guard's own pass condition met — correctness and
+  throughput judged acceptable by the team directly, closing the "probe"
+  framingthe team's own decision named. T-138 and T-136 closed this release
+  (`docs/RESOLVED.md`). Bonus same-session confirmation: G-13 (`bal`
+  admission race, `-tags stress`, count=20) also re-run on the M1,
+  PASS, 48.518s — not itself re-recorded here since G-13 owns its own
+  entry, but noted as further evidence the fix introduced no
+  regression to the adjacent admission-CAS path.
+
+### bal: as-of is wrong after a backdated transfer (T-51)
+
+**Status: open defect, present since 0.16.17.** `BalanceAsOf` reads
+`nearest checkpoint + intervening buckets`. A transfer dated at or
+before an existing checkpoint does not invalidate that checkpoint, so
+the checkpoint remains a frozen pre-backdate number and as-of inherits
+the error. Reproduced: as-of returned 150 where the journal held 157.
+
+The rollup oracle does **not** detect this — it reconciles bucket sums
+against the journal, and both include the backdated entry, so they
+agree. No oracle currently verifies checkpoints at all.
+
+**Scope of the wrongness:** the authoritative planes are unaffected.
+The journal, `balances`, the chain triple and every guard remain
+correct; `BalanceAsOfExact` returns the right answer. Only the derived
+fast path is wrong, and only for accounts that have both checkpoints
+and backdated entries.
+
+**Workaround until T-51:** call `BalanceAsOfExact` (or
+`RebuildRollup` + re-`Checkpoint`) where backdating occurs. Do not
+rely on `/bal/asof` for an account that receives backdated transfers.
+
+**Not fixed by sealing.** Sealing refuses entries into closed periods,
+which suits a ledger but not domains where backdating is legitimate
+(museum accessions, historical inventories). The stale checkpoint is a
+bug in both cases.
 
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 

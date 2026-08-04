@@ -10,10 +10,11 @@ import (
 	"testing"
 
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // newScopedSQLiteStore creates a tenant-scoped SQLite store for testing.
-func newScopedSQLiteStore(t *testing.T, dbPath string, tenantID uint16) storage.Store {
+func newScopedSQLiteStore(t *testing.T, dbPath string, tenantID tenant.TenantID) storage.Store {
 	t.Helper()
 	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:            "sqlite",

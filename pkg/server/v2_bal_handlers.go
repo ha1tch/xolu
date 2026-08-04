@@ -21,9 +21,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ha1tch/xolu/pkg/bal"
+	"github.com/ha1tch/xolu/pkg/chronicle"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/storage"
-	"github.com/ha1tch/xolu/pkg/tenant"
+	sl "github.com/ha1tch/xolu/pkg/storelayout"
 )
 
 // setupV2BalRoutes registers the bal surface (gated on BalEnabled).
@@ -34,6 +35,8 @@ func (s *Server) setupV2BalRoutes(r chi.Router) {
 	// as a query parameter, never a path segment.
 	r.Get("/bal/balance", s.handleBalBalance)
 	r.Get("/bal/entries", s.handleBalEntries)
+	r.Get("/bal/asof", s.handleBalAsOf)
+	r.Post("/bal/close", s.handleBalClose)
 }
 
 // balStore resolves the tenant-scoped bal store over the shared writer
@@ -42,17 +45,68 @@ func (s *Server) setupV2BalRoutes(r chi.Router) {
 // global would leak initialisation state across instances (caught by
 // the handler tests: server two skipped DDL because server one's Once
 // had fired).
+//
+// T-62: the rollup plane moved to Pebble, which means a genuinely
+// different lifecycle from the SQL DDL it replaced. bal.Store is built
+// fresh on every request (st := bal.NewStore(...) below), but a
+// *pebble.DB handle holds an exclusive on-disk lock and cannot be
+// reopened per request the way "CREATE TABLE IF NOT EXISTS" tolerated
+// being re-run harmlessly. So balRollup caches ONE bal.RollupPebble per
+// tenant on the Server (opened inside the same Once that used to just
+// run DDL), and every request — first or hundredth — re-attaches that
+// cached handle to its own freshly-built Store via SetRollupPebble.
+// Mirrors dxp.MemCache/SetClaimsCache's own long-lived-resource
+// pattern exactly, for the same underlying reason.
 func (s *Server) balStore(r *http.Request) (*bal.Store, error) {
 	db, tenantID := s.metaDB(r) // same writer-db + tenant resolution meta uses
-	st := bal.NewStore(db, tenant.TablePrefix(tenantID))
+	st := bal.NewStore(db, tenantID)
 	onceI, _ := s.balInit.LoadOrStore(tenantID, &sync.Once{})
 	var initErr error
-	onceI.(*sync.Once).Do(func() { initErr = st.Init(r.Context()) })
+	onceI.(*sync.Once).Do(func() {
+		if initErr = st.Init(r.Context()); initErr != nil {
+			return
+		}
+		rp, err := bal.OpenRollupPebble(sl.TenantBalRollupDir(s.config.BaseDir, tenantID))
+		if err != nil {
+			initErr = err
+			return
+		}
+		s.balRollup.Store(tenantID, rp)
+		st.SetRollupPebble(rp)
+		// Derived rollup plane (@B05). Its absence would not break
+		// admission (no guard reads it), but the as-of surface needs it.
+		if initErr = st.InitRollup(r.Context()); initErr != nil {
+			return
+		}
+		if initErr = st.InitSeal(r.Context()); initErr != nil {
+			return
+		}
+		sealer, err := bal.LoadSealer(r.Context(), db, tenantID)
+		if err != nil {
+			initErr = err
+			return
+		}
+		s.balSealer.Store(tenantID, sealer)
+		st.SetSealer(sealer)
+	})
 	if initErr != nil {
 		// A failed init must not poison the Once for the instance.
 		s.balInit.Delete(tenantID)
+		s.balRollup.Delete(tenantID)
+		s.balSealer.Delete(tenantID)
+		return st, initErr
 	}
-	return st, initErr
+	// Every request needs the tenant's cached long-lived handles
+	// attached to ITS OWN Store instance — the Once body above only
+	// ran (and only attached them) on whichever single request first
+	// initialised this tenant.
+	if rpI, ok := s.balRollup.Load(tenantID); ok {
+		st.SetRollupPebble(rpI.(*bal.RollupPebble))
+	}
+	if sealerI, ok := s.balSealer.Load(tenantID); ok {
+		st.SetSealer(sealerI.(*chronicle.Sealer))
+	}
+	return st, nil
 }
 
 // writeBalError maps bal's typed errors to the XOLU-BAL family.
@@ -61,6 +115,9 @@ func (s *Server) writeBalError(w http.ResponseWriter, err error) {
 	var ua *bal.UnknownAccountError
 	var as *bal.AmountScaleError
 	var np *bal.NotPostableError
+	var sp *bal.SealedPeriodError
+	var bd *bal.BackdatedError
+	var da *bal.DuplicateAccountError
 	switch {
 	case errors.As(err, &be):
 		s.writeError(w, http.StatusConflict, xoluerr.ErrBalBounds, err.Error())
@@ -70,6 +127,12 @@ func (s *Server) writeBalError(w http.ResponseWriter, err error) {
 		s.writeError(w, http.StatusBadRequest, xoluerr.ErrBalAmountScale, err.Error())
 	case errors.As(err, &np):
 		s.writeError(w, http.StatusConflict, xoluerr.ErrBalNotPostable, err.Error())
+	case errors.As(err, &sp):
+		s.writeError(w, http.StatusConflict, xoluerr.ErrBalSealedPeriod, err.Error())
+	case errors.As(err, &bd):
+		s.writeError(w, http.StatusConflict, xoluerr.ErrBalBackdated, err.Error())
+	case errors.As(err, &da):
+		s.writeError(w, http.StatusConflict, xoluerr.ErrBalDuplicateAccount, err.Error())
 	default:
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
 	}
@@ -257,6 +320,85 @@ func (s *Server) handleBalEntries(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"account_id": account,
 		"entries":    out,
+	})
+}
+
+// handleBalAsOf serves balance-as-of from the DERIVED rollup plane
+// (@B05): nearest sealed checkpoint + intervening buckets. This is the
+// fast path; the exact/audit path is the journal chain, and the rollup
+// oracle proves the two agree. No guard reads this surface (@C04a).
+func (s *Server) handleBalAsOf(w http.ResponseWriter, r *http.Request) {
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, "account query parameter required")
+		return
+	}
+	atStr := r.URL.Query().Get("at")
+	if atStr == "" {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, "at query parameter required (RFC3339)")
+		return
+	}
+	at, err := time.Parse(time.RFC3339, atStr)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, "at: "+err.Error())
+		return
+	}
+	st, err := s.balStore(r)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
+		return
+	}
+	v, err := st.BalanceAsOf(r.Context(), account, at)
+	if err != nil {
+		s.writeBalError(w, err)
+		return
+	}
+	scale := s.balAccountScale(r, st, account)
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"account_id": account,
+		"at":         at.UTC(),
+		"value":      bal.FormatAmount(v, scale),
+		"minor":      v,
+		"source":     "rollup", // derived plane; exact path is the journal chain
+	})
+}
+
+type balCloseReq struct {
+	At string `json:"at"` // RFC3339 period boundary
+}
+
+// handleBalClose seals the tenant's account-set as of a period boundary
+// (item 16 §7): advances the seal frontier and writes closing
+// checkpoints for every postable account. Previously wrote a single
+// account's checkpoint without enforcing anything -- account_id is no
+// longer accepted; sealing is tenant-wide, not per-account, matching
+// what this endpoint's own design (bal-conservation-primitive.md §7)
+// always specified.
+func (s *Server) handleBalClose(w http.ResponseWriter, r *http.Request) {
+	var req balCloseReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, err.Error())
+		return
+	}
+	at, err := time.Parse(time.RFC3339, req.At)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, "at: "+err.Error())
+		return
+	}
+	st, err := s.balStore(r)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
+		return
+	}
+	n, err := st.SealPeriod(r.Context(), at)
+	if err != nil {
+		s.writeBalError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"sealed_through": at.UTC(),
+		"accounts_closed": n,
+		"status":          "closed",
 	})
 }
 

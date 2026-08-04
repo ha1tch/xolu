@@ -40,18 +40,22 @@
 package storelayout
 
 import (
-	"fmt"
 	"path/filepath"
 	"strconv"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // Role names — the subdirectories within a tenant (or shared) directory.
 // These describe the role of the data, not the storage engine.
 const (
-	roleStore = "store" // primary entity store (SQLite today)
-	roleTS    = "ts"    // timeseries store (Pebble today)
-	roleBlobs = "blobs" // blob store (content-addressed, tenant-first layout)
-	roleCal   = "cal"   // scheduling occupancy index (Pebble today; SQLite record lives in store)
+	roleStore     = "store"      // primary entity store (SQLite today)
+	roleTS        = "ts"         // timeseries store (Pebble today)
+	roleBlobs     = "blobs"      // blob store (content-addressed, tenant-first layout)
+	roleCal       = "cal"        // scheduling occupancy index (Pebble today; SQLite record lives in store)
+	roleBalRollup = "bal_rollup" // bal derived rollup cascade (Pebble; journal + checkpoints live in store — T-62)
+	roleLoc       = "loc"        // loc's own tables (locations, fences, capacity, journal) — SQL throughout, own file per T-115 (wave 9, item 41)
+	roleObj       = "obj"        // obj's own tables (subjects, position, containment, journal) — SQL throughout, own file, same reasoning loc's own gets (T-119, wave 10, item 45)
 )
 
 // Fixed filenames within a role directory.
@@ -84,8 +88,13 @@ const (
 // other tenant. The format is "tXXXX" with uppercase hex, four digits, matching
 // the historical format so that directory scans that parse the segment back
 // (see ParseTenantSegment) continue to work.
-func TenantSegment(tenantID uint16) string {
-	return fmt.Sprintf("t%04X", tenantID)
+//
+// Delegates to tenant.TenantDirName (added 2026-07-28) rather than
+// reimplementing the encoding here — this package's own doc comment
+// already named the intent ("in the same spirit as" pkg/tenant's
+// invariants); this makes that literal rather than aspirational.
+func TenantSegment(tenantID tenant.TenantID) string {
+	return tenantID.DirName()
 }
 
 // ParseTenantSegment parses a directory name of the form "tXXXX" (uppercase hex,
@@ -93,7 +102,7 @@ func TenantSegment(tenantID uint16) string {
 // not a well-formed tenant segment. "shared" is not a tenant segment and returns
 // ok=false. Note that "t0000" parses to tenant 0 with ok=true — callers that
 // scan tenant directories must decide for themselves whether to include tenant 0.
-func ParseTenantSegment(name string) (tenantID uint16, ok bool) {
+func ParseTenantSegment(name string) (tenantID tenant.TenantID, ok bool) {
 	if len(name) != 5 || name[0] != 't' {
 		return 0, false
 	}
@@ -101,12 +110,12 @@ func ParseTenantSegment(name string) (tenantID uint16, ok bool) {
 	if err != nil {
 		return 0, false
 	}
-	return uint16(parsed), true
+	return tenant.TenantID(parsed), true
 }
 
 // TenantRoot returns the directory holding all of one tenant's data:
 // <base>/tXXXX. Every role directory (store, ts, blobs) lives beneath it.
-func TenantRoot(base string, tenantID uint16) string {
+func TenantRoot(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(base, TenantSegment(tenantID))
 }
 
@@ -118,26 +127,26 @@ func SharedRoot(base string) string {
 
 // TenantStoreDir returns the per-tenant primary-store directory:
 // <base>/tXXXX/store.
-func TenantStoreDir(base string, tenantID uint16) string {
+func TenantStoreDir(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(TenantRoot(base, tenantID), roleStore)
 }
 
 // TenantStorePath returns the per-tenant SQLite database file:
 // <base>/tXXXX/store/xolu.db.
-func TenantStorePath(base string, tenantID uint16) string {
+func TenantStorePath(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(TenantStoreDir(base, tenantID), StoreFile)
 }
 
 // TenantTSDir returns the per-tenant timeseries directory:
 // <base>/tXXXX/ts.
-func TenantTSDir(base string, tenantID uint16) string {
+func TenantTSDir(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(TenantRoot(base, tenantID), roleTS)
 }
 
 // TenantBlobDir returns the per-tenant blob directory: <base>/tXXXX/blobs.
 // This is the tenant-first blob layout, analogous to TenantTSDir: one blob
 // directory per tenant, keyed by ID, tenant 0 included.
-func TenantBlobDir(base string, tenantID uint16) string {
+func TenantBlobDir(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(TenantRoot(base, tenantID), roleBlobs)
 }
 
@@ -145,8 +154,42 @@ func TenantBlobDir(base string, tenantID uint16) string {
 // <base>/tXXXX/cal. This is the cal occupancy index (the derived Pebble bitmap,
 // H3); the authoritative booking record (H1) lives in the tenant's primary
 // store (TenantStorePath). Analogous to TenantTSDir.
-func TenantCalDir(base string, tenantID uint16) string {
+func TenantCalDir(base string, tenantID tenant.TenantID) string {
 	return filepath.Join(TenantRoot(base, tenantID), roleCal)
+}
+
+// TenantBalRollupDir returns the per-tenant bal rollup-cascade directory:
+// <base>/tXXXX/bal_rollup. This is bal's derived rollup plane (T-62: moved
+// off SQLite, since no guard ever reads it — @C04a, confirmed against the
+// admission guard's own query). The authoritative journal and the
+// checkpoints table (which the write path updates in-transaction, T-58)
+// remain in the tenant's primary store. Analogous to TenantCalDir's H1/H3
+// split.
+func TenantBalRollupDir(base string, tenantID tenant.TenantID) string {
+	return filepath.Join(TenantRoot(base, tenantID), roleBalRollup)
+}
+
+// TenantLocDir returns the per-tenant loc directory: <base>/tXXXX/loc.
+// loc's own tables (locations, fences, capacity, journal) live here as
+// their own SQLite file, not folded into the tenant's primary store —
+// the same reasoning ts already applies with its own directory (T-115,
+// wave 9, loc-02-implementation.md Stage 0). Unlike TenantBalRollupDir,
+// this is not a derived plane: loc has no Pebble-plane source of truth
+// at all, canonical state is SQL throughout (loc-00-design.md §6a),
+// mirroring bal's own shape, not cal's or ts's.
+func TenantLocDir(base string, tenantID tenant.TenantID) string {
+	return filepath.Join(TenantRoot(base, tenantID), roleLoc)
+}
+
+// TenantObjDir returns the per-tenant obj directory: <base>/tXXXX/obj.
+// obj's own tables (subjects, position, containment edges, journal)
+// live here as their own SQLite file, the identical reasoning
+// TenantLocDir already documents — canonical state is SQL throughout
+// (obj-00-design.md §4, mirroring bal's shape per obj-02-implementation.md's
+// own Principles section), no Pebble-plane source of truth to derive
+// from.
+func TenantObjDir(base string, tenantID tenant.TenantID) string {
+	return filepath.Join(TenantRoot(base, tenantID), roleObj)
 }
 
 // SharedStoreDir returns the shared-mode primary-store directory:

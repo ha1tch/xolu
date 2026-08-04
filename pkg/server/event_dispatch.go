@@ -33,6 +33,7 @@ import (
 
 	"github.com/ha1tch/xolu/pkg/jsonplate"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/version"
 )
 
@@ -56,7 +57,7 @@ var webhookClient = &http.Client{Timeout: 10 * time.Second}
 // asynchronously. Each action runs in its own goroutine; failures are logged to
 // event_delivery_log, never surfaced to the caller (the originating operation
 // has already committed). This is the entry point trigger sites call.
-func (s *Server) dispatchEvent(tenantID uint16, ev event) {
+func (s *Server) dispatchEvent(tenantID tenant.TenantID, ev event) {
 	store, ok := s.eventStore(tenantID)
 	if !ok {
 		return
@@ -78,7 +79,7 @@ func (s *Server) dispatchEvent(tenantID uint16, ev event) {
 // dispatchEventSync runs the same logic synchronously and returns a per-
 // subscription summary. Used by the /event/{id}/test endpoint so a test invocation
 // can observe outcomes; not used by real triggers.
-func (s *Server) dispatchEventSync(tenantID uint16, ev event, onlySubID int64) []map[string]interface{} {
+func (s *Server) dispatchEventSync(tenantID tenant.TenantID, ev event, onlySubID int64) []map[string]interface{} {
 	store, ok := s.eventStore(tenantID)
 	if !ok {
 		return nil
@@ -233,7 +234,7 @@ func (s *Server) fireCommitAppliedEvent(r *http.Request, affected []map[string]i
 	})
 }
 
-func (s *Server) eventStore(tenantID uint16) (storage.Store, bool) {
+func (s *Server) eventStore(tenantID tenant.TenantID) (storage.Store, bool) {
 	store, err := s.storeForTenant(tenantID)
 	if err != nil {
 		return nil, false
@@ -246,7 +247,7 @@ func (s *Server) eventStore(tenantID uint16) (storage.Store, bool) {
 
 // matchEventDefs returns all subscriptions for the tenant whose event_type
 // matches ev.Type.
-func (s *Server) matchEventDefs(tenantID uint16, eventType string) ([]eventDef, error) {
+func (s *Server) matchEventDefs(tenantID tenant.TenantID, eventType string) ([]eventDef, error) {
 	store, err := s.storeForTenant(tenantID)
 	if err != nil {
 		return nil, err
@@ -279,7 +280,7 @@ func (s *Server) matchEventDefs(tenantID uint16, eventType string) ([]eventDef, 
 
 // runAction executes one subscription's action against the event and returns a
 // (status, detail) pair for the delivery log. status is "delivered" or "failed".
-func (s *Server) runAction(tenantID uint16, sub eventDef, ev event, store storage.Store) (string, string) {
+func (s *Server) runAction(tenantID tenant.TenantID, sub eventDef, ev event, store storage.Store) (string, string) {
 	cfg := map[string]interface{}{}
 	if len(sub.Config) > 0 {
 		_ = json.Unmarshal(sub.Config, &cfg)
@@ -295,7 +296,7 @@ func (s *Server) runAction(tenantID uint16, sub eventDef, ev event, store storag
 }
 
 // runWebhookAction POSTs the (template-substituted) body to the configured URL.
-func (s *Server) runWebhookAction(tenantID uint16, eventDefID int64, cfg map[string]interface{}, ev event) (string, string) {
+func (s *Server) runWebhookAction(tenantID tenant.TenantID, eventDefID int64, cfg map[string]interface{}, ev event) (string, string) {
 	url, _ := cfg["url"].(string)
 	if url == "" {
 		return "failed", "webhook config missing url"
@@ -383,7 +384,7 @@ func (s *Server) runWebhookAction(tenantID uint16, eventDefID int64, cfg map[str
 
 // runOQLAction runs the configured OQL query (templates substituted) against the
 // tenant store.
-func (s *Server) runOQLAction(tenantID uint16, cfg map[string]interface{}, ev event, store storage.Store) (string, string) {
+func (s *Server) runOQLAction(tenantID tenant.TenantID, cfg map[string]interface{}, ev event, store storage.Store) (string, string) {
 	query, _ := cfg["query"].(string)
 	if query == "" {
 		return "failed", "oql config missing query"
@@ -410,7 +411,7 @@ func (s *Server) runOQLAction(tenantID uint16, cfg map[string]interface{}, ev ev
 //	{{event.id}}          -> ev.ID
 //	{{event.data.<key>}}  -> ev.Data[key]
 //	{{gen:<name>}}        -> a value from the named generator
-func (s *Server) substituteTemplate(tenantID uint16, in string, ev event) string {
+func (s *Server) substituteTemplate(tenantID tenant.TenantID, in string, ev event) string {
 	if !strings.Contains(in, "{{") {
 		return in
 	}
@@ -466,7 +467,7 @@ func (s *Server) substituteTemplate(tenantID uint16, in string, ev event) string
 
 // logDelivery writes one row to event_delivery_log. Best-effort: a logging
 // failure is itself only logged, never propagated (the action already ran).
-func (s *Server) logDelivery(tenantID uint16, subID int64, eventType, status, detail string) {
+func (s *Server) logDelivery(tenantID tenant.TenantID, subID int64, eventType, status, detail string) {
 	store, err := s.storeForTenant(tenantID)
 	if err != nil {
 		return

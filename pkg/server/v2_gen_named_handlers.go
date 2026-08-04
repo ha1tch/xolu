@@ -29,13 +29,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // genNameRe validates generator names: same rule as sequences and meta keys.
 var genNameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,64}$`)
 
 // genDB resolves the writer DB and tenant for a request, mirroring seqDB.
-func (s *Server) genDB(r *http.Request) (*sql.DB, uint16) {
+func (s *Server) genDB(r *http.Request) (*sql.DB, tenant.TenantID) {
 	store := s.getStore(r.Context())
 	tenantID := getTenantIDNumeric(r.Context())
 	if wdp, ok := store.(storage.WriterDBProvider); ok {

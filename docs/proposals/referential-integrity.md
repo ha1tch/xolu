@@ -1,14 +1,14 @@
 # Referential Integrity — Prospective Design (proposal)
 
-Updated: 2026-07-20
-Status: scheduled — wave 2 (@P). T-41 (register) recorded the defect that
+Updated: 2026-08-01
+Status: stage 2 shipped — wave 2 (@P). T-41 (register) recorded the defect that
 motivated this document; its minimum fix shipped as stage one. Stages 2+
 are now demanded: incoming development teams staffed with junior
 developers whose instincts come from SQL / traditional ER design will
 onboard faster and make fewer reference-handling mistakes if xolu
 behaves, at least partially, like SQL referential integrity. Restrict
 (stage 2) delivers exactly the `ON DELETE RESTRICT` behaviour that
-instinct expects, and is the safety half of RI. Stage 2 is scheduled;
+instinct expects, and is the safety half of RI. Stage 2 shipped 2026-07-20/21;
 stages 3–5 follow as that consumer's needs extend.
 
 ## 1. Problem

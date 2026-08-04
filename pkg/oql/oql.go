@@ -35,6 +35,7 @@ import (
 	"github.com/ha1tch/tsqlparser"
 	"github.com/ha1tch/tsqlparser/ast"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	ot "github.com/ha1tch/xolu/pkg/xolutime"
 )
 
@@ -69,7 +70,7 @@ func (e *Engine) SetProfile(profile *HardwareProfile) {
 
 // SetSeqIncrementor wires the sequence increment function into the OQL executor.
 // Call once after the engine is created, when API v2 sequences are enabled.
-func (e *Engine) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64, error)) {
+func (e *Engine) SetSeqIncrementor(fn func(tenantID tenant.TenantID, name string) (int64, error)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.executor.SetSeqIncrementor(fn)
@@ -77,7 +78,7 @@ func (e *Engine) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64,
 
 // SetGenDispatcher forwards the named-generator dispatch function to the
 // underlying executor.
-func (e *Engine) SetGenDispatcher(fn func(tenantID uint16, name string) (string, error)) {
+func (e *Engine) SetGenDispatcher(fn func(tenantID tenant.TenantID, name string) (string, error)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.executor.SetGenDispatcher(fn)
@@ -258,13 +259,13 @@ func (jm *JobManager) SetQueryTimeout(d time.Duration) {
 
 // SetSeqIncrementor wires the sequence increment function into the underlying
 // OQL engine. Call once after the JobManager is created, when v2 is enabled.
-func (jm *JobManager) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64, error)) {
+func (jm *JobManager) SetSeqIncrementor(fn func(tenantID tenant.TenantID, name string) (int64, error)) {
 	jm.engine.SetSeqIncrementor(fn)
 }
 
 // SetGenDispatcher forwards the named-generator dispatch function to the
 // underlying executor, enabling @GEN('name') resolution.
-func (jm *JobManager) SetGenDispatcher(fn func(tenantID uint16, name string) (string, error)) {
+func (jm *JobManager) SetGenDispatcher(fn func(tenantID tenant.TenantID, name string) (string, error)) {
 	jm.engine.SetGenDispatcher(fn)
 }
 

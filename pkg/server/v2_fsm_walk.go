@@ -18,6 +18,7 @@ import (
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/fsm/eval"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // runWalkPrequery looks up an OQL query associated with the given input on the
@@ -32,7 +33,7 @@ import (
 //     most one row. Ordering follows the query; an unordered query
 //     returning multiple rows has an unspecified first row.
 func (s *Server) runWalkPrequery(r *http.Request, wdp storage.WriterDBProvider,
-	tenantID uint16, machineID int64, input string) (map[string]interface{}, error) {
+	tenantID tenant.TenantID, machineID int64, input string) (map[string]interface{}, error) {
 
 	snap, _, _, _, _, _, _, err := s.loadMachineSnapshot(r, wdp.WriterDB(), tenantID, machineID)
 	if err != nil {

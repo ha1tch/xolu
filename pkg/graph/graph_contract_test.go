@@ -1674,15 +1674,15 @@ func TestContract_TenantIsolation_NodeCount(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
 			// 3 nodes for tenant 1, 2 nodes for tenant 2.
 			for i := 1; i <= 3; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(1, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", i), "item")
 			}
 			for i := 1; i <= 2; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(2, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", i), "item")
 			}
 
 			n1, err := g.NodeCountForTenant(p1)
@@ -1710,13 +1710,13 @@ func TestContract_TenantIsolation_EdgeCount(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
 			// 2 edges for tenant 1, 1 edge for tenant 2.
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 2), tenant.NodeID(1, "b", 2), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(2, "a", 1), tenant.NodeID(2, "b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 2), tenant.TenantID(1).NodeID("b", 2), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(2).NodeID("a", 1), tenant.TenantID(2).NodeID("b", 1), "R")
 
 			e1, err := g.EdgeCountForTenant(p1)
 			if err != nil {
@@ -1743,12 +1743,12 @@ func TestContract_TenantIsolation_GetAllNodes(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
-			n1a := tenant.NodeID(1, "item", 1)
-			n1b := tenant.NodeID(1, "item", 2)
-			n2a := tenant.NodeID(2, "item", 1)
+			n1a := tenant.TenantID(1).NodeID("item", 1)
+			n1b := tenant.TenantID(1).NodeID("item", 2)
+			n2a := tenant.TenantID(2).NodeID("item", 1)
 
 			mustAddNodeG(t, g, n1a, "item")
 			mustAddNodeG(t, g, n1b, "item")
@@ -1785,12 +1785,12 @@ func TestContract_TenantIsolation_GetNodesByType(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
-			mustAddNodeG(t, g, tenant.NodeID(1, "item", 1), "item")
-			mustAddNodeG(t, g, tenant.NodeID(1, "order", 1), "order")
-			mustAddNodeG(t, g, tenant.NodeID(2, "item", 1), "item")
+			mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", 1), "item")
+			mustAddNodeG(t, g, tenant.TenantID(1).NodeID("order", 1), "order")
+			mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", 1), "item")
 
 			items1, err := g.GetNodesByTypeForTenant(p1, "item")
 			if err != nil {
@@ -1855,8 +1855,8 @@ func TestContract_TenantIsolation_UpdateFromEntityForTenant(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
 			data := map[string]interface{}{
 				"id":   1,
@@ -1995,8 +1995,8 @@ func TestContract_AddEdge_CrossTenant_Rejected(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			src := tenant.NodeID(1, "item", 1) // "0001@item:1"
-			dst := tenant.NodeID(2, "item", 2) // "0002@item:2"
+			src := tenant.TenantID(1).NodeID("item", 1) // "0001@item:1"
+			dst := tenant.TenantID(2).NodeID("item", 2) // "0002@item:2"
 			err := g.AddEdge(src, dst, "R")
 			if err == nil {
 				t.Errorf("AddEdge(%q -> %q): expected cross-tenant error, got nil", src, dst)
@@ -2015,7 +2015,7 @@ func TestContract_AddEdge_SameTenant_Accepted(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
 			// Both non-zero same tenant: allowed.
-			if err := g.AddEdge(tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1), "R"); err != nil {
+			if err := g.AddEdge(tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1), "R"); err != nil {
 				t.Errorf("same-tenant edge: unexpected error %v", err)
 			}
 			// Both tenant-0 (no prefix): allowed.
@@ -2023,7 +2023,7 @@ func TestContract_AddEdge_SameTenant_Accepted(t *testing.T) {
 				t.Errorf("tenant-0 edge: unexpected error %v", err)
 			}
 			// Mixed: one prefixed, one not — allowed (src is tenant-0).
-			if err := g.AddEdge("a:2", tenant.NodeID(1, "b", 2), "R"); err != nil {
+			if err := g.AddEdge("a:2", tenant.TenantID(1).NodeID("b", 2), "R"); err != nil {
 				t.Errorf("mixed zero/non-zero edge: unexpected error %v", err)
 			}
 		})
@@ -2042,8 +2042,8 @@ func TestContract_TenantCounters_NodeAddRemove(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
 			assertNodeCount := func(prefix string, want int) {
 				t.Helper()
@@ -2058,28 +2058,28 @@ func TestContract_TenantCounters_NodeAddRemove(t *testing.T) {
 
 			// Add 3 nodes for tenant 1, 2 for tenant 2.
 			for i := 1; i <= 3; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(1, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", i), "item")
 			}
 			for i := 1; i <= 2; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(2, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", i), "item")
 			}
 			assertNodeCount(p1, 3)
 			assertNodeCount(p2, 2)
 
 			// Remove one tenant-1 node.
-			if err := g.RemoveNode(tenant.NodeID(1, "item", 2)); err != nil {
+			if err := g.RemoveNode(tenant.TenantID(1).NodeID("item", 2)); err != nil {
 				t.Fatalf("RemoveNode: %v", err)
 			}
 			assertNodeCount(p1, 2)
 			assertNodeCount(p2, 2) // unaffected
 
 			// Idempotent add must not double-count.
-			mustAddNodeG(t, g, tenant.NodeID(1, "item", 1), "item")
+			mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", 1), "item")
 			assertNodeCount(p1, 2)
 
 			// Remove all tenant-2 nodes.
 			for i := 1; i <= 2; i++ {
-				if err := g.RemoveNode(tenant.NodeID(2, "item", i)); err != nil {
+				if err := g.RemoveNode(tenant.TenantID(2).NodeID("item", i)); err != nil {
 					t.Fatalf("RemoveNode: %v", err)
 				}
 			}
@@ -2096,8 +2096,8 @@ func TestContract_TenantCounters_EdgeAddRemove(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p1 := tenant.GraphNodePrefix(1)
-			p2 := tenant.GraphNodePrefix(2)
+			p1 := tenant.TenantID(1).GraphNodePrefix()
+			p2 := tenant.TenantID(2).GraphNodePrefix()
 
 			assertEdgeCount := func(prefix string, want int) {
 				t.Helper()
@@ -2111,25 +2111,25 @@ func TestContract_TenantCounters_EdgeAddRemove(t *testing.T) {
 			}
 
 			// 2 edges for tenant 1, 1 edge for tenant 2.
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 2), tenant.NodeID(1, "b", 2), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(2, "a", 1), tenant.NodeID(2, "b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 2), tenant.TenantID(1).NodeID("b", 2), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(2).NodeID("a", 1), tenant.TenantID(2).NodeID("b", 1), "R")
 			assertEdgeCount(p1, 2)
 			assertEdgeCount(p2, 1)
 
 			// Idempotent add must not double-count.
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1), "R")
 			assertEdgeCount(p1, 2)
 
 			// Remove one tenant-1 edge via RemoveEdge.
-			if err := g.RemoveEdge(tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1)); err != nil {
+			if err := g.RemoveEdge(tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1)); err != nil {
 				t.Fatalf("RemoveEdge: %v", err)
 			}
 			assertEdgeCount(p1, 1)
 			assertEdgeCount(p2, 1) // unaffected
 
 			// Remove tenant-1 edge via RemoveNode (cascade).
-			if err := g.RemoveNode(tenant.NodeID(1, "a", 2)); err != nil {
+			if err := g.RemoveNode(tenant.TenantID(1).NodeID("a", 2)); err != nil {
 				t.Fatalf("RemoveNode: %v", err)
 			}
 			assertEdgeCount(p1, 0)
@@ -2145,9 +2145,9 @@ func TestContract_TenantCounters_ClearResetsCounters(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p := tenant.GraphNodePrefix(1)
+			p := tenant.TenantID(1).GraphNodePrefix()
 
-			mustAddEdgeG(t, g, tenant.NodeID(1, "a", 1), tenant.NodeID(1, "b", 1), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("a", 1), tenant.TenantID(1).NodeID("b", 1), "R")
 
 			n, _ := g.NodeCountForTenant(p)
 			e, _ := g.EdgeCountForTenant(p)
@@ -2183,7 +2183,7 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 			g := impl.new()
 
 			const (
-				tenantID  = uint16(1)
+				tenantID  = tenant.TenantID(1)
 				entity    = "order"
 				entityID  = 42
 				targetEnt = "customer"
@@ -2204,8 +2204,8 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 				t.Fatalf("initial UpdateFromEntityForTenant: %v", err)
 			}
 
-			fromNode := tenant.NodeID(tenantID, entity, entityID)
-			toNode := tenant.NodeID(tenantID, targetEnt, targetID)
+			fromNode := tenant.TenantID(tenantID).NodeID(entity, entityID)
+			toNode := tenant.TenantID(tenantID).NodeID(targetEnt, targetID)
 
 			nb, err := g.GetNeighbors(fromNode)
 			if err != nil {
@@ -2216,7 +2216,7 @@ func TestContract_UpdateFromEntityForTenant_RelabelExistingEdge(t *testing.T) {
 			}
 
 			// Sanity: edge counter is 1 before relabel.
-			p := tenant.GraphNodePrefix(tenantID)
+			p := tenantID.GraphNodePrefix()
 			ec, err := g.EdgeCountForTenant(p)
 			if err != nil {
 				t.Fatalf("EdgeCountForTenant: %v", err)
@@ -2298,20 +2298,20 @@ func TestContract_CounterConsistency(t *testing.T) {
 
 			// Build: two tenants + a handful of tenant-0 nodes.
 			for i := 1; i <= 4; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(1, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", i), "item")
 			}
 			for i := 1; i <= 3; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(2, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", i), "item")
 			}
-			mustAddEdgeG(t, g, tenant.NodeID(1, "item", 1), tenant.NodeID(1, "item", 2), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(1, "item", 3), tenant.NodeID(1, "item", 4), "R")
-			mustAddEdgeG(t, g, tenant.NodeID(2, "item", 1), tenant.NodeID(2, "item", 2), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("item", 1), tenant.TenantID(1).NodeID("item", 2), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(1).NodeID("item", 3), tenant.TenantID(1).NodeID("item", 4), "R")
+			mustAddEdgeG(t, g, tenant.TenantID(2).NodeID("item", 1), tenant.TenantID(2).NodeID("item", 2), "R")
 
 			// Remove one node from each tenant and one edge.
-			if err := g.RemoveNode(tenant.NodeID(1, "item", 4)); err != nil {
+			if err := g.RemoveNode(tenant.TenantID(1).NodeID("item", 4)); err != nil {
 				t.Fatalf("RemoveNode: %v", err)
 			}
-			if err := g.RemoveEdge(tenant.NodeID(2, "item", 1), tenant.NodeID(2, "item", 2)); err != nil {
+			if err := g.RemoveEdge(tenant.TenantID(2).NodeID("item", 1), tenant.TenantID(2).NodeID("item", 2)); err != nil {
 				t.Fatalf("RemoveEdge: %v", err)
 			}
 
@@ -2619,24 +2619,24 @@ func TestContract_VodeCountForTenant_Isolated(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
 			// tenant 1: one forward-reference edge (creates 2 vodes)
-			t1n1 := tenant.NodeID(1, "item", 1)
-			t1n2 := tenant.NodeID(1, "item", 2)
+			t1n1 := tenant.TenantID(1).NodeID("item", 1)
+			t1n2 := tenant.TenantID(1).NodeID("item", 2)
 			mustAddEdgeG(t, g, t1n1, t1n2, "L")
 			// tenant 2: promote both explicitly (0 vodes)
-			t2n1 := tenant.NodeID(2, "item", 1)
-			t2n2 := tenant.NodeID(2, "item", 2)
+			t2n1 := tenant.TenantID(2).NodeID("item", 1)
+			t2n2 := tenant.TenantID(2).NodeID("item", 2)
 			mustAddNodeG(t, g, t2n1, "item")
 			mustAddNodeG(t, g, t2n2, "item")
 			mustAddEdgeG(t, g, t2n1, t2n2, "L")
 
-			v1, err := g.VodeCountForTenant(tenant.GraphNodePrefix(1))
+			v1, err := g.VodeCountForTenant(tenant.TenantID(1).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("VodeCountForTenant(t1): %v", err)
 			}
 			if v1 != 2 {
 				t.Errorf("tenant 1 vode count: want 2, got %d", v1)
 			}
-			v2, err := g.VodeCountForTenant(tenant.GraphNodePrefix(2))
+			v2, err := g.VodeCountForTenant(tenant.TenantID(2).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("VodeCountForTenant(t2): %v", err)
 			}
@@ -2656,8 +2656,8 @@ func TestContract_FindPath_CrossTenant_Rejected(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			n1 := tenant.NodeID(1, "item", 1)
-			n2 := tenant.NodeID(2, "item", 1)
+			n1 := tenant.TenantID(1).NodeID("item", 1)
+			n2 := tenant.TenantID(2).NodeID("item", 1)
 			mustAddNodeG(t, g, n1, "item")
 			mustAddNodeG(t, g, n2, "item")
 			_, err := g.FindPath(n1, n2, 10)
@@ -2679,8 +2679,8 @@ func TestContract_PathExists_CrossTenant_Rejected(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			n1 := tenant.NodeID(1, "item", 1)
-			n2 := tenant.NodeID(2, "item", 1)
+			n1 := tenant.TenantID(1).NodeID("item", 1)
+			n2 := tenant.TenantID(2).NodeID("item", 1)
 			mustAddNodeG(t, g, n1, "item")
 			mustAddNodeG(t, g, n2, "item")
 			_, _, err := g.PathExists(n1, n2, 10)
@@ -2721,10 +2721,10 @@ func TestContract_HasCycleForTenant_NoCycle(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			p := tenant.GraphNodePrefix(1)
-			n1 := tenant.NodeID(1, "item", 1)
-			n2 := tenant.NodeID(1, "item", 2)
-			n3 := tenant.NodeID(1, "item", 3)
+			p := tenant.TenantID(1).GraphNodePrefix()
+			n1 := tenant.TenantID(1).NodeID("item", 1)
+			n2 := tenant.TenantID(1).NodeID("item", 2)
+			n3 := tenant.TenantID(1).NodeID("item", 3)
 			mustAddEdgeG(t, g, n1, n2, "L")
 			mustAddEdgeG(t, g, n2, n3, "L")
 			got, err := g.HasCycleForTenant(p)
@@ -2746,10 +2746,10 @@ func TestContract_HasCycleForTenant_WithCycle(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.newCycle("ignore")
-			p := tenant.GraphNodePrefix(1)
-			n1 := tenant.NodeID(1, "item", 1)
-			n2 := tenant.NodeID(1, "item", 2)
-			n3 := tenant.NodeID(1, "item", 3)
+			p := tenant.TenantID(1).GraphNodePrefix()
+			n1 := tenant.TenantID(1).NodeID("item", 1)
+			n2 := tenant.TenantID(1).NodeID("item", 2)
+			n3 := tenant.TenantID(1).NodeID("item", 3)
 			mustAddEdgeG(t, g, n1, n2, "L")
 			mustAddEdgeG(t, g, n2, n3, "L")
 			mustAddEdgeG(t, g, n3, n1, "L")
@@ -2774,25 +2774,25 @@ func TestContract_HasCycleForTenant_Isolated(t *testing.T) {
 			t.Parallel()
 			g := impl.newCycle("ignore")
 			// tenant 1: straight DAG
-			t1n1 := tenant.NodeID(1, "item", 1)
-			t1n2 := tenant.NodeID(1, "item", 2)
+			t1n1 := tenant.TenantID(1).NodeID("item", 1)
+			t1n2 := tenant.TenantID(1).NodeID("item", 2)
 			mustAddEdgeG(t, g, t1n1, t1n2, "L")
 			// tenant 2: cycle
-			t2n1 := tenant.NodeID(2, "item", 1)
-			t2n2 := tenant.NodeID(2, "item", 2)
-			t2n3 := tenant.NodeID(2, "item", 3)
+			t2n1 := tenant.TenantID(2).NodeID("item", 1)
+			t2n2 := tenant.TenantID(2).NodeID("item", 2)
+			t2n3 := tenant.TenantID(2).NodeID("item", 3)
 			mustAddEdgeG(t, g, t2n1, t2n2, "L")
 			mustAddEdgeG(t, g, t2n2, t2n3, "L")
 			mustAddEdgeG(t, g, t2n3, t2n1, "L")
 
-			got, err := g.HasCycleForTenant(tenant.GraphNodePrefix(1))
+			got, err := g.HasCycleForTenant(tenant.TenantID(1).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("HasCycleForTenant(t1): %v", err)
 			}
 			if got {
 				t.Error("HasCycleForTenant(t1): want false — tenant 2 cycle must not bleed into tenant 1")
 			}
-			got, err = g.HasCycleForTenant(tenant.GraphNodePrefix(2))
+			got, err = g.HasCycleForTenant(tenant.TenantID(2).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("HasCycleForTenant(t2): %v", err)
 			}
@@ -2814,19 +2814,19 @@ func TestContract_GetAllNodesForTenant_OwnedByTenant(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
 			for i := 1; i <= 5; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(1, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", i), "item")
 			}
 			for i := 1; i <= 3; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(2, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", i), "item")
 			}
-			nodes, err := g.GetAllNodesForTenant(tenant.GraphNodePrefix(1))
+			nodes, err := g.GetAllNodesForTenant(tenant.TenantID(1).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("GetAllNodesForTenant: %v", err)
 			}
 			if len(nodes) != 5 {
 				t.Errorf("want 5 nodes for tenant 1, got %d: %v", len(nodes), nodes)
 			}
-			nodes2, err := g.GetAllNodesForTenant(tenant.GraphNodePrefix(2))
+			nodes2, err := g.GetAllNodesForTenant(tenant.TenantID(2).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("GetAllNodesForTenant(t2): %v", err)
 			}
@@ -2846,21 +2846,21 @@ func TestContract_GetNodesByTypeForTenant_OwnedByTenant(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
 			for i := 1; i <= 4; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(1, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(1).NodeID("item", i), "item")
 			}
-			mustAddNodeG(t, g, tenant.NodeID(1, "order", 1), "order")
+			mustAddNodeG(t, g, tenant.TenantID(1).NodeID("order", 1), "order")
 			for i := 1; i <= 2; i++ {
-				mustAddNodeG(t, g, tenant.NodeID(2, "item", i), "item")
+				mustAddNodeG(t, g, tenant.TenantID(2).NodeID("item", i), "item")
 			}
 
-			items1, err := g.GetNodesByTypeForTenant(tenant.GraphNodePrefix(1), "item")
+			items1, err := g.GetNodesByTypeForTenant(tenant.TenantID(1).GraphNodePrefix(), "item")
 			if err != nil {
 				t.Fatalf("GetNodesByTypeForTenant: %v", err)
 			}
 			if len(items1) != 4 {
 				t.Errorf("want 4 items for tenant 1, got %d", len(items1))
 			}
-			items2, err := g.GetNodesByTypeForTenant(tenant.GraphNodePrefix(2), "item")
+			items2, err := g.GetNodesByTypeForTenant(tenant.TenantID(2).GraphNodePrefix(), "item")
 			if err != nil {
 				t.Fatalf("GetNodesByTypeForTenant(t2): %v", err)
 			}
@@ -2880,14 +2880,14 @@ func TestContract_GetAllNodesForTenant_ReflectsRemoval(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			n1 := tenant.NodeID(1, "item", 1)
-			n2 := tenant.NodeID(1, "item", 2)
+			n1 := tenant.TenantID(1).NodeID("item", 1)
+			n2 := tenant.TenantID(1).NodeID("item", 2)
 			mustAddNodeG(t, g, n1, "item")
 			mustAddNodeG(t, g, n2, "item")
 			if err := g.RemoveNode(n1); err != nil {
 				t.Fatalf("RemoveNode: %v", err)
 			}
-			nodes, err := g.GetAllNodesForTenant(tenant.GraphNodePrefix(1))
+			nodes, err := g.GetAllNodesForTenant(tenant.TenantID(1).GraphNodePrefix())
 			if err != nil {
 				t.Fatalf("GetAllNodesForTenant: %v", err)
 			}
@@ -2910,9 +2910,9 @@ func TestContract_CycleCheck_TenantScoped(t *testing.T) {
 			t.Parallel()
 			g := impl.newCycle("error")
 			// tenant 1 chain: n1 → n2 → n3
-			t1n1 := tenant.NodeID(1, "item", 1)
-			t1n2 := tenant.NodeID(1, "item", 2)
-			t1n3 := tenant.NodeID(1, "item", 3)
+			t1n1 := tenant.TenantID(1).NodeID("item", 1)
+			t1n2 := tenant.TenantID(1).NodeID("item", 2)
+			t1n3 := tenant.TenantID(1).NodeID("item", 3)
 			mustAddEdgeG(t, g, t1n1, t1n2, "L")
 			mustAddEdgeG(t, g, t1n2, t1n3, "L")
 			// closing the tenant-1 cycle must be rejected
@@ -2920,9 +2920,9 @@ func TestContract_CycleCheck_TenantScoped(t *testing.T) {
 				t.Error("AddEdge closing cycle in tenant 1: expected error, got nil")
 			}
 			// tenant 2 DAG must succeed independently, unaffected by t1 rejection
-			t2n1 := tenant.NodeID(2, "item", 1)
-			t2n2 := tenant.NodeID(2, "item", 2)
-			t2n3 := tenant.NodeID(2, "item", 3)
+			t2n1 := tenant.TenantID(2).NodeID("item", 1)
+			t2n2 := tenant.TenantID(2).NodeID("item", 2)
+			t2n3 := tenant.TenantID(2).NodeID("item", 3)
 			mustAddEdgeG(t, g, t2n1, t2n2, "L")
 			mustAddEdgeG(t, g, t2n2, t2n3, "L")
 			// closing the tenant-2 cycle is also rejected (error mode is global)

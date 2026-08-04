@@ -28,6 +28,7 @@ import (
 
 	"github.com/ha1tch/xolu/pkg/storage"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // storeMode describes how the SQLite primary store is organised.
@@ -101,7 +102,7 @@ func resolveStoreMode(base, override string, dflt storeMode) (storeMode, error) 
 
 // storePathFor returns the SQLite database file path for a tenant under the
 // given mode. In shared mode every tenant maps to the single shared file.
-func storePathFor(base string, tid uint16, mode storeMode) string {
+func storePathFor(base string, tid tenant.TenantID, mode storeMode) string {
 	if mode == modeShared {
 		return sl.SharedStorePath(base)
 	}
@@ -112,7 +113,7 @@ func storePathFor(base string, tid uint16, mode storeMode) string {
 // same pkg/storage path the running server uses, with the correct
 // PerFileTenants setting so DDL and table naming match xolu exactly. It creates
 // the parent directory first (the SQLite store does not create parents).
-func openTenantStore(base string, tid uint16, mode storeMode, graph bool) (*storage.SQLiteStore, error) {
+func openTenantStore(base string, tid tenant.TenantID, mode storeMode, graph bool) (*storage.SQLiteStore, error) {
 	dbPath := storePathFor(base, tid, mode)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create store directory: %w", err)

@@ -142,7 +142,7 @@ type ColumnDef struct {
 type AdaptedTableSpec struct {
 	Entity     string             `json:"entity"`      // Entity/relationship label name
 	Kind       tenant.ElementKind `json:"kind"`        // ElementNode or ElementEdge
-	TenantID   uint16             `json:"tenant_id"`   // Owning tenant; used to derive the table name
+	TenantID   tenant.TenantID    `json:"tenant_id"`   // Owning tenant; used to derive the table name
 	Columns    []ColumnDef        `json:"columns"`     // Ordered column definitions
 	SchemaHash string             `json:"schema_hash"` // SHA-256 of canonical schema JSON
 	HasExtra   bool               `json:"has_extra"`   // Whether _extra overflow column is present
@@ -162,9 +162,9 @@ type IndexDef struct {
 //   - ElementEdge → t<XXXX>_edata_<label>    (e.g. t0001_edata_KNOWS)
 func (s *AdaptedTableSpec) TableName() string {
 	if s.Kind == tenant.ElementEdge {
-		return tenant.AdaptedEdgeTableName(s.TenantID, s.Entity)
+		return s.TenantID.AdaptedEdgeTableName(s.Entity)
 	}
-	return tenant.AdaptedNodeTableName(s.TenantID, s.Entity)
+	return s.TenantID.AdaptedNodeTableName(s.Entity)
 }
 
 // ColumnNames returns all column names in order (excluding system columns).
@@ -221,7 +221,7 @@ func (s *AdaptedTableSpec) ColumnByName(name string) (ColumnDef, bool) {
 // This is a convenience wrapper that creates a SchemaIntrospector from
 // the raw JSON Schema map. For direct use with queryfy (future), call
 // DeriveAdaptedTableSpecFrom with a queryfy-backed introspector.
-func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialect StorageDialect, tenantID uint16) (*AdaptedTableSpec, error) {
+func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialect StorageDialect, tenantID tenant.TenantID) (*AdaptedTableSpec, error) {
 	introspector := NewJSONSchemaIntrospector(schema)
 	if introspector == nil {
 		return nil, fmt.Errorf("schema for %q has no properties", entity)
@@ -240,7 +240,7 @@ func DeriveAdaptedTableSpec(entity string, schema map[string]interface{}, dialec
 // SchemaIntrospector. This is the backend-agnostic core that works
 // with any schema representation (JSON Schema maps, queryfy objects,
 // or anything else that implements SchemaIntrospector).
-func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialect StorageDialect, schemaHash string, tenantID uint16) (*AdaptedTableSpec, error) {
+func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialect StorageDialect, schemaHash string, tenantID tenant.TenantID) (*AdaptedTableSpec, error) {
 	// The entity name becomes part of the table name (t<X>_ndata_<entity>), which
 	// reaches SQL unparameterised. HTTP callers validate it via validateEntityName,
 	// but validate here too so a spec can never be derived with an injectable
@@ -319,7 +319,7 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 			})
 			// Index on _id column for join lookups
 			indexes = append(indexes, IndexDef{
-				Name:    tenant.AdaptedNodeIndexField(tenantID, entity, "ref_"+fieldName),
+				Name:    tenantID.AdaptedNodeIndexField(entity, "ref_"+fieldName),
 				Columns: []string{"REF_" + fieldName + "_id"},
 			})
 		} else {
@@ -339,7 +339,7 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 			enumVals := field.EnumValues()
 			if shouldAutoIndexField(fieldName, jsonType, format, required, enumVals) {
 				indexes = append(indexes, IndexDef{
-					Name:    tenant.AdaptedNodeIndexField(tenantID, entity, fieldName),
+					Name:    tenantID.AdaptedNodeIndexField(entity, fieldName),
 					Columns: []string{fieldName},
 				})
 			}
@@ -349,7 +349,7 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 		if idx, ok := field.Meta("x-xolu-index"); ok {
 			if b, ok := idx.(bool); ok && b {
 				indexes = append(indexes, IndexDef{
-					Name:    tenant.AdaptedNodeIndexField(tenantID, entity, fieldName),
+					Name:    tenantID.AdaptedNodeIndexField(entity, fieldName),
 					Columns: []string{fieldName},
 				})
 			}

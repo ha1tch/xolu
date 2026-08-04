@@ -834,7 +834,7 @@ func (s *Server) handleSulpherQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) executeSulpherQueryBody(
 	w http.ResponseWriter, r *http.Request,
 	jm *sulpher.JobManager,
-	tid uint16, logType string, logTenantID uint16,
+	tid tenant.TenantID, logType string, logTenantID tenant.TenantID,
 ) {
 	var req struct {
 		Query    string `json:"query"`
@@ -934,7 +934,7 @@ func (s *Server) executeSulpherQueryBody(
 			Int("paths_found", result.Stats.PathsFound).
 			Int("response_bytes", len(encoded))
 		if logTenantID != 0 {
-			ev = ev.Uint16("tenant_id", logTenantID)
+			ev = ev.Uint16("tenant_id", uint16(logTenantID))
 		}
 		ev.Msg("Slow query")
 	}
@@ -1448,7 +1448,7 @@ func (s *Server) invalidateCache(ctx context.Context, entity string) {
 	defer cancel()
 
 	tid := getTenantIDNumeric(ctx)
-	pattern := tenant.CachePattern(tid, entity)
+	pattern := tid.CachePattern(entity)
 	_ = s.cache.DeletePattern(cacheCtx, pattern)
 }
 
@@ -1463,11 +1463,11 @@ func (s *Server) invalidateCacheForID(ctx context.Context, entity string, id int
 	tid := getTenantIDNumeric(ctx)
 
 	// Delete the individual entity cache entry
-	key := tenant.CacheKey(tid, entity, id)
+	key := tid.CacheKey(entity, id)
 	_ = s.cache.Delete(cacheCtx, key)
 
 	// Invalidate list caches (since the list contents changed)
-	listPattern := tenant.CacheListPattern(tid, entity)
+	listPattern := tid.CacheListPattern(entity)
 	_ = s.cache.DeletePattern(cacheCtx, listPattern)
 }
 
@@ -1600,7 +1600,7 @@ func (s *Server) cascadeDelete(ctx context.Context, entity string, id int) ([]st
 		// the delete itself removes the incoming-edge target, so
 		// discovery must happen first.
 		if graphAvailable {
-			nodeID := tenant.NodeID(tid, current.entity, current.id)
+			nodeID := tid.NodeID(current.entity, current.id)
 			incoming, err := s.graph.GetIncomingEdges(nodeID)
 			if err != nil {
 				s.logger.Error().Err(err).Str("node", nodeID).
@@ -1757,7 +1757,7 @@ func (s *Server) restrictReferrers(ctx context.Context, entity string, id int) (
 	}
 
 	tid := getTenantIDNumeric(ctx)
-	nodeID := tenant.NodeID(tid, entity, id)
+	nodeID := tid.NodeID(entity, id)
 	incoming, err := s.graph.GetIncomingEdges(nodeID)
 	if err != nil {
 		// A discovery failure must not silently permit the delete when a
@@ -1989,7 +1989,7 @@ func (s *Server) addGraphJSONToZip(zw *zip.Writer) error {
 // This is the source-of-truth path for GetNodesByType when the entity has an
 // adapted table: it returns every entity of that type, including those with no
 // edges that would be absent from the graph index.
-func (s *Server) adaptedEntityIDs(ctx context.Context, sqlStore *storage.SQLiteStore, entity string, tenantID uint16) []string {
+func (s *Server) adaptedEntityIDs(ctx context.Context, sqlStore *storage.SQLiteStore, entity string, tenantID tenant.TenantID) []string {
 	reg := sqlStore.AdaptedRegistry()
 	if reg == nil || !reg.IsAdapted(entity) {
 		return nil
@@ -2015,7 +2015,7 @@ func (s *Server) adaptedEntityIDs(ctx context.Context, sqlStore *storage.SQLiteS
 		if err := rows.Scan(&id); err != nil {
 			continue
 		}
-		ids = append(ids, tenant.NodeID(tenantID, entity, id))
+		ids = append(ids, tenantID.NodeID(entity, id))
 	}
 	if err := rows.Err(); err != nil {
 		s.logger.Warn().Err(err).Str("entity", entity).Msg("adaptedEntityIDs: rows error")
@@ -2029,8 +2029,8 @@ func (s *Server) adaptedEntityIDs(ctx context.Context, sqlStore *storage.SQLiteS
 //
 // Returns (degree, true) when the entity exists but has no edges.
 // Returns (zero, false) when the entity does not exist in storage at all.
-func (s *Server) degreeFromStorage(ctx context.Context, sqlStore *storage.SQLiteStore, tenantID uint16, entity string, entityID int) (graph.Degree, bool) {
-	table := tenant.GraphEdgesTableName(tenantID)
+func (s *Server) degreeFromStorage(ctx context.Context, sqlStore *storage.SQLiteStore, tenantID tenant.TenantID, entity string, entityID int) (graph.Degree, bool) {
+	table := tenantID.GraphEdgesTableName()
 	db := sqlStore.ReaderDB()
 
 	var outDeg, inDeg int
@@ -2179,7 +2179,7 @@ func (s *Server) handleTenantCreateEdge(w http.ResponseWriter, r *http.Request) 
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	from := addPrefix(prefix, req.From)
 	to := addPrefix(prefix, req.To)
 

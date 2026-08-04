@@ -442,7 +442,7 @@ func TestGraphPath_CyclicGraph_Terminates(t *testing.T) {
 
 	// Inject the back-edge node:3 → node:1 directly, closing the cycle.
 	// Alpha is tenant 1 → prefix "0001@".
-	prefix := tenant.GraphNodePrefix(1)
+	prefix := tenant.TenantID(1).GraphNodePrefix()
 	n1 := prefix + "node:1"
 	n3 := prefix + "node:3"
 	if err := s.graph.AddEdge(n3, n1, "back"); err != nil {
@@ -581,8 +581,8 @@ func TestGraphCounters_ConcurrentAccuracy(t *testing.T) {
 
 	// Cross-check: verify directly against the graph layer that the counters
 	// match. This catches drift between the HTTP layer and the underlying maps.
-	alphaPrefix := tenant.GraphNodePrefix(1)
-	betaPrefix := tenant.GraphNodePrefix(2)
+	alphaPrefix := tenant.TenantID(1).GraphNodePrefix()
+	betaPrefix := tenant.TenantID(2).GraphNodePrefix()
 
 	graphAlphaN, err := s.graph.NodeCountForTenant(alphaPrefix)
 	if err != nil {

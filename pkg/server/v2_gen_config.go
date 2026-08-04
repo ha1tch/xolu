@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // genType enumerates the stateful generator types dispatchable by name.
@@ -371,7 +372,7 @@ func strictUnmarshal(data []byte, target interface{}) error {
 // for the given tenant. Returns sql.ErrNoRows if no such generator exists.
 // Sequences (type='sequence') are deliberately not resolvable via @GEN — they
 // have their own @SEQ / NEXT VALUE FOR surface — so they are excluded here.
-func genLookup(ctx context.Context, db *sql.DB, tenantID uint16, name string) (gtype string, configJSON []byte, err error) {
+func genLookup(ctx context.Context, db *sql.DB, tenantID tenant.TenantID, name string) (gtype string, configJSON []byte, err error) {
 	var typ, cfg string
 	err = db.QueryRowContext(ctx, `
 		SELECT type, config_json
@@ -388,8 +389,8 @@ func genLookup(ctx context.Context, db *sql.DB, tenantID uint16, name string) (g
 // It resolves the named generator in gen_definitions, then produces one value
 // via dispatchGenStateful (so HTTP /next and @GEN behave identically, including
 // round-robin cursor advancement).
-func (s *Server) serverGenDispatcher() func(tenantID uint16, name string) (string, error) {
-	return func(tenantID uint16, name string) (string, error) {
+func (s *Server) serverGenDispatcher() func(tenantID tenant.TenantID, name string) (string, error) {
+	return func(tenantID tenant.TenantID, name string) (string, error) {
 		store, err := s.storeForTenant(tenantID)
 		if err != nil {
 			return "", err
@@ -410,7 +411,7 @@ func (s *Server) serverGenDispatcher() func(tenantID uint16, name string) (strin
 // case (pick round_robin) via the server's in-memory cursor and delegating
 // everything else to the pure dispatchGen. Keeping this on the server means the
 // HTTP /next handler and the @GEN dispatcher share identical semantics.
-func (s *Server) dispatchGenStateful(tenantID uint16, name, gtype string, configJSON []byte) (string, error) {
+func (s *Server) dispatchGenStateful(tenantID tenant.TenantID, name, gtype string, configJSON []byte) (string, error) {
 	if genType(gtype) == genTypePick {
 		cfg, err := parseGenConfig(gtype, configJSON)
 		if err != nil {
@@ -432,7 +433,7 @@ func (s *Server) dispatchGenStateful(tenantID uint16, name, gtype string, config
 // nextPickCursor atomically returns the current round-robin index for a named
 // pick generator and advances it. In-memory only (Part 1); a restart resets to
 // 0, as documented. Persistence is deferred to S21.
-func (s *Server) nextPickCursor(tenantID uint16, name string) int64 {
+func (s *Server) nextPickCursor(tenantID tenant.TenantID, name string) int64 {
 	key := fmt.Sprintf("%d:%s", tenantID, name)
 	actual, _ := s.pickCursors.LoadOrStore(key, new(int64))
 	p := actual.(*int64)

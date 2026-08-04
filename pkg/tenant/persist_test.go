@@ -12,38 +12,38 @@ import (
 
 // mockPersister implements Persister for testing.
 type mockPersister struct {
-	mappings map[string]uint16
+	mappings map[string]TenantID
 	saveErr  error // if set, Save returns this error
 	loadErr  error // if set, LoadAll returns this error
 	saved    []struct {
 		name string
-		id   uint16
+		id   TenantID
 	} // records Save calls
 }
 
 func newMockPersister() *mockPersister {
-	return &mockPersister{mappings: make(map[string]uint16)}
+	return &mockPersister{mappings: make(map[string]TenantID)}
 }
 
-func (m *mockPersister) LoadAll(ctx context.Context) (map[string]uint16, error) {
+func (m *mockPersister) LoadAll(ctx context.Context) (map[string]TenantID, error) {
 	if m.loadErr != nil {
 		return nil, m.loadErr
 	}
 	// Return a copy so tests can't accidentally mutate the fixture
-	out := make(map[string]uint16, len(m.mappings))
+	out := make(map[string]TenantID, len(m.mappings))
 	for k, v := range m.mappings {
 		out[k] = v
 	}
 	return out, nil
 }
 
-func (m *mockPersister) Save(ctx context.Context, name string, id uint16) error {
+func (m *mockPersister) Save(ctx context.Context, name string, id TenantID) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
 	m.saved = append(m.saved, struct {
 		name string
-		id   uint16
+		id   TenantID
 	}{name, id})
 	m.mappings[name] = id
 	return nil

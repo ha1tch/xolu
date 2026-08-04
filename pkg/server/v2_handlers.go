@@ -104,6 +104,15 @@ func (s *Server) setupV2TenantRoutes(r chi.Router) {
 	r.Delete("/fsm/def/{id}", s.handleFSMDefDelete)
 	r.Post("/fsm/def/validate", s.handleFSMDefValidate)
 
+	// S15: dxp definitions (item 20, wave 5). GET/list added T-101 —
+	// delete still not built, remaining item-20 scope.
+	r.Post("/dxp/def", s.handleDxpDefCreate)
+	r.Get("/dxp/def", s.handleDxpDefList)
+	r.Get("/dxp/def/{id}", s.handleDxpDefGet)
+	r.Post("/dxp/txn", s.handleDxpTxnCreate)
+	r.Get("/dxp/txn", s.handleDxpTxnList)
+	r.Get("/dxp/txn/{id}", s.handleDxpTxnGet)
+
 	// S7: FSM machines. /walk is registered but returns 501 until S8.
 	r.Post("/fsm/machine", s.handleFSMMachineCreate)
 	r.Get("/fsm/machine", s.handleFSMMachineList)
@@ -138,6 +147,16 @@ func (s *Server) setupV2TenantRoutes(r chi.Router) {
 	if s.config.BalEnabled {
 		s.setupV2BalRoutes(r)
 	}
+
+	// loc (T-118, wave 9): unconditional, no enable flag — Stage 0's
+	// own pinned decision found no reason for loc to be independently
+	// optional the way cal/bal are (a manager-lifecycle need, an
+	// absent-on-some-instances possibility); dxp's own registry
+	// already wires loc unconditionally on the same reasoning.
+	s.setupV2LocRoutes(r)
+
+	// obj (T-119, wave 10): same unconditional reasoning as loc above.
+	s.setupV2ObjRoutes(r)
 }
 
 // v2Middleware attaches the X-API-Stability: experimental header and a

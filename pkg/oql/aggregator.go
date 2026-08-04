@@ -7,6 +7,7 @@ package oql
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ha1tch/tsqlparser/ast"
@@ -45,8 +46,11 @@ func toFloat(v interface{}) float64 {
 		return f
 	}
 	if s, ok := v.(string); ok {
-		var f float64
-		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+		// See toFloatSafe's own comment: strconv.ParseFloat, not
+		// fmt.Sscanf, for the same reason (a leading-numeric-prefix
+		// string like a timestamp must not silently parse as a bare
+		// number).
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			return f
 		}
 	}
@@ -62,8 +66,24 @@ func toFloatSafe(v interface{}) (float64, bool) {
 		return f, true
 	}
 	if s, ok := v.(string); ok {
-		var f float64
-		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+		// strconv.ParseFloat, not fmt.Sscanf: Sscanf's "%f" verb matches
+		// only a leading numeric prefix and reports success even when
+		// trailing characters remain unconsumed -- "2026-08-03T02:04:33Z"
+		// parsed as the bare float 2026, discarding everything after the
+		// year. Every timestamp from the same year then compared as
+		// numerically equal under havingCompare, which is silently wrong
+		// for ORDER BY: a stable sort preserves original (insertion)
+		// order among values it believes are tied, so DESC on a real
+		// timestamp field correctly placed a single genuine outlier
+		// first, then silently fell back to ascending insertion order
+		// for everything else, which happened to look like a coherent
+		// but wrong result rather than an obvious failure. ParseFloat
+		// requires the entire string to be a valid float, so a genuine
+		// numeric string ("9369.41", the case this function exists for
+		// -- denormalised decimal aggregate results) still succeeds,
+		// while any string merely starting with digits now correctly
+		// fails and falls through to qs.CompareValues instead.
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			return f, true
 		}
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/server"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/validation"
 	"github.com/rs/zerolog"
@@ -63,15 +64,15 @@ type failingManager struct {
 	real timeseries.Manager
 }
 
-func (m *failingManager) Provision(ctx context.Context, tenantID uint16, tenantName string) error {
+func (m *failingManager) Provision(ctx context.Context, tenantID tenant.TenantID, tenantName string) error {
 	return m.real.Provision(ctx, tenantID, tenantName)
 }
 
-func (m *failingManager) IsProvisioned(tenantID uint16) bool {
+func (m *failingManager) IsProvisioned(tenantID tenant.TenantID) bool {
 	return m.real.IsProvisioned(tenantID)
 }
 
-func (m *failingManager) StoreFor(tenantID uint16) (timeseries.Store, error) {
+func (m *failingManager) StoreFor(tenantID tenant.TenantID) (timeseries.Store, error) {
 	real, err := m.real.StoreFor(tenantID)
 	if err != nil {
 		return nil, err

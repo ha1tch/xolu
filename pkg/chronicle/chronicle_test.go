@@ -60,9 +60,9 @@ func TestMonoidLaws_AllInstantiations(t *testing.T) {
 func fiveMinHierarchy(t *testing.T) *Hierarchy {
 	t.Helper()
 	h, err := NewHierarchy(
-		Grain{Name: "5m", Width: 5 * time.Minute},
-		Grain{Name: "hour", Width: time.Hour},
-		Grain{Name: "day", Width: 24 * time.Hour},
+		FixedGrain("5m", 5 * time.Minute),
+		FixedGrain("hour", time.Hour),
+		FixedGrain("day", 24 * time.Hour),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -110,9 +110,9 @@ func TestHomomorphism_CalDaypartShape(t *testing.T) {
 	// cal's shape: 5-minute occupancy quanta OR-folded into 3h dayparts
 	// and a day byte (@cal codec §4) — instantiated on the engine.
 	h, err := NewHierarchy(
-		Grain{Name: "quantum", Width: 5 * time.Minute},
-		Grain{Name: "daypart", Width: 3 * time.Hour},
-		Grain{Name: "day", Width: 24 * time.Hour},
+		FixedGrain("quantum", 5 * time.Minute),
+		FixedGrain("daypart", 3 * time.Hour),
+		FixedGrain("day", 24 * time.Hour),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +204,8 @@ func TestRecompute_EqualsFreshFold(t *testing.T) {
 
 func TestHierarchy_RejectsNonMultiples(t *testing.T) {
 	if _, err := NewHierarchy(
-		Grain{Name: "5m", Width: 5 * time.Minute},
-		Grain{Name: "7m", Width: 7 * time.Minute},
+		FixedGrain("5m", 5 * time.Minute),
+		FixedGrain("7m", 7 * time.Minute),
 	); err == nil {
 		t.Fatal("non-multiple grain must be rejected — the homomorphism requires exact nesting")
 	}

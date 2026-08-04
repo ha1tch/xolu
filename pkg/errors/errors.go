@@ -60,6 +60,15 @@ const (
 	ErrEntityTooLarge   Code = "XOLU-ST007"
 	ErrSchemaNotFound   Code = "XOLU-ST008"
 	ErrSchemaLoadFailed Code = "XOLU-ST009"
+	// ErrPromoteInFlight is returned when POST .../entities/promote/strict/{type}
+	// is called for an entity type that already has a strict promotion running
+	// (pkg/server's PromoteJobManager, T-151). The existing ticket is included
+	// in the error message so a caller can poll it directly instead of retrying.
+	ErrPromoteInFlight Code = "XOLU-ST010"
+	// ErrPromoteTicketNotFound is returned when GET
+	// .../entities/promote/status/{ticket} names a ticket that was never
+	// issued.
+	ErrPromoteTicketNotFound Code = "XOLU-ST011"
 )
 
 // ---------------------------------------------------------------------------
@@ -230,6 +239,16 @@ const (
 	// ErrBlobQuotaExceeded is returned when a Put would push a tenant's total
 	// stored bytes over the configured XOLU_BLOB_MAX_TOTAL_BYTES limit.
 	ErrBlobQuotaExceeded Code = "XOLU-BL006"
+	// ErrBlobExportNotFound is returned when a GET .../blob/export/{ticket}
+	// status check names a ticket that was never issued (or belongs to a
+	// different tenant -- tickets are not shared across tenants).
+	ErrBlobExportNotFound Code = "XOLU-BL007"
+	// ErrBlobExportInFlight is returned when POST .../blob/export is called
+	// for a tenant that already has a running export job -- the per-tenant
+	// throttle (pkg/tenantexport.JobManager). The existing ticket is
+	// included in the error response so a caller can poll it directly
+	// instead of retrying the POST.
+	ErrBlobExportInFlight Code = "XOLU-BL008"
 )
 
 // Dynamic configuration errors (DC)
@@ -354,6 +373,20 @@ const (
 	// ErrBalNotPostable: transfer names a summary (non-postable)
 	// account; only leaves are imputables (@B03a). HTTP 409.
 	ErrBalNotPostable Code = "XOLU-BAL005"
+	// ErrBalBackdated: entry dated strictly before the latest existing
+	// entry on an append_only account (T-55, @B03). Distinct from
+	// ErrBalSealedPeriod: this is a per-account default, overridable
+	// by the account's own backdated policy; a sealed period is a
+	// tenant-wide, policy-independent boundary. HTTP 409.
+	ErrBalBackdated Code = "XOLU-BAL006"
+	// ErrBalDuplicateAccount: DefineAccount refused — account_id
+	// already defined. HTTP 409. Added post-hoc by adversarial testing
+	// on /loc (T-118's own hardening pass), which found the identical
+	// gap in bal's own DefineAccount: a UNIQUE constraint violation
+	// had no typed error, falling through to a bare 500. Fixed here
+	// alongside loc's own version (XOLU-LOC014) rather than left as a
+	// flagged-but-unfixed finding.
+	ErrBalDuplicateAccount Code = "XOLU-BAL007"
 )
 
 const (
@@ -520,4 +553,173 @@ const (
 	// v0.14.12 when ModeShared and ModeSubPrefix were removed from the
 	// pkg/cal type surface.
 	ErrCalModeNotSupported Code = "XOLU-CAL007"
+
+	// ─── DXP family — declarative composed commitments ────────────────────
+	// Introduced with the reserved-commit facility (item 18, v0.16.20),
+	// reserved for the dxp coordinator per the dxp proposal §10.
+	// XOLU-DXP002 and XOLU-DXP003 carry the refusing participant's own
+	// error (e.g. a XOLU-BAL001) — composition must not launder the
+	// underlying refusal.
+
+	// ErrDXPBindings is returned when instantiation is refused because
+	// the supplied bindings fail the definition's slot types.
+	ErrDXPBindings Code = "XOLU-DXP001"
+
+	// ErrDXPReserveRefused is returned when a participant guard refuses
+	// during the reserve phase. The refusing participant is named and
+	// its own error is carried.
+	ErrDXPReserveRefused Code = "XOLU-DXP002"
+
+	// ErrDXPValidateFailed is returned when validation at confirmation
+	// finds a reservation no longer holds. Carries the participant's
+	// own error where one exists.
+	ErrDXPValidateFailed Code = "XOLU-DXP003"
+
+	// ErrDXPPhaseOrder is returned on a phase-order violation: a verb
+	// invoked outside the pattern's legal phase sequence.
+	ErrDXPPhaseOrder Code = "XOLU-DXP004"
+
+	// ErrDXPInstanceExpired is returned when an instance's deadline
+	// lapsed; its reservations are released.
+	ErrDXPInstanceExpired Code = "XOLU-DXP005"
+
+	// ErrDXPDefinitionInvalid is returned when a definition is rejected
+	// at registration, with detail.
+	ErrDXPDefinitionInvalid Code = "XOLU-DXP006"
+
+	// ErrDXPInvalidatedByLoss is returned when a held reservation is
+	// superseded by a competing transaction's commit (3PS validate).
+	// Distinct from ErrDXPValidateFailed: losing to a competitor is a
+	// different fact from a guard input drifting for any other reason.
+	// The winner's transaction id is named in the message.
+	ErrDXPInvalidatedByLoss Code = "XOLU-DXP007"
+
+	// ErrDXPExecuteFailed is returned when a participant's Execute
+	// errors during the commit phase. The whole transaction rolls
+	// back; the participant's own error is carried.
+	ErrDXPExecuteFailed Code = "XOLU-DXP008"
+
+	// ErrDXPAbandoned is returned when a status query names an instance
+	// tombstoned by the mount-time startup pass after a coordinator
+	// restart — distinct from ErrDXPInstanceExpired (the clock ran out
+	// in a live process); a spike of this code is an incident signature.
+	ErrDXPAbandoned Code = "XOLU-DXP009"
+
+	// ErrDXPAbandonmentInvariant is an internal alarm code, never
+	// returned to API callers: the mount-time pass found a participant
+	// effect row bearing an abandoned instance's txn id, which part 2
+	// of the reservation-cache design proves impossible in v1. Logged
+	// at error and fatal under XOLU_STRICT_DXP.
+	ErrDXPAbandonmentInvariant Code = "XOLU-DXP010"
+)
+
+const (
+	// --- loc: spatial primitive (T-115..T-118, wave 9) ---
+	// First pass, per loc-01-rest-api.md's own caution: read this list
+	// the way cal's history actually went (XOLU-CAL001-007 were only
+	// hardened during and after implementation), not the way bal's
+	// (settled early, stayed close to final) did. Not every code below
+	// is guaranteed to survive contact with loc-02-implementation.md's
+	// own stages.
+
+	// ErrLocFenceCapacity: report/move refused — an entered fence is
+	// at capacity (Stage 2's CAS predicate matched zero rows). HTTP 409.
+	ErrLocFenceCapacity Code = "XOLU-LOC001"
+	// ErrLocLeafCapacity: move refused — destination leaf is at
+	// capacity. HTTP 409.
+	ErrLocLeafCapacity Code = "XOLU-LOC002"
+	// ErrLocUnknownLocation: unknown location_id. HTTP 404.
+	ErrLocUnknownLocation Code = "XOLU-LOC003"
+	// ErrLocUnknownFence: unknown fence — bad location_id for a
+	// tree-aligned fence, or unresolvable (kind, key) for a standalone
+	// one. HTTP 404.
+	ErrLocUnknownFence Code = "XOLU-LOC004"
+	// ErrLocUnknownSubject: entity ref does not resolve — used for
+	// both report/move's own subject and fences/attach's subject.
+	// HTTP 404.
+	ErrLocUnknownSubject Code = "XOLU-LOC005"
+	// ErrLocAlreadyAttached: fences/attach refused — subject already
+	// has loc.fence composed. HTTP 409.
+	ErrLocAlreadyAttached Code = "XOLU-LOC006"
+	// ErrLocRootWithoutAnchor: a tree root (parent_id: null) was
+	// defined without an anchor. HTTP 400.
+	ErrLocRootWithoutAnchor Code = "XOLU-LOC010"
+	// ErrLocCapacityOnNonPostable: capacity set on a non-postable
+	// node. HTTP 400.
+	ErrLocCapacityOnNonPostable Code = "XOLU-LOC011"
+	// ErrLocDeleteHasAssignedSubject: delete refused — node (or a
+	// descendant) currently holds an assigned subject. HTTP 409.
+	ErrLocDeleteHasAssignedSubject Code = "XOLU-LOC012"
+	// ErrLocDeleteHasChildren: delete refused — node has children and
+	// force was not set. HTTP 409.
+	ErrLocDeleteHasChildren Code = "XOLU-LOC013"
+	// ErrLocDuplicateLocation: def refused — location_id already
+	// defined. HTTP 409. Added post-hoc by adversarial testing, not
+	// present in loc-01-rest-api.md's original error table — a
+	// UNIQUE-constraint violation previously fell through to a bare
+	// 500, the same gap bal's own DefineAccount has and hasn't fixed.
+	ErrLocDuplicateLocation Code = "XOLU-LOC014"
+	// ErrLocDuplicateFence: fences/attach refused — fence_id already
+	// defined. HTTP 409. Same finding as ErrLocDuplicateLocation,
+	// fence_id's own version.
+	ErrLocDuplicateFence Code = "XOLU-LOC015"
+	// ErrLocSelfIntersectingPolygon: fence geometry rejected —
+	// self-intersecting polygon (loc-00-design.md §4b). HTTP 400.
+	ErrLocSelfIntersectingPolygon Code = "XOLU-LOC020"
+	// ErrLocNonFiniteCoordinate: coordinate field rejected — non-finite
+	// float (§4e's numerics doctrine). Should be unreachable given
+	// Stage 0's decode discipline (typed float64 fields only, never a
+	// map[string]interface{} or string intermediate) — this code exists
+	// for the string-based-import path named as a future risk, not the
+	// primary JSON decode path, which encoding/json already refuses.
+	ErrLocNonFiniteCoordinate Code = "XOLU-LOC021"
+	// ErrLocPatternCapacityConflict: def/attach set both inline
+	// capacity and a pattern reference (T-131). HTTP 400.
+	ErrLocPatternCapacityConflict Code = "XOLU-LOC022"
+	// ErrLocDuplicatePattern: pattern_id already defined (T-131).
+	// HTTP 409.
+	ErrLocDuplicatePattern Code = "XOLU-LOC023"
+	// ErrLocUnknownPattern: pattern_id does not resolve (T-131).
+	// HTTP 404.
+	ErrLocUnknownPattern Code = "XOLU-LOC024"
+
+	// ─── XOLU-OBJ family (wave 10, T-119 onward) ──────────────────
+
+	// ErrObjUnknownSubject: subject does not resolve — either a
+	// malformed (kind, key) shape (format-only, T-119's own package
+	// doc explains why not a live existence check) or a well-formed
+	// subject with no obj capability attached. HTTP 404.
+	ErrObjUnknownSubject Code = "XOLU-OBJ001"
+	// ErrObjCapacity: destination obj subject at capacity, T-120's own
+	// count dimension (weight/volume deliberately deferred — see
+	// pkg/obj/containment.go's own doc comment for why). HTTP 409.
+	ErrObjCapacity Code = "XOLU-OBJ003"
+	// ErrObjCycle: the move would create a containment cycle (T-120).
+	// HTTP 409.
+	ErrObjCycle Code = "XOLU-OBJ004"
+	// ErrObjContainerNotAttached: the target obj subject (the intended
+	// container) is not itself obj-attached (T-120). HTTP 409.
+	ErrObjContainerNotAttached Code = "XOLU-OBJ005"
+	// ErrObjAlreadyAttached: attach refused — subject already has obj
+	// capability composed. HTTP 409.
+	ErrObjAlreadyAttached Code = "XOLU-OBJ006"
+	// ErrObjCapacityInvalid: capacity update leaves every dimension
+	// unconstrained-and-unset, or otherwise malformed (obj-01-rest-
+	// api.md §4, /loc's own XOLU-LOC011 counterpart). HTTP 400.
+	ErrObjCapacityInvalid Code = "XOLU-OBJ008"
+	// ErrObjRetireRefused: retire refused — subject currently contains
+	// something, or is already retired (obj-01-rest-api.md §6). HTTP 409.
+	ErrObjRetireRefused Code = "XOLU-OBJ012"
+	// ErrObjDetachRefused: detach refused — subject currently
+	// contains something or is positioned anywhere other than
+	// unassigned (obj-01-rest-api.md §1). HTTP 409.
+	ErrObjDetachRefused Code = "XOLU-OBJ007"
+	// ErrObjEntitySelectionInvalid: promote's own entity selection is
+	// malformed — both existing_key and create set, or neither
+	// (obj-01-rest-api.md §5). HTTP 400. XOLU-OBJ009 (bal_account
+	// balance insufficient) is not a distinct HTTP error code here —
+	// it surfaces through the underlying dxp transaction's own
+	// dispatch result (status "released", reason naming the bal leg),
+	// the same way every other dxp-composed refusal already does.
+	ErrObjEntitySelectionInvalid Code = "XOLU-OBJ010"
 )

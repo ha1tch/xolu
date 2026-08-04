@@ -1926,3 +1926,61 @@ func outEdgesForSQLite(t *testing.T, store *storage.SQLiteStore, entity string, 
 	}
 	return edges
 }
+
+// TestSQLiteStore_AllocateNodeID_ThenCreate_SequenceContinues is
+// T-121 (wave 10)'s own proof: AllocateNodeID reserves a real id from
+// the same sequence Create's own auto-allocation uses -- a
+// subsequent ordinary Create for the same entity type must continue
+// from where the reservation left off, not collide with it or reset.
+func TestSQLiteStore_AllocateNodeID_ThenCreate_SequenceContinues(t *testing.T) {
+	storeIface, cleanup := setupSQLiteTest(t)
+	defer cleanup()
+	store := storeIface.(*storage.SQLiteStore)
+	ctx := context.Background()
+
+	reserved, err := store.AllocateNodeID(ctx, "cases")
+	if err != nil {
+		t.Fatalf("AllocateNodeID: %v", err)
+	}
+	if reserved != 1 {
+		t.Fatalf("first allocation for a fresh entity type: want 1, got %d", reserved)
+	}
+
+	id, err := store.Create(ctx, "cases", map[string]interface{}{"lot_code": "L1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if id != 2 {
+		t.Fatalf("Create after one reservation: want 2 (sequence continues), got %d", id)
+	}
+
+	reserved2, err := store.AllocateNodeID(ctx, "cases")
+	if err != nil {
+		t.Fatalf("AllocateNodeID (2nd): %v", err)
+	}
+	if reserved2 != 3 {
+		t.Fatalf("second reservation: want 3, got %d", reserved2)
+	}
+}
+
+// TestSQLiteStore_AllocateNodeID_IndependentPerEntityType proves each
+// entity type gets its own sequence, matching Create's own documented
+// per-tenant-per-entity-type behaviour.
+func TestSQLiteStore_AllocateNodeID_IndependentPerEntityType(t *testing.T) {
+	storeIface, cleanup := setupSQLiteTest(t)
+	defer cleanup()
+	store := storeIface.(*storage.SQLiteStore)
+	ctx := context.Background()
+
+	a, err := store.AllocateNodeID(ctx, "cases")
+	if err != nil {
+		t.Fatalf("AllocateNodeID(cases): %v", err)
+	}
+	b, err := store.AllocateNodeID(ctx, "pallets")
+	if err != nil {
+		t.Fatalf("AllocateNodeID(pallets): %v", err)
+	}
+	if a != 1 || b != 1 {
+		t.Fatalf("distinct entity types must each start their own sequence at 1: got cases=%d pallets=%d", a, b)
+	}
+}

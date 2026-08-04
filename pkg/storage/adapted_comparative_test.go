@@ -336,7 +336,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7a. Filtered SELECT (WHERE on numeric field, ~50% selectivity)
 	start = time.Now()
 	rows, err := db.QueryContext(ctx,
-		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.quantity') > 500`)
+		`SELECT data FROM `+tenant.TenantID(0).NodesTableName()+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.quantity') > 500`)
 	if err != nil {
 		t.Fatalf("blob SQL filter: %v", err)
 	}
@@ -358,7 +358,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7b. ORDER BY + LIMIT (top 20 by price)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' ORDER BY CAST(json_extract(data, '$.price') AS REAL) DESC LIMIT 20`)
+		`SELECT data FROM `+tenant.TenantID(0).NodesTableName()+` WHERE entity_type = 'products_blob' ORDER BY CAST(json_extract(data, '$.price') AS REAL) DESC LIMIT 20`)
 	if err != nil {
 		t.Fatalf("blob SQL sort: %v", err)
 	}
@@ -379,7 +379,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	// 7c. Range scan (price between 100.00 and 200.00 as scaled integers)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND CAST(json_extract(data, '$.price') AS REAL) BETWEEN 100.0 AND 200.0`)
+		`SELECT data FROM `+tenant.TenantID(0).NodesTableName()+` WHERE entity_type = 'products_blob' AND CAST(json_extract(data, '$.price') AS REAL) BETWEEN 100.0 AND 200.0`)
 	if err != nil {
 		t.Fatalf("blob SQL range: %v", err)
 	}
@@ -402,7 +402,7 @@ func runComparison(t *testing.T, n int) (benchResult, benchResult) {
 	target := fmt.Sprintf("SKU-%05d", n/2)
 	start = time.Now()
 	rows, err = db.QueryContext(ctx,
-		`SELECT data FROM `+tenant.NodesTableName(0)+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.sku') = ?`, target)
+		`SELECT data FROM `+tenant.TenantID(0).NodesTableName()+` WHERE entity_type = 'products_blob' AND json_extract(data, '$.sku') = ?`, target)
 	if err != nil {
 		t.Fatalf("blob SQL text_eq: %v", err)
 	}

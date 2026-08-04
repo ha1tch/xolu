@@ -18,11 +18,14 @@
 //	iolu ts status   --base-dir /path/to/data [--tenant <id>]
 //	iolu db upgrade  --base-dir /path/to/data [--mode per-file|shared]
 //
-//	iolu tenant create       --base-dir /path/to/data --name <name> [--id <n>]
+//	iolu bal prune   --base-dir /path/to/data --before <RFC3339> [--yes]
+//
+//	iolu tenant create       --base-dir /path/to/data --name <name> [--id <n>] [--graph=false]
 //	iolu tenant list         --base-dir /path/to/data
 //	iolu tenant info         --base-dir /path/to/data --name <name>
 //	iolu tenant delete       --base-dir /path/to/data --name <name> [--force]
-//	iolu tenant provision-ts --base-dir /path/to/data --name <name>
+//	iolu tenant provision-ts  --base-dir /path/to/data --name <name>
+//	iolu tenant provision-cal --base-dir /path/to/data --name <name>
 //
 //	iolu version
 //	iolu help
@@ -90,6 +93,8 @@ func main() {
 			cmdTenantDelete(os.Args[3:])
 		case "provision-ts":
 			cmdTenantProvisionTS(os.Args[3:])
+		case "provision-cal":
+			cmdTenantProvisionCal(os.Args[3:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown tenant subcommand: %s\n", os.Args[2])
 			printTenantUsage()
@@ -105,6 +110,18 @@ func main() {
 			cmdTSStatus(os.Args[3:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown ts subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
+	case "bal":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: iolu bal prune --base-dir <dir> --before <RFC3339> [--yes]")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "prune":
+			cmdBalPrune(os.Args[3:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown bal subcommand: %s\n", os.Args[2])
 			os.Exit(1)
 		}
 	case "help", "--help", "-h":
@@ -160,9 +177,9 @@ func cmdDBInit(args []string) {
 
 	fmt.Printf("  \u2713  core schema (tenants, schema_version)\n")
 	fmt.Printf("  \u2713  tenant-0 tables (%s, %s, %s)\n",
-		tenant.NodesTableName(0), tenant.NodeSeqTableName(0), tenant.NodeFTSTableName(0))
+		tenant.TenantID(0).NodesTableName(), tenant.TenantID(0).NodeSeqTableName(), tenant.TenantID(0).NodeFTSTableName())
 	if *graph {
-		fmt.Printf("  \u2713  graph topology table (%s)\n", tenant.GraphTableName(0))
+		fmt.Printf("  \u2713  graph topology table (%s)\n", tenant.TenantID(0).GraphTableName())
 	}
 	if *provisionTS {
 		if err := provisionTenantDirs(*baseDir, 0); err != nil {
@@ -286,7 +303,7 @@ func cmdDBStatus(args []string) {
 			fmt.Printf("  (no tenants registered)\n")
 		}
 		for _, tr := range buffered {
-			nodeCount := tenantNodeCount(*baseDir, uint16(tr.id), storeMode, db)
+			nodeCount := tenantNodeCount(*baseDir, tenant.TenantID(tr.id), storeMode, db)
 			fmt.Printf("  %-5d  %-24s  %-20s  %d nodes\n", tr.id, tr.name, tr.created, nodeCount)
 		}
 	}
@@ -402,7 +419,7 @@ func cmdDBUpgrade(args []string) {
 		if err := tRows.Scan(&id); err != nil {
 			continue
 		}
-		tid := uint16(id)
+		tid := tenant.TenantID(id)
 		ts, err := openTenantStore(*baseDir, tid, storeMode, *graph)
 		if err != nil {
 			fatal("upgrade tables for tenant %04X: %v", tid, err)
@@ -424,6 +441,9 @@ func cmdTenantCreate(args []string) {
 	mode := fs.String("mode", "", "store organisation override: per-file or shared (default: auto-detect)")
 	name := fs.String("name", "", "Tenant name (required)")
 	id := fs.Int("id", 0, "Tenant ID (optional; auto-assigns next available if omitted)")
+	graph := fs.Bool("graph", true, "also create the tenant's own entity/graph tables (default: true, matching "+
+		"the server's own GraphEnabled default) -- without this, the tenant is registered but has no storage of "+
+		"its own until its first write, and the server logs a hydration warning for it on every boot until then")
 	_ = fs.Parse(args)
 
 	if *baseDir == "" || *name == "" {
@@ -446,11 +466,49 @@ func cmdTenantCreate(args []string) {
 	db := store.DB()
 	ctx := context.Background()
 
-	tenantID, err := registerTenant(ctx, db, *name, uint16(*id))
+	tenantID, err := registerTenant(ctx, db, *name, tenant.TenantID(*id))
 	if err != nil {
 		fatal("%v", err)
 	}
 	fmt.Printf("created tenant %q with ID %d\n", *name, tenantID)
+
+	// Registering the tenant only inserts its row into the shared
+	// `tenants` table -- it does not, on its own, create that tenant's
+	// own t<XXXX>_* table family (nodes, edges, graph, sequences).
+	// Those are created by SQLiteStore.initialize() -> createSchema(),
+	// which runs whenever a store is OPENED for a given TenantID -- and
+	// the store opened just above is scoped to tenant 0, not the new
+	// tenant, so none of that has happened yet for tenantID here.
+	//
+	// Left unfixed, the new tenant is registered but has no storage of
+	// its own: the server's own boot-time graph hydration
+	// (loadEntitiesFromEdgeTable in cmd/xolu/main.go) enumerates every
+	// registered tenant and tries to scan its graph table, hits "no
+	// such table" for this one, and logs a WARN -- every single boot,
+	// for as long as the tenant goes without a first write. That's
+	// real, misleading noise under completely normal, correct usage
+	// (a freshly created, not-yet-used tenant), not a corner case to
+	// document around. Opening a second store scoped to the tenant's
+	// own ID triggers the same table creation the server would run on
+	// that tenant's first write, just proactively -- a "created"
+	// tenant should genuinely be a complete, ready one, not a registry
+	// row plus a promise.
+	//
+	// In shared mode this opens a second connection to the SAME file
+	// (fine under WAL, which openTenantStore already enables) with a
+	// different TenantID in its own config, so createSchema targets
+	// t<newID>_* rather than t0000_*. In per-file mode it's a genuinely
+	// separate file, same as any other tenant's own store.
+	if *graph {
+		tenantStore, err := openTenantStore(*baseDir, tenantID, storeMode, true)
+		if err != nil {
+			fatal("tenant %q was registered (ID %d) but its own tables could not be created: %v\n"+
+				"the tenant registry entry now exists without matching storage -- either retry, or "+
+				"delete the registry row (iolu tenant delete --name %s) and start over", *name, tenantID, err, *name)
+		}
+		_ = tenantStore.Close()
+		fmt.Printf("provisioned entity/graph tables for tenant %q\n", *name)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +572,7 @@ func cmdTenantList(args []string) {
 	fmt.Printf("%-6s  %-24s  %-20s  %s\n", "------", "------------------------", "--------------------", "--------")
 
 	for _, tr := range trows {
-		nodeCount := tenantNodeCount(*baseDir, uint16(tr.id), storeMode, db)
+		nodeCount := tenantNodeCount(*baseDir, tenant.TenantID(tr.id), storeMode, db)
 		fmt.Printf("%-6d  %-24s  %-20s  %d\n", tr.id, tr.name, tr.created, nodeCount)
 	}
 
@@ -563,8 +621,8 @@ func cmdTenantInfo(args []string) {
 	if createdAt.Valid {
 		created = createdAt.String
 	}
-	tid := uint16(id)
-	nodesTable := tenant.NodesTableName(tid)
+	tid := tenant.TenantID(id)
+	nodesTable := tid.NodesTableName()
 
 	// In per-file mode a non-zero tenant's tables live in its own store file,
 	// not tenant 0's. Resolve the DB that actually holds this tenant's tables.
@@ -615,7 +673,7 @@ func cmdTenantInfo(args []string) {
 	}
 	fmt.Printf("  %-20s  %d\n", "TOTAL", total)
 
-	graphTable := tenant.GraphTableName(tid)
+	graphTable := tid.GraphTableName()
 	edgeCount := tableCount(ctx, tdb, graphTable)
 	fmt.Printf("\nGraph:       %s  (%d edges)\n", graphTable, edgeCount)
 
@@ -633,6 +691,15 @@ func cmdTenantInfo(args []string) {
 		fmt.Printf("Blobs:       provisioned at %s  (%s)\n", blobDir, formatBytes(dirSize(blobDir)))
 	} else {
 		fmt.Printf("Blobs:       not provisioned\n")
+	}
+
+	calDir := sl.TenantCalDir(*baseDir, tid)
+	if info, err := os.Stat(calDir); err == nil && info.IsDir() {
+		fmt.Printf("Cal index:   provisioned at %s  (%s)\n", calDir, formatBytes(dirSize(calDir)))
+	} else {
+		fmt.Printf("Cal index:   not provisioned\n")
+		fmt.Printf("             hint: iolu tenant provision-cal --base-dir %s --name %s\n",
+			*baseDir, *name)
 	}
 }
 
@@ -673,8 +740,8 @@ func cmdTenantDelete(args []string) {
 		fatal("query tenant: %v", err)
 	}
 
-	tid := uint16(id)
-	nodesTable := tenant.NodesTableName(tid)
+	tid := tenant.TenantID(id)
+	nodesTable := tid.NodesTableName()
 
 	var nodeCount int
 	if err := db.QueryRowContext(ctx,
@@ -717,15 +784,15 @@ func cmdTenantDelete(args []string) {
 		// Drop the full per-tenant table family from the shared store via the
 		// authoritative name functions.
 		for _, tbl := range []string{
-			tenant.NodeFTSTableName(tid),
-			tenant.EdgeFTSTableName(tid),
-			tenant.NodesTableName(tid),
-			tenant.NodeSeqTableName(tid),
-			tenant.EdgePropsTableName(tid),
-			tenant.EdgeSeqTableName(tid),
-			tenant.GraphTableName(tid),
-			tenant.NodeSchemaTableName(tid),
-			tenant.EdgeSchemaTableName(tid),
+			tid.NodeFTSTableName(),
+			tid.EdgeFTSTableName(),
+			tid.NodesTableName(),
+			tid.NodeSeqTableName(),
+			tid.EdgePropsTableName(),
+			tid.EdgeSeqTableName(),
+			tid.GraphTableName(),
+			tid.NodeSchemaTableName(),
+			tid.EdgeSchemaTableName(),
 		} {
 			_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tbl))
 		}
@@ -770,7 +837,7 @@ func cmdTenantProvisionTS(args []string) {
 		fatal("query tenant: %v", err)
 	}
 
-	tid := uint16(id)
+	tid := tenant.TenantID(id)
 	if err := provisionTenantDirs(*baseDir, tid); err != nil {
 		fatal("provision tenant directories: %v", err)
 	}
@@ -810,12 +877,12 @@ func cmdTSStatus(args []string) {
 
 	// Determine which tenant IDs to inspect: one, or every tXXXX dir that
 	// carries a ts/ store.
-	var ids []uint16
+	var ids []tenant.TenantID
 	if *tenantID >= 0 {
 		if *tenantID > 0xFFFF {
 			fatal("tenant ID %d out of range", *tenantID)
 		}
-		ids = []uint16{uint16(*tenantID)}
+		ids = []tenant.TenantID{tenant.TenantID(*tenantID)}
 	} else {
 		ids = discoverTSTenants(*baseDir)
 		if len(ids) == 0 {
@@ -853,12 +920,12 @@ func cmdTSStatus(args []string) {
 
 // discoverTSTenants returns the tenant IDs under baseDir that carry a
 // ts/ store directory. Best-effort: unreadable base dir yields nil.
-func discoverTSTenants(baseDir string) []uint16 {
+func discoverTSTenants(baseDir string) []tenant.TenantID {
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		return nil
 	}
-	var ids []uint16
+	var ids []tenant.TenantID
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -878,7 +945,7 @@ func discoverTSTenants(baseDir string) []uint16 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func registerTenant(ctx context.Context, db *sql.DB, name string, id uint16) (uint16, error) {
+func registerTenant(ctx context.Context, db *sql.DB, name string, id tenant.TenantID) (tenant.TenantID, error) {
 	var existingID int
 	err := db.QueryRowContext(ctx, `SELECT id FROM tenants WHERE name = ?`, name).Scan(&existingID)
 	if err == nil {
@@ -894,7 +961,7 @@ func registerTenant(ctx context.Context, db *sql.DB, name string, id uint16) (ui
 			if next > 65535 {
 				return 0, fmt.Errorf("tenant registry full")
 			}
-			id = uint16(next)
+			id = tenant.TenantID(next)
 		} else {
 			id = 1
 		}
@@ -916,7 +983,7 @@ func registerTenant(ctx context.Context, db *sql.DB, name string, id uint16) (ui
 // provisionTenantDirs creates the per-tenant timeseries and blob directories
 // under the data root, derived by pkg/storelayout (tenant-first layout, uniform
 // with the running server). Both planes are always per-tenant.
-func provisionTenantDirs(base string, tenantID uint16) error {
+func provisionTenantDirs(base string, tenantID tenant.TenantID) error {
 	if err := os.MkdirAll(sl.TenantTSDir(base, tenantID), 0755); err != nil {
 		return fmt.Errorf("create ts dir: %w", err)
 	}
@@ -930,15 +997,15 @@ func provisionTenantDirs(base string, tenantID uint16) error {
 // tenant's nodes table lives in the same (tenant-0) store, so sharedDB is used
 // directly. In per-file mode the tenant's tables live in its own store file,
 // which is opened read-only for the count. A missing table yields 0.
-func tenantNodeCount(base string, tid uint16, mode storeMode, sharedDB *sql.DB) int {
+func tenantNodeCount(base string, tid tenant.TenantID, mode storeMode, sharedDB *sql.DB) int {
 	ctx := context.Background()
 	if mode == modeShared {
-		return tableCount(ctx, sharedDB, tenant.NodesTableName(tid))
+		return tableCount(ctx, sharedDB, tid.NodesTableName())
 	}
 	// Per-file: tenant 0's nodes are in the already-open store; others need
 	// their own file opened.
 	if tid == 0 {
-		return tableCount(ctx, sharedDB, tenant.NodesTableName(0))
+		return tableCount(ctx, sharedDB, tenant.TenantID(0).NodesTableName())
 	}
 	path := sl.TenantStorePath(base, tid)
 	if _, err := os.Stat(path); err != nil {
@@ -949,7 +1016,7 @@ func tenantNodeCount(base string, tid uint16, mode storeMode, sharedDB *sql.DB) 
 		return 0
 	}
 	defer func() { _ = ts.Close() }()
-	return tableCount(ctx, ts.DB(), tenant.NodesTableName(tid))
+	return tableCount(ctx, ts.DB(), tid.NodesTableName())
 }
 
 // tenantRow is a buffered tenant registry row.
@@ -991,7 +1058,7 @@ func tableCount(ctx context.Context, db *sql.DB, table string) int {
 
 type tenantEntry struct {
 	name string
-	id   uint16
+	id   tenant.TenantID
 }
 
 type tenantFlags []tenantEntry
@@ -1004,13 +1071,13 @@ func (t *tenantFlags) Set(val string) error {
 	if name == "" {
 		return fmt.Errorf("tenant name must not be empty")
 	}
-	var id uint16
+	var id tenant.TenantID
 	if len(parts) == 2 {
 		n, err := strconv.ParseUint(parts[1], 10, 16)
 		if err != nil || n == 0 {
 			return fmt.Errorf("tenant ID must be between 1 and 65535")
 		}
-		id = uint16(n)
+		id = tenant.TenantID(n)
 	}
 	*t = append(*t, tenantEntry{name: name, id: id})
 	return nil
@@ -1061,6 +1128,7 @@ func printUsage() {
 	_, _ = fmt.Fprintln(w, "  iolu db     <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu tenant <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu ts     <command> [flags]")
+	_, _ = fmt.Fprintln(w, "  iolu bal    <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  iolu version")
 	_, _ = fmt.Fprintln(w, "  iolu help")
 	_, _ = fmt.Fprintln(w)
@@ -1080,6 +1148,7 @@ func printUsage() {
 		{"info", "Show tenant details, entity breakdown, graph and timeseries status"},
 		{"delete", "Remove a tenant from the registry and drop all tenant tables"},
 		{"provision-ts", "Provision timeseries storage directory for a tenant"},
+		{"provision-cal", "Provision cal occupancy index for a tenant"},
 	} {
 		_, _ = fmt.Fprintf(w, "  %-14s  %s\n", l.cmd, l.desc)
 	}
@@ -1100,6 +1169,7 @@ func printUsage() {
 	_, _ = fmt.Fprintln(w, "  iolu tenant list         --base-dir /data")
 	_, _ = fmt.Fprintln(w, "  iolu tenant info         --base-dir /data --name acme")
 	_, _ = fmt.Fprintln(w, "  iolu tenant provision-ts --base-dir /data --name acme")
+	_, _ = fmt.Fprintln(w, "  iolu tenant provision-cal --base-dir /data --name acme")
 	_, _ = fmt.Fprintln(w, "  iolu tenant delete       --base-dir /data --name acme --force")
 }
 
@@ -1131,6 +1201,7 @@ func printTenantUsage() {
 		{"info", "Show details for a tenant"},
 		{"delete", "Remove a tenant from the registry"},
 		{"provision-ts", "Provision timeseries storage for a tenant"},
+		{"provision-cal", "Provision cal occupancy index for a tenant"},
 	} {
 		_, _ = fmt.Fprintf(w, "  %-14s  %s\n", l.cmd, l.desc)
 	}

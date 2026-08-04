@@ -102,7 +102,7 @@ func (s *SQLiteStore) IsEdgeLabel(ctx context.Context, rel string) (bool, error)
 	if !s.config.GraphEnabled {
 		return false, nil
 	}
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 	var tableExists int
 	if err := s.readDB.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", esch,
@@ -130,7 +130,7 @@ func (s *SQLiteStore) ResolveEdgeRelName(ctx context.Context, rel string) string
 	if !s.config.GraphEnabled {
 		return rel
 	}
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 	var stored string
 	if err := s.readDB.QueryRowContext(ctx,
 		"SELECT rel FROM "+esch+" WHERE LOWER(rel) = LOWER(?)", rel,
@@ -149,7 +149,7 @@ func (s *SQLiteStore) ListEdges(ctx context.Context, rel string) ([]map[string]i
 	// Resolve canonical casing before querying the blob table.
 	canonicalRel := s.ResolveEdgeRelName(ctx, rel)
 
-	edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+	edgesTable := s.config.TenantID.EdgePropsTableName()
 	rows, err := s.readDB.QueryContext(ctx,
 		"SELECT edge_id, data FROM "+edgesTable+" WHERE rel = ? ORDER BY edge_id", canonicalRel)
 	if err != nil {
@@ -178,7 +178,7 @@ func (s *SQLiteStore) ListEdges(ctx context.Context, rel string) ([]map[string]i
 // Uses DELETE + INSERT to simulate an UPSERT since FTS5 virtual tables do
 // not support ON CONFLICT clauses.
 func (s *SQLiteStore) IndexEdgeContent(ctx context.Context, rel string, edgeID int, props map[string]interface{}) error {
-	efts := tenant.EdgeFTSTableName(s.config.TenantID)
+	efts := s.config.TenantID.EdgeFTSTableName()
 	content := extractEdgeContent(props)
 
 	// Delete any existing row for this (rel, edge_id) pair first.
@@ -202,7 +202,7 @@ func (s *SQLiteStore) IndexEdgeContent(ctx context.Context, rel string, edgeID i
 // matching (rel, edge_id) pairs ordered by BM25 rank (best match first).
 // limit ≤ 0 returns all matches.
 func (s *SQLiteStore) SearchEdges(ctx context.Context, query string, limit int) ([]EdgeFTSResult, error) {
-	efts := tenant.EdgeFTSTableName(s.config.TenantID)
+	efts := s.config.TenantID.EdgeFTSTableName()
 
 	sql := "SELECT rel, edge_id FROM " + efts +
 		" WHERE " + efts + " MATCH ? ORDER BY rank"

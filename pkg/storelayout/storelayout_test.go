@@ -4,10 +4,14 @@
 
 package storelayout
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
+)
 
 func TestTenantSegment(t *testing.T) {
-	cases := map[uint16]string{
+	cases := map[tenant.TenantID]string{
 		0:    "t0000", // tenant 0 gets a real segment, not ""
 		1:    "t0001",
 		255:  "t00FF",
@@ -21,7 +25,7 @@ func TestTenantSegment(t *testing.T) {
 }
 
 func TestParseTenantSegment_RoundTrip(t *testing.T) {
-	for _, tid := range []uint16{0, 1, 255, 4096, 65535} {
+	for _, tid := range []tenant.TenantID{0, 1, 255, 4096, 65535} {
 		seg := TenantSegment(tid)
 		got, ok := ParseTenantSegment(seg)
 		if !ok {

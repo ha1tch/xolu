@@ -4,6 +4,8 @@
 
 package storage
 
+import "github.com/ha1tch/xolu/pkg/tenant"
+
 // ---------------------------------------------------------------------------
 // Storage dialect abstraction
 // ---------------------------------------------------------------------------
@@ -76,7 +78,7 @@ type StorageDialect interface {
 	// NodeSchemaTableSQL generates the DDL for the per-tenant node schema
 	// registry table (t<X>_n_sch). Called lazily on first RegisterAdaptedTable
 	// for a given tenant, not at store startup.
-	NodeSchemaTableSQL(tenantID uint16) string
+	NodeSchemaTableSQL(tenantID tenant.TenantID) string
 
 	// NormaliseDecimal transforms a validated decimal string into the
 	// storage representation for this backend. SQLite scales to int64.

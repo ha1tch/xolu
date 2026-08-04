@@ -17,6 +17,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/blob"
 	"github.com/ha1tch/xolu/pkg/dynconfig"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ type blobUsageResponse struct {
 // On any failure it writes the appropriate error response and returns ok=false,
 // so callers return immediately. The returned tenant name is provided for
 // logging/usage lookups.
-func (s *Server) blobStoreFor(w http.ResponseWriter, r *http.Request) (*blob.Store, string, uint16, bool) {
+func (s *Server) blobStoreFor(w http.ResponseWriter, r *http.Request) (*blob.Store, string, tenant.TenantID, bool) {
 	if s.blobMgr == nil {
 		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrBlobDisabled,
 			"Blob storage is not enabled on this server (XOLU_BLOB_ENABLED=true required)")
@@ -90,7 +91,7 @@ func (s *Server) blobStoreFor(w http.ResponseWriter, r *http.Request) (*blob.Sto
 	}
 	store, err := s.blobMgr.StoreFor(tid)
 	if err != nil {
-		s.logger.Error().Err(err).Uint16("tenant", tid).Msg("blob: open tenant store")
+		s.logger.Error().Err(err).Uint16("tenant", uint16(tid)).Msg("blob: open tenant store")
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
 			"Failed to open blob store for tenant")
 		return nil, "", 0, false
@@ -104,7 +105,7 @@ func (s *Server) blobStoreFor(w http.ResponseWriter, r *http.Request) (*blob.Sto
 // on demand, mirroring the behaviour of the main tenant middleware, so the
 // blob plane does not impose a stricter registration requirement than the rest
 // of the v1 surface.
-func (s *Server) blobTenantID(ctx context.Context, tenantName string) (uint16, bool) {
+func (s *Server) blobTenantID(ctx context.Context, tenantName string) (tenant.TenantID, bool) {
 	if tenantName == "" || tenantName == "default" {
 		return 0, true
 	}

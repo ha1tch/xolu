@@ -34,6 +34,7 @@ type AccountDef struct {
 	Floor    int64  // minimum balance (default 0)
 	Ceiling  *int64 // optional maximum balance
 	Postable bool   // only leaf (imputable) accounts accept entries (@B03a)
+	Policy   string // temporal policy (T-55): "" or "append_only" (default) | "backdated"
 }
 
 // ValidateAccountID enforces the external-id shape: non-empty, ≤256,

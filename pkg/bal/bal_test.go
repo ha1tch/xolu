@@ -33,7 +33,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	s := NewStore(db, "t0000_")
+	s := NewStore(db, 0)
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}

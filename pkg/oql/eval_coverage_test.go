@@ -435,3 +435,74 @@ func TestOrderBy_FloatField(t *testing.T) {
 		t.Errorf("last by price DESC = %v, want Thingamajig", last["name"])
 	}
 }
+
+// --- T-144: ORDER BY on a string timestamp field, in-memory sort path ---
+//
+// Mirrors the exact scenario a Seam AMS session's own diagnostic
+// isolated (nine records sharing one calendar year, one deliberate
+// outlier in a different year) -- the root cause was fmt.Sscanf's "%f"
+// verb matching only a leading numeric prefix: "2026-08-03T02:04:33Z"
+// silently parsed as the bare float 2026, so every 2026-dated record
+// compared as numerically equal and a stable sort preserved their
+// original insertion order, while the one genuinely distinguishable
+// outlier (a different year) sorted to the correct extreme. The
+// symptom looked like "DESC gets the first row right, then the rest is
+// ascending" -- this test asserts the FULL order, not just the first
+// element, since that first-element check is exactly what let the bug
+// hide originally.
+func TestOrderBy_StringTimestampField_FullOrderNotJustExtremum(t *testing.T) {
+	store := newMockStore()
+	ctx := context.Background()
+	// Nine records, all dated 2026, genuinely ascending by full
+	// timestamp value -- their insertion order intentionally already
+	// matches their true chronological order, the same way Seam's own
+	// unmanipulated nine records did, so a passing ASC result alone
+	// would not distinguish a real sort from the bug (both produce the
+	// same output here -- see the DESC assertion below, which does not
+	// share that ambiguity).
+	timestamps := []string{
+		"2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z",
+		"2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z", "2026-06-01T00:00:00Z",
+		"2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", "2026-09-01T00:00:00Z",
+	}
+	for i, ts := range timestamps {
+		store.Create(ctx, "audit_logs", map[string]interface{}{
+			"seq": i + 1, "timestamp": ts,
+		})
+	}
+	// The outlier: a different year, placed FIRST in insertion order
+	// (seq=0) specifically so a bug that only gets the extremum right
+	// while leaving the rest in INSERTION order would produce a
+	// deceptively plausible-looking (but wrong) result rather than an
+	// obviously-broken one.
+	store.Create(ctx, "audit_logs", map[string]interface{}{
+		"seq": 0, "timestamp": "2099-01-01T00:00:00Z",
+	})
+
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "audit_logs"), 0755)
+	engine := NewEngine(store, tmpDir)
+
+	result, err := engine.Execute(ctx, "SELECT seq, timestamp FROM audit_logs ORDER BY timestamp DESC")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(result.Rows) != 10 {
+		t.Fatalf("got %d rows, want 10", len(result.Rows))
+	}
+	// Full descending order by real timestamp value: outlier first,
+	// then seq 9 down to 1 (NOT 1 up to 9, which is what the bug
+	// produced -- stable-sort-preserved insertion order for the nine
+	// "tied" records).
+	wantSeq := []int{0, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+	for i, row := range result.Rows {
+		got, ok := row["seq"].(int)
+		if !ok {
+			t.Fatalf("row %d: seq is %T, not int", i, row["seq"])
+		}
+		if got != wantSeq[i] {
+			t.Errorf("row %d: seq = %d, want %d (full order: %v)", i, got, wantSeq[i], result.Rows)
+			break
+		}
+	}
+}

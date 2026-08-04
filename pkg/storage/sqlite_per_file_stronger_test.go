@@ -15,7 +15,7 @@ import (
 )
 
 // newPerFileStoreWithGraph creates a per-file store with graph enabled.
-func newPerFileStoreWithGraph(t *testing.T, dbPath string, tenantID uint16) *SQLiteStore {
+func newPerFileStoreWithGraph(t *testing.T, dbPath string, tenantID tenant.TenantID) *SQLiteStore {
 	t.Helper()
 	store, err := NewSQLiteStore(dbPath, SQLiteConfig{
 		DBPath:            dbPath,
@@ -328,7 +328,7 @@ func TestPerFile_SequencePrimaryKeyConstraint(t *testing.T) {
 
 	insert := func(entityType string, id int) error {
 		_, err := db.ExecContext(ctx,
-			`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, 1)`,
+			`INSERT INTO `+tenant.TenantID(1).NodesTableName()+` (entity_type, id, data, _version) VALUES (?, ?, ?, 1)`,
 			entityType, id, fmt.Sprintf(`{"id":%d}`, id))
 		return err
 	}
@@ -358,26 +358,26 @@ func TestPerFile_SequencePrimaryKeyConstraint(t *testing.T) {
 
 	// Verify three distinct rows exist
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+tenant.NodesTableName(1)+``).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+tenant.TenantID(1).NodesTableName()+``).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 3 {
 		t.Errorf("row count: want 3, got %d", count)
 	}
 
-	// Also verify `+tenant.NodeSeqTableName(1)+` has no tenant_id column via a raw insert
+	// Also verify `+tenant.TenantID(1).NodeSeqTableName()+` has no tenant_id column via a raw insert
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodeSeqTableName(1)+` (entity_type, next_id) VALUES (?, ?)`,
+		`INSERT INTO `+tenant.TenantID(1).NodeSeqTableName()+` (entity_type, next_id) VALUES (?, ?)`,
 		"probe", 1)
 	if err != nil {
-		t.Errorf(tenant.NodeSeqTableName(1)+" insert without tenant_id: %v", err)
+		t.Errorf(tenant.TenantID(1).NodeSeqTableName()+" insert without tenant_id: %v", err)
 	}
 	// Duplicate primary key in sequences table should also fail
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodeSeqTableName(1)+` (entity_type, next_id) VALUES (?, ?)`,
+		`INSERT INTO `+tenant.TenantID(1).NodeSeqTableName()+` (entity_type, next_id) VALUES (?, ?)`,
 		"probe", 2)
 	if err == nil {
-		t.Error("duplicate " + tenant.NodeSeqTableName(1) + " PK: expected failure, got nil")
+		t.Error("duplicate " + tenant.TenantID(1).NodeSeqTableName() + " PK: expected failure, got nil")
 	}
 }
 

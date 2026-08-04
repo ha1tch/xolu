@@ -11,7 +11,7 @@ import (
 
 func TestCacheListPattern(t *testing.T) {
 	tests := []struct {
-		tenantID uint16
+		tenantID TenantID
 		entity   string
 		want     string
 	}{
@@ -22,7 +22,7 @@ func TestCacheListPattern(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := CacheListPattern(tt.tenantID, tt.entity)
+			got := tt.tenantID.CacheListPattern(tt.entity)
 			if got != tt.want {
 				t.Errorf("CacheListPattern(%d, %q) = %q, want %q", tt.tenantID, tt.entity, got, tt.want)
 			}

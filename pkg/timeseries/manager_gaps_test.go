@@ -7,6 +7,7 @@ package timeseries
 import (
 	"context"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,7 +198,7 @@ func TestNewManager_ScansExistingTenantDirs(t *testing.T) {
 
 	// Tenant-first layout: a tenant counts as having timeseries data only if its
 	// ts/ role directory exists at <base>/tXXXX/ts. Create that for t0001/t0002.
-	for _, id := range []uint16{1, 2} {
+	for _, id := range []tenant.TenantID{1, 2} {
 		_ = os.MkdirAll(sl.TenantTSDir(dir, id), 0755)
 	}
 	// A tenant directory without a ts/ subdir (SQLite-only) and non-tenant dirs

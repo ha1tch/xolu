@@ -14,6 +14,8 @@ import (
 	"github.com/ha1tch/xolu/pkg/blob"
 	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
+	"github.com/ha1tch/xolu/pkg/tenantexport"
 
 	"github.com/rs/zerolog"
 )
@@ -89,7 +91,7 @@ func newBlobManager(
 		blobDir := sl.TenantBlobDir(baseDir, id)
 		if info, statErr := os.Stat(blobDir); statErr == nil && info.IsDir() {
 			if _, openErr := m.StoreFor(id); openErr != nil {
-				logger.Warn().Err(openErr).Uint16("tenant", id).
+				logger.Warn().Err(openErr).Uint16("tenant", uint16(id)).
 					Msg("blob manager: failed to open discovered tenant store")
 			}
 		}
@@ -98,14 +100,14 @@ func newBlobManager(
 }
 
 // tenantDir returns the per-tenant blob directory: <baseDir>/tXXXX/blobs.
-func (m *blobManager) tenantDir(tenantID uint16) string {
+func (m *blobManager) tenantDir(tenantID tenant.TenantID) string {
 	return sl.TenantBlobDir(m.baseDir, tenantID)
 }
 
 // StoreFor returns the blob.Store for a tenant, opening it (and starting its GC
 // worker and sampler) lazily on first access. Subsequent calls return the
 // cached store.
-func (m *blobManager) StoreFor(tenantID uint16) (*blob.Store, error) {
+func (m *blobManager) StoreFor(tenantID tenant.TenantID) (*blob.Store, error) {
 	if v, ok := m.entries.Load(tenantID); ok {
 		return v.(*blobTenant).store, nil
 	}
@@ -133,7 +135,7 @@ func (m *blobManager) StoreFor(tenantID uint16) (*blob.Store, error) {
 	}
 
 	m.entries.Store(tenantID, bt)
-	m.logger.Info().Str("dir", dir).Uint16("tenant", tenantID).Msg("Blob store opened")
+	m.logger.Info().Str("dir", dir).Uint16("tenant", uint16(tenantID)).Msg("Blob store opened")
 	return store, nil
 }
 
@@ -162,10 +164,45 @@ func (m *blobManager) Sweep(ctx context.Context) (gcpkg.Report, error) {
 	return agg, firstErr
 }
 
+// blobExportSweeper implements gc.Sweeper for the async-export TTL
+// sweep (T-149) -- deliberately a separate type from blobManager
+// itself rather than a second method on it: blobManager.Sweep above is
+// already registered as its own gc.Worker for ordinary blob GC
+// (unreferenced-content reclamation), a different lifecycle with a
+// different config (BlobGCEnabled/IntervalSecs/GracePeriodSecs) and a
+// different meaning entirely -- an export blob IS referenced (by its
+// own key alias) for as long as it hasn't expired, so blobManager's
+// own GC would never touch it regardless. Wrapping the same m.entries
+// iteration in its own type keeps the two sweeps independently
+// configurable and independently schedulable, per T-149's own design
+// (BlobExportSweepEnabled/IntervalSecs/TTLSecs, separate from the
+// BlobGC* family).
+type blobExportSweeper struct {
+	mgr *blobManager
+	ttl time.Duration
+}
+
+func (s *blobExportSweeper) Sweep(ctx context.Context) (gcpkg.Report, error) {
+	var agg gcpkg.Report
+	var firstErr error
+	s.mgr.entries.Range(func(_, v any) bool {
+		bt := v.(*blobTenant)
+		rep, err := tenantexport.SweepExpiredExports(ctx, bt.store, s.ttl)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		agg.Examined += rep.Examined
+		agg.Collected += rep.Collected
+		agg.Errors += rep.Errors
+		return true
+	})
+	return agg, firstErr
+}
+
 // SamplerFor returns the usage sampler for a tenant, or nil if the tenant's
 // store has not been opened yet or sampling is disabled. It does not force an
 // open: usage for an unopened tenant is zero by definition.
-func (m *blobManager) SamplerFor(tenantID uint16) *blob.UsageSampler {
+func (m *blobManager) SamplerFor(tenantID tenant.TenantID) *blob.UsageSampler {
 	if v, ok := m.entries.Load(tenantID); ok {
 		return v.(*blobTenant).sampler
 	}

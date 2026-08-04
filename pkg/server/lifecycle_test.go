@@ -196,16 +196,35 @@ func TestServerLifecycle_StartAndShutdown(t *testing.T) {
 	}
 }
 
-// TestServerLifecycle_ShutdownWithNilHTTPServer verifies that Shutdown is
-// safe when Start has never been called (httpServer is nil).
+// TestServerLifecycle_ShutdownWithNilHTTPServer verifies Shutdown()'s
+// behaviour when Start has never been called (httpServer is nil).
+//
+// T-140 changed what "safe" means here. Before the fix, Shutdown() read
+// httpServer/metricsServer/s3Server immediately, saw them nil, and
+// returned nil — which looks safe (no panic, no error) but is exactly
+// the silent-shutdown-lost failure mode T-140 describes: a caller who
+// raced Start() and Shutdown() had no way to distinguish "shut down
+// successfully" from "Start() hadn't gotten around to setting anything
+// up yet, so there was nothing to shut down." After the fix, Shutdown()
+// waits on Start()'s own readiness signal, bounded by the caller's own
+// context — so calling Shutdown() when Start() is never going to run
+// now correctly times out and returns that context's error, rather than
+// silently succeeding at nothing. "Safe" now means "does what the
+// caller asked, or says clearly why it couldn't" — not just "doesn't
+// crash." See TestServer_Shutdown_BeforeStart for the same guarantee
+// pinned with a tighter timeout.
 func TestServerLifecycle_ShutdownWithNilHTTPServer(t *testing.T) {
 	srv, cleanup := newLifecycleServer(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		t.Errorf("Shutdown (nil httpServer): %v", err)
+	err := srv.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("Shutdown (Start never called): want a context-deadline error, got nil")
+	}
+	if err != context.DeadlineExceeded {
+		t.Errorf("Shutdown (Start never called): want context.DeadlineExceeded, got %v", err)
 	}
 }
 
@@ -612,4 +631,73 @@ func TestServerSetGraphQueryCacheTTL(t *testing.T) {
 	srv.SetGraphQueryCacheTTL(120)
 	srv.SetGraphQueryCacheTTL(0)
 	srv.SetGraphQueryCacheTTL(-1)
+}
+
+// ---------------------------------------------------------------------------
+// T-140: Start()/Shutdown() concurrency
+// ---------------------------------------------------------------------------
+
+// TestServer_StartShutdown_NoSleepRace proves T-140's fix by construction:
+// call Shutdown() the instant Start() is launched, with no delay of any
+// kind -- the tightest possible race window, deliberately tighter than
+// TestServerMetricsHost_Branches's own 100ms sleep (which happened to make
+// the pre-fix race hard to hit in practice, even though -race correctly
+// flagged it as present regardless of timing). Before T-140's fix this
+// reliably raced under -race and could, depending on scheduling, also
+// silently no-op the shutdown (Shutdown() reading httpServer/metricsServer/
+// s3Server before Start() had assigned them). After the fix, Shutdown()
+// waits on Start()'s own readiness signal before touching any of the
+// three fields, so the race and the silent-no-op possibility are both
+// gone -- proven here by construction, not by making the race merely less
+// likely to be observed.
+func TestServer_StartShutdown_NoSleepRace(t *testing.T) {
+	srv, cleanup := newLifecycleServer(t)
+	defer cleanup()
+
+	startErr := make(chan error, 1)
+	go func() {
+		err := srv.Start()
+		if err != nil && err != http.ErrServerClosed {
+			startErr <- err
+			return
+		}
+		startErr <- nil
+	}()
+
+	// No sleep, no delay of any kind: Shutdown() races Start()'s own
+	// setup on purpose.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start() never returned after Shutdown() -- shutdown was lost")
+	}
+}
+
+// TestServer_Shutdown_BeforeStart proves Shutdown() called before Start()
+// has ever run does not hang forever and does not panic -- it should
+// respect the caller's own context deadline and return promptly, per
+// startReady's own doc comment in server.go.
+func TestServer_Shutdown_BeforeStart(t *testing.T) {
+	srv, cleanup := newLifecycleServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := srv.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("Shutdown before Start: want a context-deadline error, got nil")
+	}
+	if err != context.DeadlineExceeded {
+		t.Fatalf("Shutdown before Start: want context.DeadlineExceeded, got %v", err)
+	}
 }

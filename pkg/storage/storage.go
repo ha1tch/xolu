@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 var (
@@ -37,7 +39,7 @@ type StoreConfig struct {
 	DBPath          string // resolved SQLite database file path (derived from BaseDir by the caller)
 	FullTextEnabled bool   // controls FTS indexing in backend
 	GraphEnabled    bool   // controls graph edge table maintenance
-	TenantID        uint16 // 0 = no tenant scoping
+	TenantID        tenant.TenantID // 0 = no tenant scoping
 
 	// Performance tuning (SQLite-specific; zero = use defaults)
 	SQLiteCacheSize           int // Page cache size in KB
@@ -411,7 +413,7 @@ type EdgeLister interface {
 // Backends that do not implement this interface fall back to scanning only
 // tenant 0 via a direct ScanGraphEdges call.
 type TenantIDLister interface {
-	GraphTenantIDs(ctx context.Context) ([]uint16, error)
+	GraphTenantIDs(ctx context.Context) ([]tenant.TenantID, error)
 }
 
 // GraphEdgeScanner is an optional interface for storage backends that can
@@ -429,7 +431,7 @@ type TenantIDLister interface {
 // tenant tables in a single call; the current SQLite implementation scans one
 // tenant at a time, matching the existing startup scope.
 type GraphEdgeScanner interface {
-	ScanGraphEdges(ctx context.Context, tenantID uint16, fn func(GraphEdge) error) error
+	ScanGraphEdges(ctx context.Context, tenantID tenant.TenantID, fn func(GraphEdge) error) error
 }
 
 // WriterDBProvider gives access to the underlying write connection pool.
@@ -444,7 +446,7 @@ type WriterDBProvider interface {
 // POST /fsm/machine/{id}/walk through the same code path as the
 // commit-embedded walk, without depending on the concrete store type.
 type FsmWalker interface {
-	FsmWalkInTx(ctx context.Context, tx *sql.Tx, tenantID uint16,
+	FsmWalkInTx(ctx context.Context, tx *sql.Tx, tenantID tenant.TenantID,
 		machineID int64, input string, payload map[string]interface{},
 		queryBindings map[string]interface{}) (*FsmWalkResult, error)
 }

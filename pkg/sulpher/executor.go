@@ -7,7 +7,6 @@ package sulpher
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/ha1tch/xolu/pkg/qs"
 	"strconv"
 	"strings"
@@ -549,7 +548,14 @@ func compareNumeric(value interface{}, op Operator, expected interface{}) bool {
 }
 
 func parseFloat(s string) (float64, error) {
-	var f float64
-	_, err := fmt.Sscanf(s, "%f", &f)
-	return f, err
+	// strconv.ParseFloat, not fmt.Sscanf: Sscanf's "%f" verb matches a
+	// leading numeric prefix and reports success with unconsumed
+	// trailing characters -- a timestamp-shaped string like
+	// "2026-08-03T02:04:33Z" would silently parse as the bare number
+	// 2026, making every value from the same year compare as equal in
+	// Lt/Gt/Lte/Gte filtering (the same class of bug fixed in
+	// pkg/oql/aggregator.go's toFloatSafe/toFloat and
+	// pkg/qs/aggregate.go's toNumeric). ParseFloat requires the whole
+	// string to be a valid float.
+	return strconv.ParseFloat(s, 64)
 }

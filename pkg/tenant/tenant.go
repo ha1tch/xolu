@@ -19,32 +19,206 @@ import (
 	"sync"
 )
 
-// ---------------------------------------------------------------------------
-// Node ID and cache key helpers
-// ---------------------------------------------------------------------------
+// TenantID is the canonical, sole representation of a tenant's
+// server-local identity. Every tenant-scoped string anywhere in this
+// codebase (table names, directory names, cache keys, node-ID
+// prefixes) must derive from a TenantID value via this type's own
+// methods — never from a bare uint16 formatted by hand. That is the
+// actual invariant this type exists to make impossible to violate by
+// construction: found 2026-07-28 when a dxp integration test needed
+// one tenant identifier comparable across bal, fsm, and entity, and
+// discovered five independent places across the tree had each
+// separately reimplemented the same "%04X" hex encoding — a bug class
+// a bare uint16 can never prevent, because the compiler has no way to
+// distinguish "a tenant ID" from any other uint16 in the program.
+//
+// Deliberately NOT the wider federation address a future nolu project
+// would need to route data between servers (docs/NOLU_EVENTS.md's
+// LocalRef already answers "which server" with InstanceURL, a string
+// — not a numeric composition of this type). TenantID is only ever
+// "which tenant on THIS server," unchanged in width or meaning
+// regardless of what federation scheme, if any, eventually wraps it.
+// That boundary is deliberate, not an oversight: xolu's own local
+// addressing shouldn't have to anticipate a design nolu itself owns.
+type TenantID uint16
 
-// NodeID returns a graph node identifier scoped to a tenant.
-// For tenant 0 (unscoped): "entity:id"
-// For non-zero tenants:    "XXXX@entity:id"
-func NodeID(tenantID uint16, entity string, id int) string {
-	if tenantID == 0 {
-		return fmt.Sprintf("%s:%d", entity, id)
-	}
-	return fmt.Sprintf("%04X@%s:%d", tenantID, entity, id)
+// String is the canonical bare tenant-ID string: 4-digit uppercase
+// hex, no decoration. Every other method on this type adds its own
+// prefix/suffix for a specific naming purpose (TablePrefix adds "t"
+// and "_" for SQL table names; GraphNodePrefix adds a trailing "@" for
+// node-ID namespacing) — this is the undecorated form underneath all
+// of them, for contexts that need a tenant represented as an opaque,
+// cross-primitive-comparable string with no naming convention baked
+// in (dxp.Cache tenant keys are the motivating case).
+func (t TenantID) String() string {
+	return fmt.Sprintf("%04X", uint16(t))
 }
 
-// GraphNodePrefix returns the XXXX@ prefix used to namespace graph node IDs
-// in a shared in-memory graph that spans multiple tenants.
-// For tenant 0 (unscoped): "" (no prefix; node IDs are bare "entity:id")
-// For non-zero tenants:    "XXXX@" (e.g. "0001@")
-//
-// Uses uppercase hex. NodeIDPrefix is the corresponding parser; both must
-// agree on case. If this format ever changes, NodeIDPrefix must be updated.
-func GraphNodePrefix(tenantID uint16) string {
-	if tenantID == 0 {
+// IsZero reports whether t is the reserved unscoped/default tenant.
+func (t TenantID) IsZero() bool { return t == 0 }
+
+func (t TenantID) tablePrefix() string { return "t" + t.String() }
+
+// TablePrefix is the per-tenant table-name prefix WITH the trailing
+// underscore ("t0000_"), for primitives that own their own table
+// families (bal).
+func (t TenantID) TablePrefix() string { return t.tablePrefix() + "_" }
+
+// DirName returns the bare per-tenant directory name ("t0000", no
+// trailing underscore — directories don't need TablePrefix's SQL
+// separator).
+func (t TenantID) DirName() string { return t.tablePrefix() }
+
+// GraphNodePrefix returns the XXXX@ prefix used to namespace graph
+// node IDs in a shared in-memory graph spanning multiple tenants.
+// Tenant 0 (unscoped): "" — no prefix; node IDs are bare "entity:id".
+// Non-zero tenants: "XXXX@" (e.g. "0001@").
+func (t TenantID) GraphNodePrefix() string {
+	if t.IsZero() {
 		return ""
 	}
-	return fmt.Sprintf("%04X@", tenantID)
+	return t.String() + "@"
+}
+
+// StorageDirSegment returns the directory name for tenant-scoped file
+// storage (timeseries data, JSON file store). Tenant 0 (unscoped): ""
+// — data lives directly in the base directory. Non-zero: "tXXXX".
+func (t TenantID) StorageDirSegment() string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.tablePrefix()
+}
+
+// ScopeKey prepends this tenant's hex ID to an arbitrary cache or
+// lookup key, producing "XXXX:key" (or the bare key, unscoped, for
+// tenant 0).
+func (t TenantID) ScopeKey(key string) string {
+	if t.IsZero() {
+		return key
+	}
+	return t.String() + ":" + key
+}
+
+// NodeID returns a graph node identifier scoped to this tenant.
+// Tenant 0: "entity:id". Non-zero: "XXXX@entity:id".
+func (t TenantID) NodeID(entity string, id int) string {
+	return t.GraphNodePrefix() + fmt.Sprintf("%s:%d", entity, id)
+}
+
+// CacheKey returns a cache key scoped to this tenant.
+func (t TenantID) CacheKey(entity string, id int) string {
+	return t.ScopeKey(fmt.Sprintf("%s:%d", entity, id))
+}
+
+// CachePattern returns a cache-invalidation pattern scoped to this tenant.
+func (t TenantID) CachePattern(entity string) string {
+	return t.ScopeKey(entity + ":*")
+}
+
+// CacheTenantPattern returns a pattern matching every key for this tenant.
+func (t TenantID) CacheTenantPattern() string {
+	if t.IsZero() {
+		return "*"
+	}
+	return t.String() + ":*"
+}
+
+// CacheListPattern returns a pattern matching only list cache keys for
+// an entity type, scoped to this tenant.
+func (t TenantID) CacheListPattern(entity string) string {
+	return t.ScopeKey(entity + ":list:*")
+}
+
+// GraphTableName returns the topology table name for this tenant.
+// Example: t0001_graph
+func (t TenantID) GraphTableName() string { return t.tablePrefix() + "_graph" }
+
+// GraphEdgesTableName is the legacy name for GraphTableName.
+// Deprecated: use GraphTableName. Retained for real production callers
+// (pkg/server, pkg/storage) as well as the migration command.
+func (t TenantID) GraphEdgesTableName() string { return t.GraphTableName() }
+
+// NodesTableName returns the blob node store table name for this tenant.
+// Example: t0001_nodes
+func (t TenantID) NodesTableName() string { return t.tablePrefix() + "_nodes" }
+
+// NodeSeqTableName returns the node ID sequence table name for this tenant.
+// Example: t0001_nseq
+func (t TenantID) NodeSeqTableName() string { return t.tablePrefix() + "_nseq" }
+
+// NodeFTSTableName returns the node full-text search table name for this tenant.
+// Example: t0001_nfts
+func (t TenantID) NodeFTSTableName() string { return t.tablePrefix() + "_nfts" }
+
+// EdgePropsTableName returns the blob edge property table name for this tenant.
+// Example: t0001_edges
+func (t TenantID) EdgePropsTableName() string { return t.tablePrefix() + "_edges" }
+
+// EdgeSeqTableName returns the edge ID sequence table name for this tenant.
+// Example: t0001_eseq
+func (t TenantID) EdgeSeqTableName() string { return t.tablePrefix() + "_eseq" }
+
+// NodeSchemaTableName returns the node schema registry table name for this tenant.
+// Example: t0001_n_sch
+func (t TenantID) NodeSchemaTableName() string { return t.tablePrefix() + "_n_sch" }
+
+// EdgeSchemaTableName returns the edge schema registry table name for this tenant.
+// Example: t0001_e_sch
+func (t TenantID) EdgeSchemaTableName() string { return t.tablePrefix() + "_e_sch" }
+
+// EdgeFTSTableName returns the edge full-text search table name for this tenant.
+// Example: t0001_efts
+func (t TenantID) EdgeFTSTableName() string { return t.tablePrefix() + "_efts" }
+
+// AdaptedNodeTableName returns the adapted native-column table name
+// for a schema-registered node entity type on this tenant.
+// Example: t0001_ndata_user
+func (t TenantID) AdaptedNodeTableName(entityType string) string {
+	return t.tablePrefix() + "_ndata_" + entityType
+}
+
+// AdaptedEdgeTableName returns the adapted native-column table name
+// for a schema-registered edge label on this tenant.
+// Example: t0001_edata_KNOWS
+func (t TenantID) AdaptedEdgeTableName(relType string) string {
+	return t.tablePrefix() + "_edata_" + relType
+}
+
+// NodesIndexEntityType returns the index name for entity_type lookups.
+func (t TenantID) NodesIndexEntityType() string { return "idx_" + t.NodesTableName() + "_etype" }
+
+// NodesIndexUpdatedAt returns the index name for updated_at ordering.
+func (t TenantID) NodesIndexUpdatedAt() string { return "idx_" + t.NodesTableName() + "_updated" }
+
+// NodeSeqIndexEntityType returns the index name on the node sequence table.
+func (t TenantID) NodeSeqIndexEntityType() string { return "idx_" + t.NodeSeqTableName() + "_etype" }
+
+// EdgeSeqIndexRelType returns the index name on the edge sequence table.
+func (t TenantID) EdgeSeqIndexRelType() string { return "idx_" + t.EdgeSeqTableName() + "_rel" }
+
+// GraphIndexSource returns the index name for source-side graph lookups.
+func (t TenantID) GraphIndexSource() string { return "idx_" + t.GraphTableName() + "_src" }
+
+// GraphIndexTarget returns the index name for target-side graph lookups.
+func (t TenantID) GraphIndexTarget() string { return "idx_" + t.GraphTableName() + "_tgt" }
+
+// GraphIndexRel returns the index name for relationship_name lookups.
+func (t TenantID) GraphIndexRel() string { return "idx_" + t.GraphTableName() + "_rel" }
+
+// AdaptedNodeIndexTenant returns the tenant index name on an adapted node table.
+func (t TenantID) AdaptedNodeIndexTenant(entityType string) string {
+	return "idx_" + t.AdaptedNodeTableName(entityType) + "_tenant"
+}
+
+// AdaptedNodeIndexField returns a field index name on an adapted node table.
+func (t TenantID) AdaptedNodeIndexField(entityType, field string) string {
+	return "idx_" + t.AdaptedNodeTableName(entityType) + "_" + field
+}
+
+// AdaptedEdgeIndexField returns a field index name on an adapted edge table.
+func (t TenantID) AdaptedEdgeIndexField(relType, field string) string {
+	return "idx_" + t.AdaptedEdgeTableName(relType) + "_" + field
 }
 
 // NodeIDPrefix extracts the XXXX@ tenant prefix from a graph node ID,
@@ -77,34 +251,6 @@ func NodeIDStripped(nodeID string) string {
 	return nodeID
 }
 
-// StorageDirSegment returns the directory name used for tenant-scoped file
-// storage (timeseries data, JSON file store). The segment is intended to be
-// joined with a base directory using filepath.Join.
-// For tenant 0 (unscoped): "" (data lives directly in the base directory)
-// For non-zero tenants:    "tXXXX" (e.g. "t0001")
-//
-// Uses uppercase hex, consistent with GraphNodePrefix.
-func StorageDirSegment(tenantID uint16) string {
-	if tenantID == 0 {
-		return ""
-	}
-	return fmt.Sprintf("t%04X", tenantID)
-}
-
-// ScopeKey prepends the tenant's hex ID to an arbitrary cache or lookup key,
-// producing a tenant-scoped key of the form "XXXX:key".
-// For tenant 0 (unscoped): the key is returned unchanged.
-// For non-zero tenants:    "XXXX:key" (e.g. "0001:post:list:1:10")
-//
-// This is the generic scoping primitive; use CacheKey, CachePattern, etc.
-// for the specialised cache key formats.
-func ScopeKey(tenantID uint16, key string) string {
-	if tenantID == 0 {
-		return key
-	}
-	return fmt.Sprintf("%04X:%s", tenantID, key)
-}
-
 // ---------------------------------------------------------------------------
 // SQLite table naming — per-tenant table family
 // ---------------------------------------------------------------------------
@@ -129,180 +275,6 @@ func ScopeKey(tenantID uint16, key string) string {
 // Tenant 0 (unscoped) uses the same naming: t0000_nodes, t0000_graph, etc.
 // This keeps all storage tables in one namespace regardless of mode.
 
-func tablePrefix(tenantID uint16) string {
-	return fmt.Sprintf("t%04X", tenantID)
-}
-
-// TablePrefix is the exported per-tenant table-name prefix WITH the
-// trailing underscore ("t0000_"), for primitives that own their own
-// table families (bal). Uses the same encoding as every other tenant
-// table name.
-func TablePrefix(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_"
-}
-
-// GraphTableName returns the topology table name for a tenant.
-// Stores directed edges as (source_entity, source_id, target_entity, target_id,
-// relationship_name, edge_id).
-// Example: t0001_graph
-func GraphTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_graph"
-}
-
-// GraphEdgesTableName is the legacy name for GraphTableName.
-// Deprecated: use GraphTableName. Retained for the migration command only.
-func GraphEdgesTableName(tenantID uint16) string {
-	return GraphTableName(tenantID)
-}
-
-// NodesTableName returns the blob node store table name for a tenant.
-// Replaces the global shared-mode `entities` table.
-// Example: t0001_nodes
-func NodesTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_nodes"
-}
-
-// NodeSeqTableName returns the node ID sequence table name for a tenant.
-// Replaces the global shared-mode `entity_sequences` table.
-// Example: t0001_nseq
-func NodeSeqTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_nseq"
-}
-
-// NodeFTSTableName returns the node full-text search virtual table name for a tenant.
-// Replaces the global shared-mode `entities_fts` virtual table.
-// Example: t0001_nfts
-func NodeFTSTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_nfts"
-}
-
-// EdgePropsTableName returns the blob edge property store table name for a tenant.
-// Stores JSON property blobs for edges whose label has no registered schema.
-// Example: t0001_edges
-func EdgePropsTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_edges"
-}
-
-// EdgeSeqTableName returns the edge ID sequence table name for a tenant.
-// Provides explicit control over surrogate edge ID assignment, consistent
-// with NodeSeqTableName. One row per relationship label per tenant.
-// Example: t0001_eseq
-func EdgeSeqTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_eseq"
-}
-
-// NodeSchemaTableName returns the node schema registry table name for a tenant.
-// Stores both the raw JSON schema and the derived adapted-table column spec.
-// Replaces the global `schemas` and `adapted_table_schemas` tables.
-// Example: t0001_n_sch
-func NodeSchemaTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_n_sch"
-}
-
-// EdgeSchemaTableName returns the edge schema registry table name for a tenant.
-// Stores the raw JSON schema, derived column spec, and warning-suppression flag
-// for each relationship label.
-// Example: t0001_e_sch
-func EdgeSchemaTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_e_sch"
-}
-
-// AdaptedNodeTableName returns the adapted native-column table name for a
-// schema-registered node entity type.
-// Example: t0001_ndata_user, t0001_ndata_user_profile
-func AdaptedNodeTableName(tenantID uint16, entityType string) string {
-	return tablePrefix(tenantID) + "_ndata_" + entityType
-}
-
-// AdaptedEdgeTableName returns the adapted native-column table name for a
-// schema-registered edge label.
-// Example: t0001_edata_KNOWS, t0001_edata_MEMBER_OF
-func AdaptedEdgeTableName(tenantID uint16, relType string) string {
-	return tablePrefix(tenantID) + "_edata_" + relType
-}
-
-// ---------------------------------------------------------------------------
-// Index naming — per-tenant indexes on per-tenant tables
-// ---------------------------------------------------------------------------
-//
-// SQLite index names are global within a database file. In shared-file mode
-// where t0000_nodes and t0001_nodes coexist, every index must encode both
-// the table name (which already encodes the tenant) to avoid collisions.
-// The convention is: idx_<tableName>_<purpose>
-//
-// These functions derive index names from the table name functions above,
-// so the index naming is always consistent with the table naming.
-
-// NodesIndexEntityType returns the index name for entity_type lookups on t<X>_nodes.
-// Example: idx_t0001_nodes_etype
-func NodesIndexEntityType(tenantID uint16) string {
-	return "idx_" + NodesTableName(tenantID) + "_etype"
-}
-
-// NodesIndexUpdatedAt returns the index name for updated_at ordering on t<X>_nodes.
-// Example: idx_t0001_nodes_updated
-func NodesIndexUpdatedAt(tenantID uint16) string {
-	return "idx_" + NodesTableName(tenantID) + "_updated"
-}
-
-// NodeSeqIndexEntityType returns the index on t<X>_nseq (the PK already covers this,
-// but an explicit name is needed for migration assertions).
-// Example: idx_t0001_nseq_etype
-func NodeSeqIndexEntityType(tenantID uint16) string {
-	return "idx_" + NodeSeqTableName(tenantID) + "_etype"
-}
-
-// EdgeSeqIndexRelType returns the index on t<X>_eseq.
-// Example: idx_t0001_eseq_rel
-func EdgeSeqIndexRelType(tenantID uint16) string {
-	return "idx_" + EdgeSeqTableName(tenantID) + "_rel"
-}
-
-// GraphIndexSource returns the index name for source-side lookups on t<X>_graph.
-// Example: idx_t0001_graph_src
-func GraphIndexSource(tenantID uint16) string {
-	return "idx_" + GraphTableName(tenantID) + "_src"
-}
-
-// GraphIndexTarget returns the index name for target-side lookups on t<X>_graph.
-// Example: idx_t0001_graph_tgt
-func GraphIndexTarget(tenantID uint16) string {
-	return "idx_" + GraphTableName(tenantID) + "_tgt"
-}
-
-// GraphIndexRel returns the index name for relationship_name lookups on t<X>_graph.
-// Example: idx_t0001_graph_rel
-func GraphIndexRel(tenantID uint16) string {
-	return "idx_" + GraphTableName(tenantID) + "_rel"
-}
-
-// AdaptedNodeIndexTenant returns the tenant index name on an adapted node table.
-// Example: idx_t0001_ndata_user_tenant
-func AdaptedNodeIndexTenant(tenantID uint16, entityType string) string {
-	return "idx_" + AdaptedNodeTableName(tenantID, entityType) + "_tenant"
-}
-
-// AdaptedNodeIndexField returns a field index name on an adapted node table.
-// Example: idx_t0001_ndata_user_email
-func AdaptedNodeIndexField(tenantID uint16, entityType, field string) string {
-	return "idx_" + AdaptedNodeTableName(tenantID, entityType) + "_" + field
-}
-
-// AdaptedEdgeIndexField returns a field index name on an adapted edge table.
-// Example: idx_t0001_edata_KNOWS_since
-func AdaptedEdgeIndexField(tenantID uint16, relType, field string) string {
-	return "idx_" + AdaptedEdgeTableName(tenantID, relType) + "_" + field
-}
-
-// EdgeFTSTableName returns the edge full-text search virtual table name for
-// a tenant. Used when edge properties carry free-text content that needs
-// full-text search — e.g. a contract document on a MARRIED_TO relationship,
-// a clinical note on a TREATS relationship, or a lease agreement on LEASES.
-// Example: t0001_efts
-func EdgeFTSTableName(tenantID uint16) string {
-	return tablePrefix(tenantID) + "_efts"
-}
-
 // ---------------------------------------------------------------------------
 // Global (non-tenant-scoped) table names
 // ---------------------------------------------------------------------------
@@ -319,48 +291,6 @@ const (
 	SchemaVersionTable = "schema_version"
 )
 
-// CacheKey returns a cache key scoped to a tenant.
-// For tenant 0 (unscoped): "entity:id"
-// For non-zero tenants:    "XXXX:entity:id"
-func CacheKey(tenantID uint16, entity string, id int) string {
-	if tenantID == 0 {
-		return fmt.Sprintf("%s:%d", entity, id)
-	}
-	return fmt.Sprintf("%04X:%s:%d", tenantID, entity, id)
-}
-
-// CachePattern returns a pattern for cache invalidation scoped to a tenant.
-// For tenant 0 (unscoped): "entity:*"
-// For non-zero tenants:    "XXXX:entity:*"
-func CachePattern(tenantID uint16, entity string) string {
-	if tenantID == 0 {
-		return fmt.Sprintf("%s:*", entity)
-	}
-	return fmt.Sprintf("%04X:%s:*", tenantID, entity)
-}
-
-// CacheTenantPattern returns a pattern matching all keys for a tenant.
-// For tenant 0: "*" (everything)
-// For non-zero: "XXXX:*"
-func CacheTenantPattern(tenantID uint16) string {
-	if tenantID == 0 {
-		return "*"
-	}
-	return fmt.Sprintf("%04X:*", tenantID)
-}
-
-// CacheListPattern returns a pattern matching only list cache keys for an
-// entity type, scoped to a tenant. This leaves individual GET cache entries
-// intact, improving cache hit rate when a single entity is modified.
-// For tenant 0 (unscoped): "entity:list:*"
-// For non-zero tenants:    "XXXX:entity:list:*"
-func CacheListPattern(tenantID uint16, entity string) string {
-	if tenantID == 0 {
-		return fmt.Sprintf("%s:list:*", entity)
-	}
-	return fmt.Sprintf("%04X:%s:list:*", tenantID, entity)
-}
-
 // ---------------------------------------------------------------------------
 // Persistence interface
 // ---------------------------------------------------------------------------
@@ -369,24 +299,26 @@ func CacheListPattern(tenantID uint16, entity string) string {
 // Implementations must be safe for concurrent use.
 type Persister interface {
 	// LoadAll returns all persisted tenant mappings.
-	LoadAll(ctx context.Context) (map[string]uint16, error)
+	LoadAll(ctx context.Context) (map[string]TenantID, error)
 	// Save persists a single tenant mapping. It must be idempotent:
 	// saving an already-persisted (name, id) pair is not an error.
-	Save(ctx context.Context, name string, id uint16) error
+	Save(ctx context.Context, name string, id TenantID) error
 }
 
 // ---------------------------------------------------------------------------
 // Tenant registry
 // ---------------------------------------------------------------------------
 
-// Registry maps human-readable tenant names (e.g. "acme") to uint16 IDs.
+// Registry maps human-readable tenant names (e.g. "acme") to TenantID
+// values — the sole store of tenant identity assignment, and thus the
+// sole place new TenantID values are minted.
 // It is safe for concurrent use. When a Persister is attached, all mutations
 // are durably stored, ensuring stable name-to-ID mappings across restarts.
 type Registry struct {
 	mu        sync.RWMutex
-	byName    map[string]uint16
-	byID      map[uint16]string
-	nextAuto  uint16 // for auto-assignment; starts at 1
+	byName    map[string]TenantID
+	byID      map[TenantID]string
+	nextAuto  TenantID // for auto-assignment; starts at 1
 	persister Persister
 }
 
@@ -395,8 +327,8 @@ type Registry struct {
 // attach durable storage.
 func NewRegistry() *Registry {
 	return &Registry{
-		byName:   make(map[string]uint16),
-		byID:     make(map[uint16]string),
+		byName:   make(map[string]TenantID),
+		byID:     make(map[TenantID]string),
 		nextAuto: 1,
 	}
 }
@@ -427,7 +359,7 @@ func (r *Registry) LoadFrom(ctx context.Context) error {
 	}
 
 	for name, id := range mappings {
-		if id == 0 {
+		if id.IsZero() {
 			continue // skip reserved ID
 		}
 		if existing, ok := r.byName[name]; ok && existing != id {
@@ -449,8 +381,8 @@ func (r *Registry) LoadFrom(ctx context.Context) error {
 // Register adds a tenant with an explicit ID.
 // Returns an error if the name or ID is already registered.
 // If a persister is attached, the mapping is durably stored.
-func (r *Registry) Register(ctx context.Context, name string, id uint16) error {
-	if id == 0 {
+func (r *Registry) Register(ctx context.Context, name string, id TenantID) error {
+	if id.IsZero() {
 		return fmt.Errorf("tenant ID 0 is reserved for unscoped operation")
 	}
 	if name == "" {
@@ -495,7 +427,7 @@ func (r *Registry) Register(ctx context.Context, name string, id uint16) error {
 }
 
 // Lookup returns the tenant ID for a name, or 0 and false if not found.
-func (r *Registry) Lookup(name string) (uint16, bool) {
+func (r *Registry) Lookup(name string) (TenantID, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	id, ok := r.byName[name]
@@ -506,7 +438,7 @@ func (r *Registry) Lookup(name string) (uint16, bool) {
 // the next available ID if the name is not yet known. This is intended for
 // non-strict tenant modes where tenants are created on first access.
 // If a persister is attached, new mappings are durably stored.
-func (r *Registry) GetOrRegister(ctx context.Context, name string) (uint16, error) {
+func (r *Registry) GetOrRegister(ctx context.Context, name string) (TenantID, error) {
 	// Fast path: read lock
 	r.mu.RLock()
 	if id, ok := r.byName[name]; ok {
@@ -534,7 +466,7 @@ func (r *Registry) GetOrRegister(ctx context.Context, name string) (uint16, erro
 	}
 
 	id := r.nextAuto
-	if id == 0 {
+	if id.IsZero() {
 		id = 1 // skip reserved 0
 	}
 	// Skip past IDs that were explicitly registered via Register().
@@ -566,7 +498,7 @@ func (r *Registry) GetOrRegister(ctx context.Context, name string) (uint16, erro
 }
 
 // Name returns the tenant name for an ID, or "" and false if not found.
-func (r *Registry) Name(id uint16) (string, bool) {
+func (r *Registry) Name(id TenantID) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	name, ok := r.byID[id]
@@ -574,11 +506,11 @@ func (r *Registry) Name(id uint16) (string, bool) {
 }
 
 // List returns all registered tenant name-ID pairs.
-func (r *Registry) List() map[string]uint16 {
+func (r *Registry) List() map[string]TenantID {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	result := make(map[string]uint16, len(r.byName))
+	result := make(map[string]TenantID, len(r.byName))
 	for k, v := range r.byName {
 		result[k] = v
 	}

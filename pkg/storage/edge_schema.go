@@ -25,8 +25,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-
-	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // warnOnceEdge fires a WARN log for an unregistered edge label the first
@@ -85,7 +83,7 @@ func (s *SQLiteStore) RegisterEdgeSchema(ctx context.Context, rel string, schema
 		return fmt.Errorf("RegisterEdgeSchema %q: marshal schema: %w", rel, err)
 	}
 
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 
 	_, err = s.db.ExecContext(ctx,
 		"INSERT INTO "+esch+" (rel, schema_hash, schema_json) VALUES (?, ?, ?)"+
@@ -115,7 +113,7 @@ func (s *SQLiteStore) IsEdgeSchemaRegistered(ctx context.Context, rel string) (b
 	if !s.config.GraphEnabled {
 		return false, nil
 	}
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 	var n int
 	err := s.readDB.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM "+esch+" WHERE rel = ?", rel,
@@ -130,7 +128,7 @@ func (s *SQLiteStore) IsEdgeSchemaRegistered(ctx context.Context, rel string) (b
 // store startup and pre-suppresses their warnings. This ensures that a label
 // registered before a restart does not warn on first use after restart.
 func (s *SQLiteStore) loadEdgeSchemaSuppressions(ctx context.Context, db *sql.DB) error {
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 
 	// Table may not exist yet for databases created before Stage 6.
 	var tableExists int

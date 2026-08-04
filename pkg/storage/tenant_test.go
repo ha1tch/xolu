@@ -19,7 +19,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // newTenantSQLiteStore creates a SQLiteStore scoped to a tenant for testing.
-func newTenantSQLiteStore(t *testing.T, dbPath string, tenantID uint16, graph, fts bool) *SQLiteStore {
+func newTenantSQLiteStore(t *testing.T, dbPath string, tenantID tenant.TenantID, graph, fts bool) *SQLiteStore {
 	t.Helper()
 	store, err := NewSQLiteStore(dbPath, SQLiteConfig{
 		DBPath:            dbPath,
@@ -253,9 +253,9 @@ func TestSQLiteTenantIsolation_GraphEdges(t *testing.T) {
 	// Verify per-tenant graph tables exist
 	var tableA, tableB string
 	storeA.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-		tenant.GraphEdgesTableName(0x0001)).Scan(&tableA)
+		tenant.TenantID(0x0001).GraphEdgesTableName()).Scan(&tableA)
 	storeB.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-		tenant.GraphEdgesTableName(0x0002)).Scan(&tableB)
+		tenant.TenantID(0x0002).GraphEdgesTableName()).Scan(&tableB)
 
 	if tableA == "" {
 		t.Error("tenant A graph edge table not created")
@@ -402,7 +402,7 @@ func TestSQLiteTenantZero_BackwardCompatible(t *testing.T) {
 
 func TestGraphEdgesTable(t *testing.T) {
 	tests := []struct {
-		tenantID uint16
+		tenantID tenant.TenantID
 		want     string
 	}{
 		{0, "t0000_graph"},
@@ -412,7 +412,7 @@ func TestGraphEdgesTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("tenant_%04X", tt.tenantID), func(t *testing.T) {
-			got := tenant.GraphEdgesTableName(tt.tenantID)
+			got := tt.tenantID.GraphEdgesTableName()
 			if got != tt.want {
 				t.Errorf("tenant.GraphEdgesTableName(%d) = %q, want %q", tt.tenantID, got, tt.want)
 			}
@@ -433,7 +433,7 @@ func TestSQLiteTenantIsolation_ManyTenants(t *testing.T) {
 
 	stores := make([]*SQLiteStore, numTenants)
 	for i := 0; i < numTenants; i++ {
-		stores[i] = newTenantSQLiteStore(t, dbPath, uint16(i+1), false, false)
+		stores[i] = newTenantSQLiteStore(t, dbPath, tenant.TenantID(i+1), false, false)
 		defer stores[i].Close()
 	}
 
@@ -478,7 +478,7 @@ func TestSQLiteTenantIsolation_ManyTenants(t *testing.T) {
 	var total int
 	for i := 0; i < numTenants; i++ {
 		var n int
-		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(uint16(i+1)) + " WHERE entity_type = 'data'").Scan(&n)
+		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.TenantID(i+1).NodesTableName() + " WHERE entity_type = 'data'").Scan(&n)
 		total += n
 	}
 	if total != numTenants*recordsPerTenant {

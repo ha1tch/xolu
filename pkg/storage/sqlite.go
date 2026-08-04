@@ -14,10 +14,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/ha1tch/xolu/pkg/dxp"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/rs/zerolog"
@@ -49,6 +52,24 @@ type SQLiteStore struct {
 	// Reset on restart — suppression is in-memory only.
 	edgeWarnMu         sync.Mutex
 	edgeWarnSuppressed map[string]bool
+
+	// dxpClaims, when set, gives FsmWalkInTx visibility into live dxp
+	// reservations against a machine before it commits a transition
+	// (mirrors pkg/bal Store.claims; T-54, item 19s fsm half). nil is
+	// the default and preserves exact pre-dxp behaviour.
+	//
+	// atomic.Pointer, not a plain field: this SQLiteStore instance is
+	// shared across concurrent HTTP requests (unlike pkg/obj.Store,
+	// which is a fresh wrapper per request), and SetDxpClaims is
+	// called on every single dxp dispatch that includes an entity
+	// participant (dxpParticipantRegistry -> NewEntityAdapter). A
+	// plain unsynchronized field here is a genuine, confirmed data
+	// race under concurrent dispatch -- caught directly by
+	// TestObjAdversarial_EnsureSystemDxpDef_ConcurrentFirstUse's own
+	// -race run, not assumed safe because the written value is
+	// usually the same pointer across calls: Go's own memory model
+	// gives no such guarantee without explicit synchronization.
+	dxpClaims atomic.Pointer[dxp.MemCache]
 }
 
 // DB returns the underlying *sql.DB for advanced operations such as
@@ -56,6 +77,48 @@ type SQLiteStore struct {
 // respect the store's locking and schema conventions.
 func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
+}
+
+// SetDxpClaims wires this store into the dxp reservation cache (T-54,
+// item 19): once set, FsmWalkInTx refuses to advance a machine that a
+// live PESSIMISTIC dxp claim has locked mid-step ("every write path,
+// not only the coordinator, must see dxp's holds"). nil (the default)
+// is exact pre-dxp behaviour.
+func (s *SQLiteStore) SetDxpClaims(c *dxp.MemCache) { s.dxpClaims.Store(c) }
+
+// dxpEntityResource is the cache resource key for one entity row under
+// a tenant's entity participation — "entity:<type>:<id>".
+func dxpEntityResource(entity string, id int) string {
+	return "entity:" + entity + ":" + strconv.Itoa(id)
+}
+
+// checkDxpEntityHold refuses with ErrConflict if a live PESSIMISTIC dxp
+// claim already holds (entity, id) — the ordinary-write-path half of
+// item 19's entity adapter (T-54): "every write path, not only the
+// coordinator, must see dxp's holds." A no-op when no cache is wired.
+// Called by saveInner (standalone Save) and commitInner (/commit),
+// deliberately NOT by saveInTx itself: EntityAdapter.Execute calls
+// saveInTx directly to apply its own already-held claim, and gating
+// saveInTx here would make Execute refuse its own claim as a
+// conflict with itself — the same self-counting mistake bal's Execute
+// had to guard against for its own reasons. This mirrors fsm's
+// FsmWalkInTx/fsmResolveInTx split: the gate lives in the wrapper the
+// ordinary path uses, never in the core the dxp-authorised path calls
+// directly.
+func (s *SQLiteStore) checkDxpEntityHold(tenantID tenant.TenantID, entity string, id int) error {
+	claims := s.dxpClaims.Load()
+	if claims == nil {
+		return nil
+	}
+	tenantKey := tenantID.String()
+	claims.Lock(tenantKey)
+	defer claims.Unlock(tenantKey)
+	for _, c := range claims.ClaimsForLocked(tenantKey, "entity", dxpEntityResource(entity, id)) {
+		if c.Weight == dxp.Pessimistic {
+			return ErrConflict
+		}
+	}
+	return nil
 }
 
 // WriterDB implements storage.WriterDBProvider.
@@ -90,30 +153,113 @@ func (s *SQLiteStore) IsPerFileTenant() bool {
 // nodesTable returns the per-tenant blob node store table name (t<XXXX>_nodes).
 // All node CRUD methods use this rather than the hardcoded "entities" string.
 func (s *SQLiteStore) nodesTable() string {
-	return tenant.NodesTableName(s.config.TenantID)
+	return s.config.TenantID.NodesTableName()
 }
 
 // NodesTable returns the per-tenant blob node store table name (t<XXXX>_nodes).
 // Implements storage.TableNamer; used by the OQL SQL generator to build
 // correct push-down queries without hardcoding the table name.
 func (s *SQLiteStore) NodesTable() string {
-	return tenant.NodesTableName(s.config.TenantID)
+	return s.config.TenantID.NodesTableName()
 }
 
 // nodeSeqTable returns the per-tenant node ID sequence table name (t<XXXX>_nseq).
 func (s *SQLiteStore) nodeSeqTable() string {
-	return tenant.NodeSeqTableName(s.config.TenantID)
+	return s.config.TenantID.NodeSeqTableName()
 }
 
 // nodeFTSTable returns the per-tenant node FTS virtual table name (t<XXXX>_nfts).
 func (s *SQLiteStore) nodeFTSTable() string {
-	return tenant.NodeFTSTableName(s.config.TenantID)
+	return s.config.TenantID.NodeFTSTableName()
 }
 
 // AdaptedRegistry returns the store's adapted table registry.
 // Returns nil only if the store was not properly initialized.
 func (s *SQLiteStore) AdaptedRegistry() *AdaptedRegistry {
 	return s.adapted
+}
+
+// MigrateBlobEntitiesToAdapted moves every existing row of entityType
+// from blob storage (the generic nodes table) into its own adapted
+// table, preserving each row's own ID exactly -- for T-151's strict
+// promotion mode, called only after every row has already been
+// validated against the new schema by the caller (this method itself
+// does not validate; it assumes that already happened and the caller
+// is committed to migrating).
+//
+// Must be called after RegisterAdaptedEntity has already registered
+// entityType's adapted table -- returns an error immediately if it
+// hasn't (adapted.Get returns nil).
+//
+// Runs as a single transaction: every row migrates, or none do. Graph
+// edges need no attention here -- a migrated row's REF fields already
+// created their graph edges when the row was originally written (any
+// blob-storage create runs the same graph sync adapted creates do),
+// and migration changes neither the row's own ID nor its content, so
+// those edges remain correct without re-syncing.
+//
+// Not chunked/batched -- for a very large entity population this is
+// one large transaction, a known, deliberate scope limit for the
+// first version of this feature rather than an oversight; batching
+// with progress tracking is real additional work, not a small
+// follow-up.
+func (s *SQLiteStore) MigrateBlobEntitiesToAdapted(ctx context.Context, entityType string) (migrated int, err error) {
+	spec := s.adapted.Get(entityType)
+	if spec == nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: entity %q has no registered adapted table", entityType)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, data FROM "+s.nodesTable()+" WHERE entity_type = ?", entityType)
+	if err != nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: query blob rows: %w", err)
+	}
+	type blobRow struct {
+		id   int
+		data map[string]interface{}
+	}
+	var toMigrate []blobRow
+	for rows.Next() {
+		var id int
+		var dataStr string
+		if err := rows.Scan(&id, &dataStr); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: scan row: %w", err)
+		}
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: unmarshal row id=%d: %w", id, err)
+		}
+		toMigrate = append(toMigrate, blobRow{id: id, data: data})
+	}
+	rowsErr := rows.Err()
+	_ = rows.Close()
+	if rowsErr != nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: iterating blob rows: %w", rowsErr)
+	}
+
+	for _, br := range toMigrate {
+		if err := adaptedCreate(ctx, tx, spec, s.dialect, br.id, br.data); err != nil {
+			return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: insert row id=%d into %s: %w",
+				br.id, spec.TableName(), err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+s.nodesTable()+" WHERE entity_type = ?", entityType); err != nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: delete migrated blob rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("MigrateBlobEntitiesToAdapted: commit: %w", err)
+	}
+	return len(toMigrate), nil
 }
 
 // WithLogger attaches a zerolog.Logger to the store. Returns the store so it
@@ -136,11 +282,11 @@ type SQLiteConfig struct {
 	DBPath            string
 	EnableWAL         bool // Write-Ahead Logging for better concurrency
 	EnableForeignKeys bool
-	CacheSize         int    // Page cache size in KB
-	BusyTimeout       int    // Milliseconds to wait on locked database
-	FullTextEnabled   bool   // Enable FTS5 full-text search indexing
-	GraphEnabled      bool   // Enable graph edge table maintenance
-	TenantID          uint16 // 0 = no tenant scoping
+	CacheSize         int             // Page cache size in KB
+	BusyTimeout       int             // Milliseconds to wait on locked database
+	FullTextEnabled   bool            // Enable FTS5 full-text search indexing
+	GraphEnabled      bool            // Enable graph edge table maintenance
+	TenantID          tenant.TenantID // 0 = no tenant scoping
 
 	// Performance tuning (zero = use backend defaults)
 	//   SQLite defaults: MaxOpenConns=1 (WAL single-writer),
@@ -402,11 +548,11 @@ func NewSQLiteStore(dbPath string, config SQLiteConfig) (*SQLiteStore, error) {
 // consolidation without data migration.
 func (s *SQLiteStore) createSchema(ctx context.Context) error {
 	tid := s.config.TenantID
-	nodes := tenant.NodesTableName(tid)
-	nseq := tenant.NodeSeqTableName(tid)
-	nfts := tenant.NodeFTSTableName(tid)
-	nIdxE := tenant.NodesIndexEntityType(tid)
-	nIdxU := tenant.NodesIndexUpdatedAt(tid)
+	nodes := tid.NodesTableName()
+	nseq := tid.NodeSeqTableName()
+	nfts := tid.NodeFTSTableName()
+	nIdxE := tid.NodesIndexEntityType()
+	nIdxU := tid.NodesIndexUpdatedAt()
 
 	// Global tables — one per database file regardless of tenant.
 	// schema_version and tenants are intentionally not prefixed.
@@ -462,7 +608,7 @@ func (s *SQLiteStore) createSchema(ctx context.Context) error {
 	// Per-tenant edge FTS table — created unconditionally alongside the node
 	// tables (not gated on GraphEnabled) so it is always available for text
 	// search over edge property content regardless of graph mode.
-	efts := tenant.EdgeFTSTableName(tid)
+	efts := tid.EdgeFTSTableName()
 	eftsDDL := fmt.Sprintf(`
 		-- Edge full-text search virtual table (FTS5).
 		-- Indexes the text content of edge properties for full-text search.
@@ -507,7 +653,7 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 	// Create per-tenant graph topology table when graph is enabled.
 	if s.config.GraphEnabled {
 		tid := s.config.TenantID
-		table := tenant.GraphTableName(tid)
+		table := tid.GraphTableName()
 		graphDDL := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
 				source_entity     TEXT NOT NULL,
@@ -523,9 +669,9 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 			CREATE INDEX IF NOT EXISTS %s ON %s(target_entity, target_id);
 			CREATE INDEX IF NOT EXISTS %s ON %s(relationship_name);
 		`, table,
-			tenant.GraphIndexSource(tid), table,
-			tenant.GraphIndexTarget(tid), table,
-			tenant.GraphIndexRel(tid), table)
+			tid.GraphIndexSource(), table,
+			tid.GraphIndexTarget(), table,
+			tid.GraphIndexRel(), table)
 		if _, err := s.db.ExecContext(ctx, graphDDL); err != nil {
 			return fmt.Errorf("failed to create graph table %s: %w", table, err)
 		}
@@ -533,7 +679,7 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 		// Blob edge property store: one row per edge with properties,
 		// keyed by surrogate edge ID. Edges without properties have no row here;
 		// their edge_id in t<X>_graph stays NULL.
-		edgesTable := tenant.EdgePropsTableName(tid)
+		edgesTable := tid.EdgePropsTableName()
 		edgesDDL := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
 				edge_id    INTEGER PRIMARY KEY,
@@ -550,7 +696,7 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 
 		// Edge ID sequences: one row per relationship label, auto-incrementing.
 		// Mirrors t<X>_nseq for nodes.
-		eseqTable := tenant.EdgeSeqTableName(tid)
+		eseqTable := tid.EdgeSeqTableName()
 		eseqDDL := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
 				rel     TEXT NOT NULL,
@@ -567,7 +713,7 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 		// is a prerequisite for adapted edge tables (Stage 7).
 		// column_spec and has_extra are NULL for schema-only registrations
 		// (Stage 6) and populated when an adapted table is created (Stage 7).
-		eschTable := tenant.EdgeSchemaTableName(tid)
+		eschTable := tid.EdgeSchemaTableName()
 		eschDDL := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
 				rel         TEXT PRIMARY KEY,
@@ -1009,6 +1155,123 @@ func (s *SQLiteStore) initV2Schema(ctx context.Context) error {
 		return fmt.Errorf("v2 schema version 13 insert failed: %w", err)
 	}
 
+	// S15: dxp definitions and transaction instances.
+	//
+	// Prototype-snapshot model, mirroring fsm_machines exactly (item
+	// 20/21 design, docs/proposals/dxp-coordinator-design.md):
+	// dxp_txn.dxp_def_id records lineage only, no foreign-key
+	// constraint -- a definition may be deleted without affecting
+	// instances already derived from it; each instance holds a
+	// self-contained snapshot in snapshot_json, cloned at creation
+	// (T-54's prototype-clone pattern, not fsm's version-number
+	// scheme, which fsm itself doesn't actually have either -- checked
+	// directly against fsm_definitions before choosing this). This is
+	// the durable instance record docs/proposals/dxp-composed-
+	// commitment.md's own §7 recovery section assumes; item 18 never
+	// built it, checked directly, nothing here duplicates existing
+	// work.
+	//
+	// status: 'active', or one of three terminal states -- 'committed',
+	// 'released', or 'expired' -- matching §4's own outcome-uniqueness
+	// guard exactly ("exactly one terminal state per instance:
+	// committed, released, or expired"), checked directly rather than
+	// assumed. An earlier pass of this schema listed only two terminal
+	// states, missing 'released' entirely -- corrected here. 'released'
+	// and 'expired' are related but distinct triggers, not the same
+	// thing under two names: 'released' is explicit and coordinator-
+	// initiated (e.g. one participant's Validate fails before any
+	// deadline, so the coordinator releases everyone else deliberately);
+	// 'expired' is implicit and deadline-triggered, nobody acted, the
+	// sweep worker simply noticed the deadline passed (§5, "Release |
+	// idempotent with expiry" -- related, not identical). A torn
+	// instance (committed_through > 0 but never reached committed) is
+	// not a fourth status; it falls into ordinary 'expired' handling
+	// deliberately (dxp-coordinator-design.md §6), detected by
+	// committed_through's own value at expiry time, not a dedicated
+	// state. Status transitions themselves must use the T-34 CAS
+	// pattern (guarded UPDATE ... WHERE status = ... AND ..., matching
+	// every other guarded transition in this codebase) -- the doctrine
+	// is explicit that the instance's own state machine is NOT to be
+	// built on pkg/fsm (§4: "per the chronicle document's refusal, not
+	// ridden on pkg/fsm"). Not yet implemented as of this schema --
+	// recorded here for whoever builds the transition logic next.
+	//
+	// bindings_schema_json (added 2026-07-29, direct instruction): a
+	// raw JSON Schema map, compiled and validated via pkg/validation's
+	// existing JSONSchemaValidator pattern (queryfy's
+	// jsonschema.FromJSON + ObjectSchema.Validate), describing the
+	// expected shape of the "bindings" payload POST /dxp/txn accepts.
+	// Participant params reference bindings via pkg/jsonplate's own
+	// {"$ref": "path"} syntax -- resolved with jsonplate.Render at
+	// instance-creation time -- deliberately not the doctrine's own
+	// bare "$qty" worked-example convention, reusing what already
+	// exists rather than a parallel mechanism, the same reasoning
+	// that led dxp_defs' own id scheme to fsm's real pattern over the
+	// doctrine's aspirational one. dxp_txn carries its own copy for
+	// the same insulation reason snapshot_json does: POST /dxp/txn is
+	// a complete, stateless invocation (closer to calling a stored
+	// procedure than opening a SQL transaction, worked through
+	// directly after an initial wrong reading assumed bindings
+	// arrived incrementally into one instance -- see
+	// dxp-coordinator-design.md's own recorded correction), called
+	// many times over a def's life with different bindings each time;
+	// each call's own instance should stay insulated from a later
+	// re-registration of the same-named def changing the schema
+	// underneath it, matching exactly what snapshot_json already
+	// guarantees for the resolved participant list itself.
+	dxpDDL := `
+		CREATE TABLE IF NOT EXISTS dxp_defs (
+			tenant_id            INTEGER NOT NULL DEFAULT 0,
+			id                   INTEGER NOT NULL,
+			name                 TEXT    NOT NULL,
+			spec_json            TEXT    NOT NULL,
+			analysis_json        TEXT    NOT NULL DEFAULT '{}',
+			bindings_schema_json TEXT    NOT NULL DEFAULT '{}',
+			created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_dxp_defs_name
+			ON dxp_defs(tenant_id, name);
+
+		CREATE TABLE IF NOT EXISTS dxp_txn (
+			tenant_id            INTEGER NOT NULL DEFAULT 0,
+			id                   INTEGER NOT NULL,
+			dxp_def_id           INTEGER NOT NULL,
+			dxp_def_name         TEXT    NOT NULL,
+			snapshot_json        TEXT    NOT NULL,
+			bindings_schema_json TEXT    NOT NULL DEFAULT '{}',
+			status               TEXT    NOT NULL DEFAULT 'active',
+			committed_through    INTEGER NOT NULL DEFAULT 0,
+			deadline_ns          INTEGER NOT NULL,
+			created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (tenant_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_dxp_txn_definition
+			ON dxp_txn(tenant_id, dxp_def_id);
+		CREATE INDEX IF NOT EXISTS idx_dxp_txn_status
+			ON dxp_txn(tenant_id, status);
+
+		-- Per-tenant, per-kind monotonic ID allocator for dxp
+		-- definitions and transaction instances, matching
+		-- fsm_id_seq's own convention exactly (same atomic INSERT
+		-- ... ON CONFLICT DO UPDATE SET next_id = next_id + 1
+		-- RETURNING pattern, checked directly rather than assumed).
+		-- 'kind' is one of 'def', 'txn'.
+		CREATE TABLE IF NOT EXISTS dxp_id_seq (
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			kind      TEXT    NOT NULL,
+			next_id   INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (tenant_id, kind)
+		);
+	`
+	if _, err := s.db.ExecContext(ctx, dxpDDL); err != nil {
+		return fmt.Errorf("v2 schema S15 (dxp) failed: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_version_v2 (version, stage) VALUES (?, ?)", 15, "S15-dxp"); err != nil {
+		return fmt.Errorf("v2 schema version 15 insert failed: %w", err)
+	}
+
 	return nil
 }
 
@@ -1044,6 +1307,50 @@ func (s *SQLiteStore) Info() StoreInfo {
 		SupportsBatch:       true,
 		SupportsTransaction: true,
 	}
+}
+
+// AllocateNodeID reserves the next id from entity's own per-tenant
+// sequence (the identical atomic upsert createInner's own id
+// allocation uses) WITHOUT creating a row — T-121 (wave 10)'s own
+// need: obj's promote composes bal-decrement + entity-create +
+// obj-attach as one dxp transaction, but dxp's own coordinator has no
+// mechanism for one leg's execution result (a just-created entity's
+// auto-allocated id) to feed another leg's OpParams — every leg's
+// params must be fully known when the transaction is *defined*, before
+// any leg runs (confirmed directly: EntityAdapter.Execute's own
+// create path discards createInTx's returned id entirely). Promote's
+// own handler calls this once, outside the dxp transaction, then
+// supplies the reserved id explicitly to both entity's own
+// EntityAppendParams (the caller-chosen-id path, not auto-allocated)
+// and obj's own attach params — no wire-contract change, the caller
+// never sees or supplies an id themselves.
+//
+// A transaction that later aborts (bal insufficient funds, obj
+// capacity/cycle refusal) burns this id — the identical, universally-
+// accepted gap-on-abort behaviour every auto-increment sequence has
+// (a rolled-back INSERT ... RETURNING elsewhere in this codebase
+// already produces the same characteristic); not a new risk this
+// introduces.
+func (s *SQLiteStore) AllocateNodeID(ctx context.Context, entity string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var nextID int
+	seqSQL := `
+		INSERT INTO ` + s.nodeSeqTable() + ` (entity_type, next_id)
+		VALUES (?, 1)
+		ON CONFLICT(entity_type) DO UPDATE SET next_id = next_id + 1
+		RETURNING next_id`
+	if err := tx.QueryRowContext(ctx, seqSQL, entity).Scan(&nextID); err != nil {
+		return 0, fmt.Errorf("failed to allocate next id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return nextID, nil
 }
 
 // Create inserts a new entity with auto-generated ID
@@ -1128,7 +1435,7 @@ func (s *SQLiteStore) syncGraphEdges(ctx context.Context, tx *sql.Tx, sourceEnti
 		return nil
 	}
 
-	table := tenant.GraphEdgesTableName(s.config.TenantID)
+	table := s.config.TenantID.GraphEdgesTableName()
 
 	// Validate and collect edges before touching the database. Failing here
 	// avoids issuing a DELETE that would then be rolled back on extraction error.
@@ -1666,7 +1973,7 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int, re
 
 	// Clean up graph edges
 	if s.config.GraphEnabled {
-		edgeTable := tenant.GraphEdgesTableName(s.config.TenantID)
+		edgeTable := s.config.TenantID.GraphEdgesTableName()
 		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			DELETE FROM %s 
 			WHERE (source_entity = ? AND source_id = ?)
@@ -1722,7 +2029,7 @@ func (s *SQLiteStore) restrictReferrersInTx(ctx context.Context, tx *sql.Tx, ent
 
 	// Prong 1 — blob referrers via the edge table (transactionally synced).
 	if len(blobReferrers) > 0 && s.config.GraphEnabled {
-		edgeTable := tenant.GraphEdgesTableName(s.config.TenantID)
+		edgeTable := s.config.TenantID.GraphEdgesTableName()
 		placeholders := strings.Repeat("?,", len(blobReferrers))
 		placeholders = placeholders[:len(placeholders)-1]
 		args := make([]interface{}, 0, len(blobReferrers)+2)
@@ -1881,6 +2188,10 @@ func (s *SQLiteStore) saveInner(ctx context.Context, entity string, id int, data
 		return false, fmt.Errorf("failed to check existence: %w", err)
 	}
 
+	if err := s.checkDxpEntityHold(s.config.TenantID, entity, id); err != nil {
+		return false, err
+	}
+
 	if exists {
 		// Overwrite path: conditional or unconditional update in place.
 		if spec != nil {
@@ -1996,6 +2307,10 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 		return CommitResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := s.checkDxpEntityHold(s.config.TenantID, req.Update.Entity, req.Update.ID); err != nil {
+		return CommitResult{}, err
+	}
 
 	updateResult, err := s.saveInTx(ctx, tx, req.Update)
 	if err != nil {
@@ -2379,7 +2694,7 @@ func (s *SQLiteStore) Search(ctx context.Context, entity string, field string, q
 // by ID without knowing the label in advance.
 func (s *SQLiteStore) nextEdgeID(ctx context.Context, tx *sql.Tx, _ string) (int, error) {
 	const globalSeqKey = "__global__"
-	eseq := tenant.EdgeSeqTableName(s.config.TenantID)
+	eseq := s.config.TenantID.EdgeSeqTableName()
 	_, err := tx.ExecContext(ctx,
 		"INSERT INTO "+eseq+" (rel, next_id) VALUES (?, 2)"+
 			" ON CONFLICT(rel) DO UPDATE SET next_id = next_id + 1",
@@ -2419,7 +2734,7 @@ func (s *SQLiteStore) AddEdgeWithProps(ctx context.Context, from, to, relationsh
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	graphTable := tenant.GraphTableName(s.config.TenantID)
+	graphTable := s.config.TenantID.GraphTableName()
 
 	// Parse node IDs: "entity:id" or "XXXX@entity:id"
 	parseNode := func(nodeID string) (string, int, error) {
@@ -2470,7 +2785,7 @@ func (s *SQLiteStore) AddEdgeWithProps(ctx context.Context, from, to, relationsh
 			if err != nil {
 				return 0, fmt.Errorf("AddEdgeWithProps: marshal props: %w", err)
 			}
-			edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+			edgesTable := s.config.TenantID.EdgePropsTableName()
 			_, err = tx.ExecContext(ctx,
 				"INSERT INTO "+edgesTable+" (edge_id, rel, data) VALUES (?, ?, ?)"+
 					" ON CONFLICT(edge_id) DO UPDATE SET data = excluded.data, _version = _version + 1, updated_at = CURRENT_TIMESTAMP",
@@ -2531,7 +2846,7 @@ func (s *SQLiteStore) GetEdge(ctx context.Context, edgeID int) (*EdgePropsResult
 	}
 
 	// Resolve the relationship label from the topology table.
-	graphTable := tenant.GraphTableName(s.config.TenantID)
+	graphTable := s.config.TenantID.GraphTableName()
 	var rel string
 	err := s.readDB.QueryRowContext(ctx,
 		"SELECT relationship_name FROM "+graphTable+" WHERE edge_id = ?", edgeID,
@@ -2553,7 +2868,7 @@ func (s *SQLiteStore) GetEdge(ctx context.Context, edgeID int) (*EdgePropsResult
 	}
 
 	// Blob path.
-	edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+	edgesTable := s.config.TenantID.EdgePropsTableName()
 	var dataJSON string
 	err = s.readDB.QueryRowContext(ctx,
 		"SELECT data FROM "+edgesTable+" WHERE edge_id = ?", edgeID,
@@ -2588,7 +2903,7 @@ func (s *SQLiteStore) GetManyEdges(ctx context.Context, edgeIDs []int) (map[int]
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	graphTable := tenant.GraphTableName(s.config.TenantID)
+	graphTable := s.config.TenantID.GraphTableName()
 	relRows, err := s.readDB.QueryContext(ctx,
 		"SELECT edge_id, relationship_name FROM "+graphTable+
 			" WHERE edge_id IN ("+strings.Join(placeholders, ",")+")",
@@ -2646,7 +2961,7 @@ func (s *SQLiteStore) GetManyEdges(ctx context.Context, edgeIDs []int) (map[int]
 			blobPH[i] = "?"
 			blobArgs[i] = id
 		}
-		edgesTable := tenant.EdgePropsTableName(s.config.TenantID)
+		edgesTable := s.config.TenantID.EdgePropsTableName()
 		blobRows, err := s.readDB.QueryContext(ctx,
 			"SELECT edge_id, data FROM "+edgesTable+
 				" WHERE edge_id IN ("+strings.Join(blobPH, ",")+")",
@@ -2729,7 +3044,7 @@ func (s *SQLiteStore) VerifyGraphIntegrity(ctx context.Context) error {
 
 	// Phase 2: stream the actual edge table; mark expected edges as seen and
 	// collect any edges that have no expected counterpart.
-	edgeTable := tenant.GraphEdgesTableName(s.config.TenantID)
+	edgeTable := s.config.TenantID.GraphEdgesTableName()
 	edgeRows, err := tx.QueryContext(ctx,
 		fmt.Sprintf("SELECT source_entity, source_id, target_entity, target_id, relationship_name FROM %s", edgeTable))
 	if err != nil {
@@ -2785,10 +3100,10 @@ const rebuildBatchSize = 500
 // a graph_tXXXX edge table should be hydrated at startup. Tenant 0 is always
 // included first (it is implicit and never appears in the tenants registry
 // table). Registered non-zero tenants follow in ascending order.
-func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]uint16, error) {
+func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]tenant.TenantID, error) {
 	// Tenant 0 is the implicit default; it is never inserted into the
 	// tenants table, so we always prepend it manually.
-	ids := []uint16{0}
+	ids := []tenant.TenantID{0}
 
 	rows, err := s.readDB.QueryContext(ctx, "SELECT id FROM tenants WHERE id > 0 ORDER BY id")
 	if err != nil {
@@ -2802,7 +3117,7 @@ func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]uint16, error) {
 			return nil, fmt.Errorf("GraphTenantIDs: scan: %w", err)
 		}
 		if id > 0 && id <= 65535 {
-			ids = append(ids, uint16(id))
+			ids = append(ids, tenant.TenantID(id))
 		}
 	}
 	return ids, rows.Err()
@@ -2812,8 +3127,8 @@ func (s *SQLiteStore) GraphTenantIDs(ctx context.Context) ([]uint16, error) {
 // tenant-scoped graph_tXXXX edge table, calling fn once per row. Iteration stops
 // on the first non-nil error returned by fn. Rows are read via the reader pool
 // (query_only, parallel-safe). All tenants, including tenant 0, use graph_tXXXX.
-func (s *SQLiteStore) ScanGraphEdges(ctx context.Context, tenantID uint16, fn func(GraphEdge) error) error {
-	table := tenant.GraphEdgesTableName(tenantID)
+func (s *SQLiteStore) ScanGraphEdges(ctx context.Context, tenantID tenant.TenantID, fn func(GraphEdge) error) error {
+	table := tenantID.GraphEdgesTableName()
 	rows, err := s.readDB.QueryContext(ctx,
 		"SELECT source_entity, source_id, target_entity, target_id, relationship_name, COALESCE(edge_id, 0) FROM "+table)
 	if err != nil {
@@ -2858,7 +3173,7 @@ func (s *SQLiteStore) RebuildGraph(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rebuildTable := tenant.GraphEdgesTableName(s.config.TenantID)
+	rebuildTable := s.config.TenantID.GraphEdgesTableName()
 
 	// Clear existing edges for this tenant.
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", rebuildTable)); err != nil {

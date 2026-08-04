@@ -14,6 +14,7 @@ import (
 	"github.com/ha1tch/tsqlparser/ast"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/rs/zerolog/log"
 )
 
@@ -49,7 +50,7 @@ type Executor struct {
 	// seqIncrementor is an optional function wired in by the server when
 	// sequences (S5) are enabled. It atomically increments the named sequence
 	// for the given tenant and returns the new value. Nil when not available.
-	seqIncrementor func(tenantID uint16, name string) (int64, error)
+	seqIncrementor func(tenantID tenant.TenantID, name string) (int64, error)
 
 	// seqSession holds per-query session state for NEXT VALUE FOR / @CURRENT_VALUE.
 	// Reset at the start of each Execute call.
@@ -59,7 +60,7 @@ type Executor struct {
 	// stateful generators (S10) are enabled. It resolves a named generator
 	// (looked up in gen_definitions) for the given tenant and produces one
 	// value. Nil when not available, in which case @GEN returns nil.
-	genDispatcher func(tenantID uint16, name string) (string, error)
+	genDispatcher func(tenantID tenant.TenantID, name string) (string, error)
 }
 
 // QueryLimits holds server-enforced limits for query execution.

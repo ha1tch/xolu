@@ -53,8 +53,10 @@ type FieldDef struct {
 	// Name is the field name as it appears in JSON documents.
 	Name string `json:"name"`
 	// Type is the JSON Schema type ("string", "integer", "number",
-	// "boolean", "object", "array") or a xolu-specific format tag
-	// ("decimal", "timestamp", "ref").
+	// "boolean", "object", "array"). Always set directly from the
+	// schema's own "type" key -- never "ref" or any other xolu-specific
+	// tag; those live in Format instead (extractFieldsFromSchema sets
+	// them from entirely separate JSON Schema keys, "type" and "format").
 	Type string `json:"type"`
 	// Required is true when the field is listed under the schema's
 	// "required" array.
@@ -105,23 +107,128 @@ type MachineDef struct {
 	// Spec is the definition body — states, transitions, variables.
 	Spec MachineSpec `json:"spec"`
 	// Analysis is xolu's structural-analysis output for the definition.
-	// Kept opaque as json.RawMessage because the shape is server-internal.
+	// Kept as json.RawMessage here for backwards compatibility with
+	// existing callers of this already-shipped field; call
+	// ParsedAnalysis() for the structured form. See ParsedAnalysis's
+	// own doc comment for why this field itself wasn't just changed to
+	// *MachineDefAnalysis directly.
 	Analysis json.RawMessage `json:"analysis,omitempty"`
+}
+
+// ParsedAnalysis decodes Analysis into its structured form.
+//
+// Analysis itself stayed json.RawMessage rather than becoming
+// *MachineDefAnalysis directly to avoid a breaking change to an
+// already-shipped field for any existing caller relying on the raw
+// bytes; this method is the additive, opt-in path to the same
+// structured data CreateMachineDef/ReplaceMachineDef/ValidateMachineDef
+// return directly. The original doc comment on Analysis claimed the
+// shape "is xolu-server-internal and may evolve" -- checked directly
+// against pkg/server/v2_fsm_common.go's own fsmAnalysis struct before
+// writing this: it's a stable, well-defined set of fields (reachability,
+// determinism, cycles, warnings), not internal debug scratch data, and
+// carries no instability markers anywhere in the server code. Worth
+// exposing structured, not worth forcing every caller to re-parse raw
+// JSON for.
+//
+// Returns nil, nil if Analysis is empty (e.g. a MachineDef fetched
+// before analysis was populated, or a definition predating this field).
+func (m *MachineDef) ParsedAnalysis() (*MachineDefAnalysis, error) {
+	if len(m.Analysis) == 0 {
+		return nil, nil
+	}
+	var a MachineDefAnalysis
+	if err := json.Unmarshal(m.Analysis, &a); err != nil {
+		return nil, fmt.Errorf("xolu: parsing analysis: %w", err)
+	}
+	return &a, nil
+}
+
+// MachineDefAnalysis is xolu's structural-analysis output for an FSM
+// definition -- reachability, determinism, and cycle detection, the
+// same checks CreateMachineDef/ReplaceMachineDef/ValidateMachineDef
+// all run before accepting a spec. Wire shape verified directly
+// against pkg/server/v2_fsm_common.go's own fsmAnalysis struct.
+type MachineDefAnalysis struct {
+	// Reachable is false if any declared state cannot be reached from
+	// Initial by any sequence of transitions.
+	Reachable bool `json:"reachable"`
+	// Deterministic reports whether the machine is a plain DFA (no
+	// transition carries an Output) versus a Mealy machine.
+	Deterministic bool `json:"deterministic"`
+	// Determinism is the spec's own declared determinism level, echoed
+	// back (not independently re-derived) so a caller can compare what
+	// it asked for against what Reachable/ExclusivityVerified actually
+	// found.
+	Determinism string `json:"determinism"`
+	// ExclusivityVerified is true when the analyzer proved that no two
+	// candidate transitions for the same (state, input) pair can both
+	// match -- required for a non-firstmatch machine; absent/false
+	// does not by itself mean the machine is broken for a firstmatch
+	// machine, where ambiguity is resolved by declaration order instead.
+	ExclusivityVerified bool `json:"exclusivity_verified,omitempty"`
+	// TerminalStates lists every state with no outgoing transitions.
+	TerminalStates []string `json:"terminal_states"`
+	// Cycles lists detected cycles in the transition graph, if any.
+	Cycles []string `json:"cycles,omitempty"`
+	// Warnings carries non-fatal structural observations that didn't
+	// block acceptance of the spec (e.g. an unreachable state alongside
+	// an otherwise valid machine).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// MachineDefCreateResult is the response from CreateMachineDef.
+type MachineDefCreateResult struct {
+	ID        int64               `json:"id"`
+	Name      string              `json:"name"`
+	CreatedAt string              `json:"created_at"`
+	Analysis  *MachineDefAnalysis `json:"analysis"`
+}
+
+// MachineDefReplaceResult is the response from ReplaceMachineDef.
+// Deliberately narrower than MachineDefCreateResult -- no CreatedAt,
+// since a replace doesn't create anything new -- matching the server's
+// own response shape exactly rather than padding it out to look like
+// MachineDefCreateResult.
+type MachineDefReplaceResult struct {
+	ID       int64               `json:"id"`
+	Name     string              `json:"name"`
+	Analysis *MachineDefAnalysis `json:"analysis"`
+}
+
+// MachineDefValidation is the response from ValidateMachineDef.
+// Exactly one of Analysis (Valid true) or Errors (Valid false) is
+// populated.
+type MachineDefValidation struct {
+	Valid    bool                        `json:"valid"`
+	Analysis *MachineDefAnalysis         `json:"analysis,omitempty"`
+	Errors   []MachineDefValidationError `json:"errors,omitempty"`
+}
+
+// MachineDefValidationError is one validation failure. Deliberately
+// not *client.Error: that type represents an actual non-2xx transport
+// response (its own doc comment: "HTTPStatus is the HTTP status code"),
+// and ValidateMachineDef never produces one -- an invalid spec is data
+// in a 200 response, not a transport failure, so reusing client.Error
+// here would misrepresent what actually happened.
+type MachineDefValidationError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // MachineSpec is the wire-format definition body. It matches xolu's internal
 // fsmDefinitionSpec byte-for-byte.
 type MachineSpec struct {
-	Name           string                    `json:"name"`
-	Description    string                    `json:"description,omitempty"`
-	Initial        string                    `json:"initial"`
-	Determinism    string                    `json:"determinism"`
-	States         map[string]StateDef       `json:"states"`
-	Variables      map[string]VariableDef    `json:"variables,omitempty"`
-	Transitions    []TransitionDef           `json:"transitions"`
-	OutputAlphabet []string                  `json:"output_alphabet,omitempty"`
-	LinkedStates   map[string]int64          `json:"linked_states,omitempty"`
-	GC             *GCPolicy                 `json:"gc,omitempty"`
+	Name           string                 `json:"name"`
+	Description    string                 `json:"description,omitempty"`
+	Initial        string                 `json:"initial"`
+	Determinism    string                 `json:"determinism"`
+	States         map[string]StateDef    `json:"states"`
+	Variables      map[string]VariableDef `json:"variables,omitempty"`
+	Transitions    []TransitionDef        `json:"transitions"`
+	OutputAlphabet []string               `json:"output_alphabet,omitempty"`
+	LinkedStates   map[string]int64       `json:"linked_states,omitempty"`
+	GC             *GCPolicy              `json:"gc,omitempty"`
 	// InputQueries associates an OQL SELECT with an input symbol. See the
 	// xolu documentation for the exact semantics of the query-before-walk
 	// evaluation pattern.

@@ -14,7 +14,7 @@ import (
 
 func TestGraphNodePrefix(t *testing.T) {
 	cases := []struct {
-		id   uint16
+		id   TenantID
 		want string
 	}{
 		{0, ""}, // zero tenant: empty (single-tenant fallback)
@@ -26,7 +26,7 @@ func TestGraphNodePrefix(t *testing.T) {
 		{0xFFFF, "FFFF@"}, // boundary: maximum uint16
 	}
 	for _, c := range cases {
-		got := GraphNodePrefix(c.id)
+		got := c.id.GraphNodePrefix()
 		if got != c.want {
 			t.Errorf("GraphNodePrefix(%d): want %q, got %q", c.id, c.want, got)
 		}
@@ -36,8 +36,8 @@ func TestGraphNodePrefix(t *testing.T) {
 func TestGraphNodePrefix_NonZeroIsExactly5Chars(t *testing.T) {
 	// The @ terminator at position 4 is load-bearing: it prevents one prefix
 	// from being a prefix-match of another (e.g. "0001@" vs "00010@").
-	for _, id := range []uint16{1, 10, 100, 1000, 10000, 0xFFFE, 0xFFFF} {
-		p := GraphNodePrefix(id)
+	for _, id := range []TenantID{1, 10, 100, 1000, 10000, 0xFFFE, 0xFFFF} {
+		p := id.GraphNodePrefix()
 		if len(p) != 5 {
 			t.Errorf("GraphNodePrefix(%d) = %q: want length 5, got %d", id, p, len(p))
 		}
@@ -49,8 +49,8 @@ func TestGraphNodePrefix_NonZeroIsExactly5Chars(t *testing.T) {
 
 func TestGraphNodePrefix_UsesUppercaseHex(t *testing.T) {
 	// Must be uppercase to match what NodeIDPrefix recognises.
-	for _, id := range []uint16{0xA, 0xAB, 0xABC, 0xABCD} {
-		p := GraphNodePrefix(id)
+	for _, id := range []TenantID{0xA, 0xAB, 0xABC, 0xABCD} {
+		p := id.GraphNodePrefix()
 		for i, c := range p[:4] {
 			if c >= 'a' && c <= 'f' {
 				t.Errorf("GraphNodePrefix(%d) = %q: lowercase hex at position %d", id, p, i)
@@ -90,8 +90,8 @@ func TestNodeIDPrefix(t *testing.T) {
 func TestNodeIDPrefix_RoundTripWithGraphNodePrefix(t *testing.T) {
 	// For any non-zero tenant, NodeIDPrefix(GraphNodePrefix(id) + "entity:1")
 	// must return exactly GraphNodePrefix(id).
-	for _, id := range []uint16{1, 255, 256, 0xABCD, 0xFFFF} {
-		prefix := GraphNodePrefix(id)
+	for _, id := range []TenantID{1, 255, 256, 0xABCD, 0xFFFF} {
+		prefix := id.GraphNodePrefix()
 		nodeID := prefix + "entity:1"
 		got := NodeIDPrefix(nodeID)
 		if got != prefix {
@@ -123,7 +123,7 @@ func TestNodeIDPrefix_LowercaseNotRecognised(t *testing.T) {
 
 func TestStorageDirSegment(t *testing.T) {
 	cases := []struct {
-		id   uint16
+		id   TenantID
 		want string
 	}{
 		{0, ""}, // zero: no segment
@@ -133,7 +133,7 @@ func TestStorageDirSegment(t *testing.T) {
 		{0xFFFF, "tFFFF"},
 	}
 	for _, c := range cases {
-		got := StorageDirSegment(c.id)
+		got := c.id.StorageDirSegment()
 		if got != c.want {
 			t.Errorf("StorageDirSegment(%d): want %q, got %q", c.id, c.want, got)
 		}
@@ -141,8 +141,8 @@ func TestStorageDirSegment(t *testing.T) {
 }
 
 func TestStorageDirSegment_UsesUppercaseHex(t *testing.T) {
-	for _, id := range []uint16{0xA, 0xAB, 0xABC, 0xABCD} {
-		seg := StorageDirSegment(id)
+	for _, id := range []TenantID{0xA, 0xAB, 0xABC, 0xABCD} {
+		seg := id.StorageDirSegment()
 		if len(seg) < 2 {
 			t.Errorf("StorageDirSegment(%d) = %q: too short", id, seg)
 			continue
@@ -161,7 +161,7 @@ func TestStorageDirSegment_UsesUppercaseHex(t *testing.T) {
 
 func TestGraphEdgesTableName(t *testing.T) {
 	cases := []struct {
-		id   uint16
+		id   TenantID
 		want string
 	}{
 		{0, "t0000_graph"},
@@ -171,7 +171,7 @@ func TestGraphEdgesTableName(t *testing.T) {
 		{0xFFFF, "tFFFF_graph"},
 	}
 	for _, c := range cases {
-		got := GraphEdgesTableName(c.id)
+		got := c.id.GraphEdgesTableName()
 		if got != c.want {
 			t.Errorf("GraphEdgesTableName(%d): want %q, got %q", c.id, c.want, got)
 		}
@@ -184,7 +184,7 @@ func TestGraphEdgesTableName(t *testing.T) {
 
 func TestScopeKey(t *testing.T) {
 	cases := []struct {
-		id   uint16
+		id   TenantID
 		key  string
 		want string
 	}{
@@ -195,7 +195,7 @@ func TestScopeKey(t *testing.T) {
 		{1, "", "0001:"},
 	}
 	for _, c := range cases {
-		got := ScopeKey(c.id, c.key)
+		got := c.id.ScopeKey(c.key)
 		if got != c.want {
 			t.Errorf("ScopeKey(%d, %q): want %q, got %q", c.id, c.key, c.want, got)
 		}

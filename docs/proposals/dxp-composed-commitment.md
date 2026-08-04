@@ -1,5 +1,16 @@
 # dxp — Declarative Composed Commitment (proposal)
 
+> **Reconciliation — 2026-07-22.** Item 18 shipped §5b's engine-level
+> facility as `pkg/reserved` (v0.16.20): the convention, weights,
+> visibility taxonomy, deadline authority, and sweeper, proven by
+> thirteen tests. The design then pivoted (T-54): dxp reservations live
+> **in memory for their TTL**, not as tentative rows in engine storage —
+> see `docs/proposals/dxp-reservation-cache.md` for the participant
+> contract that supersedes §5b's *medium* while keeping its semantics.
+> §5c's taxonomy, the weights, and the guards-never-use-accelerators
+> doctrine stand unchanged. Content below is historical and is not
+> rewritten.
+
 Updated: 2026-07-19
 Status: proposal — not scheduled. Companion to
 `chronicle-substrate.md` (whose commitment primitives are this
@@ -81,9 +92,21 @@ both.
 
 The framework this instantiates (`github.com/ha1tch/dxp`) contributes
 the *spectrum* (0.5 → 3 phases, with the intermediate points named),
-a composable modifier algebra (TBS, OV, GA, SC), and formal proofs for
-2PS, 3PS, and 3PS+quorum — a synthesis the distributed-transactions
-literature does not otherwise have in unified form. This document adds
+a composable modifier algebra (TBS, OV, GA, SC, and **QM** — Quorum
+Modifier, easy to miss since the framework's own main guide doesn't
+enumerate it; found only by cloning the full repo and reading its
+`doc/dxp-13-quorum-modifier.md` directly, 2026-07-29), and formal
+proofs for 2PS, 3PS, and **3PS+QM** (`dxp-11` through `dxp-14` in the
+framework's own tree — genuine theorem-and-proof documents, verified
+by reading them, not cited from the main guide's prose alone) — a
+synthesis the distributed-transactions literature does not otherwise
+have in unified form. **Correction (2026-07-29):** QM relaxes 3PS's
+unanimous-attendance requirement to a majority (`Q = ⌈n/2⌉+1`)
+*within one transaction's own participant set*, tolerating a minority
+of unavailable participants — it is not a mechanism for replicating a
+transaction across independent instances, a conflation this document
+carried until checked directly (full detail and the corrected
+reasoning in `dxp-coordinator-design.md`). This document adds
 three things on top: guard-enforced reservations, the degradation
 theorem (@D06 — machinery that statically selects the cheapest viable
 point on the spectrum, per definition), and declarative definitions

@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // Recognized event types and action types. Part 1 ships the four entity/fsm
@@ -43,6 +44,12 @@ var validEventTypes = map[string]bool{
 	"fsm.output":     true,
 	"fsm.step":       true,
 	"commit.applied": true,
+	// obj-01-rest-api.md §7 (T-123/T-124): every guard-bearing obj write.
+	"obj.move":    true,
+	"obj.report":  true,
+	"obj.promote": true,
+	"obj.demote":  true,
+	"obj.retire":  true,
 }
 
 var validActionTypes = map[string]bool{
@@ -61,13 +68,13 @@ type eventDef struct {
 }
 
 // eventDB resolves the writer DB and tenant for a request (mirrors genDB).
-func (s *Server) eventDB(r *http.Request) (*sql.DB, uint16) {
+func (s *Server) eventDB(r *http.Request) (*sql.DB, tenant.TenantID) {
 	return s.genDB(r)
 }
 
 // allocEventIDTx allocates the next monotonic ID for an event kind within a
 // tenant, reusing the generic fsm_id_seq counter. Must be called inside tx.
-func allocEventIDTx(r *http.Request, tx *sql.Tx, tenantID uint16, kind string) (int64, error) {
+func allocEventIDTx(r *http.Request, tx *sql.Tx, tenantID tenant.TenantID, kind string) (int64, error) {
 	var id int64
 	err := tx.QueryRowContext(r.Context(), `
 		INSERT INTO fsm_id_seq (tenant_id, kind, next_id)
@@ -409,7 +416,7 @@ func (s *Server) eventParseID(w http.ResponseWriter, r *http.Request) (int64, bo
 	return id, true
 }
 
-func loadEventDef(r *http.Request, db *sql.DB, tenantID uint16, id int64) (eventDef, error) {
+func loadEventDef(r *http.Request, db *sql.DB, tenantID tenant.TenantID, id int64) (eventDef, error) {
 	var sub eventDef
 	var cfg string
 	err := db.QueryRowContext(r.Context(), `

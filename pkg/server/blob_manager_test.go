@@ -17,6 +17,7 @@ import (
 
 	"github.com/ha1tch/xolu/pkg/blob"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
 
 	"github.com/rs/zerolog"
 )
@@ -43,7 +44,7 @@ func TestBlobManager_GlobalUsage_MultiTenant(t *testing.T) {
 
 	// Open three tenants and write distinct content to two of them.
 	for _, tc := range []struct {
-		id   uint16
+		id   tenant.TenantID
 		key  string
 		body string
 	}{
@@ -71,13 +72,13 @@ func TestBlobManager_GlobalUsage_MultiTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore(3): %v", err)
 	}
-	m.entries.Store(uint16(3), &blobTenant{
+	m.entries.Store(tenant.TenantID(3), &blobTenant{
 		store:   st3,
 		sampler: blob.NewUsageSampler(st3, time.Hour), // never Start()ed
 	})
 
 	// Force a sample on tenants 1 and 2 only.
-	for _, id := range []uint16{1, 2} {
+	for _, id := range []tenant.TenantID{1, 2} {
 		smp := m.SamplerFor(id)
 		if smp == nil {
 			t.Fatalf("SamplerFor(%d) is nil", id)
@@ -130,7 +131,7 @@ func TestBlobManager_Sweep_MultiTenant(t *testing.T) {
 	m := newTestBlobManager(t, 0)
 
 	// Two tenants, each with one orphaned blob (PutRaw writes no alias).
-	for _, id := range []uint16{1, 2} {
+	for _, id := range []tenant.TenantID{1, 2} {
 		st, err := m.StoreFor(id)
 		if err != nil {
 			t.Fatalf("StoreFor(%d): %v", id, err)

@@ -7,6 +7,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -459,5 +460,512 @@ func TestBuildURLv2RootIgnoresTenant(t *testing.T) {
 	want := "http://example.com/api/v2/"
 	if got != want {
 		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+// ─── DefineEntitySchema (T-147) ─────────────────────────────────────────────
+
+func TestDefineEntitySchemaHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/schema/widgets" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method: got %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			t.Fatalf("body is not valid JSON: %v", err)
+		}
+		// The body must be the raw schema itself, no envelope wrapping it.
+		if decoded["type"] != "object" {
+			t.Errorf("expected the raw schema as the body, got %v", decoded)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message":"Schema for widgets created/updated successfully"}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"name"},
+	}
+	err := c.DefineEntitySchema(context.Background(), "widgets", schema)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDefineEntitySchemaInvalidName_RejectedClientSide(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	cases := []string{"", "1widget", "widget-name", "widget name", "widget.name"}
+	for _, name := range cases {
+		err := c.DefineEntitySchema(context.Background(), name, map[string]interface{}{"type": "object"})
+		if err == nil {
+			t.Errorf("name %q: expected a validation error, got nil", name)
+		}
+	}
+	if serverCalled {
+		t.Error("server was called despite every name being invalid -- validation should happen before the request")
+	}
+}
+
+func TestDefineEntitySchemaValidNameShapes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message":"ok"}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	cases := []string{"widgets", "Widget2", "widget_type", "a"}
+	for _, name := range cases {
+		if err := c.DefineEntitySchema(context.Background(), name, map[string]interface{}{"type": "object"}); err != nil {
+			t.Errorf("name %q: unexpected error: %v", name, err)
+		}
+	}
+}
+
+func TestDefineEntitySchemaServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"code":"XOLU-VL003","message":"invalid entity name","status":400}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	err := c.DefineEntitySchema(context.Background(), "widgets", map[string]interface{}{"type": "object"})
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("HTTPStatus: got %d", xoluErr.HTTPStatus)
+	}
+}
+
+func TestDefineEntitySchemaUpdatesExisting(t *testing.T) {
+	// The server's own response says "created/updated" regardless --
+	// this client makes no distinction, and calling it twice for the
+	// same entity type must both succeed identically.
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"message":"Schema for widgets created/updated successfully"}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	schema := map[string]interface{}{"type": "object"}
+	if err := c.DefineEntitySchema(context.Background(), "widgets", schema); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := c.DefineEntitySchema(context.Background(), "widgets", schema); err != nil {
+		t.Fatalf("second call (update): %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 requests, got %d", callCount)
+	}
+}
+
+// ─── ListEntities ───────────────────────────────────────────────────────────
+
+func TestListEntitiesHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/entities" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("expected no query string when includeGraph=false, got %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":2,"entities":[
+			{"entity_type":"gizmos","count":1,"has_schema":true,"adapted":true,"columns":["sku"]},
+			{"entity_type":"widgets","count":2,"has_schema":false,"adapted":false,"first_seen":"2026-08-04 00:00:00","last_update":"2026-08-04 00:00:00"}
+		]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	entities, err := c.ListEntities(context.Background(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entities) != 2 {
+		t.Fatalf("got %d entities, want 2", len(entities))
+	}
+	if entities[0].EntityType != "gizmos" || !entities[0].Adapted || !entities[0].HasSchema {
+		t.Errorf("gizmos entry: got %+v", entities[0])
+	}
+	if entities[1].EntityType != "widgets" || entities[1].Adapted || entities[1].HasSchema {
+		t.Errorf("widgets entry: got %+v", entities[1])
+	}
+	if entities[1].FirstSeen == "" {
+		t.Error("widgets: expected FirstSeen populated")
+	}
+}
+
+func TestListEntitiesIncludeGraphSetsQueryParam(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include_graph") != "true" {
+			t.Errorf("expected include_graph=true in the query, got %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":1,"entities":[{"entity_type":"authors","count":1,"has_schema":false,"adapted":false,
+			"graph":{"out_edges":0,"in_edges":2,"relationship_types":["author"]}}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	entities, err := c.ListEntities(context.Background(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entities[0].Graph == nil {
+		t.Fatal("expected Graph to be populated")
+	}
+	if entities[0].Graph.InEdges != 2 {
+		t.Errorf("InEdges: got %d, want 2", entities[0].Graph.InEdges)
+	}
+	if len(entities[0].Graph.RelationshipTypes) != 1 || entities[0].Graph.RelationshipTypes[0] != "author" {
+		t.Errorf("RelationshipTypes: got %v", entities[0].Graph.RelationshipTypes)
+	}
+}
+
+func TestListEntitiesEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count":0,"entities":[]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	entities, err := c.ListEntities(context.Background(), false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entities == nil {
+		t.Error("expected an empty slice, not nil")
+	}
+	if len(entities) != 0 {
+		t.Errorf("got %d entities, want 0", len(entities))
+	}
+}
+
+func TestListEntitiesServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		w.Write([]byte(`{"error":{"code":"XOLU-ST001","message":"not supported","status":501}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.ListEntities(context.Background(), false)
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusNotImplemented {
+		t.Errorf("HTTPStatus: got %d", xoluErr.HTTPStatus)
+	}
+}
+
+// ─── FSM definition writes ──────────────────────────────────────────────────
+
+func TestCreateMachineDefHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/fsm/def" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method: got %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"name":"traffic-light"`) {
+			t.Errorf("expected the spec in the body, got %q", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":1,"name":"traffic-light","created_at":"2026-08-04T00:00:00Z",
+			"analysis":{"reachable":true,"deterministic":true,"determinism":"firstmatch",
+			"terminal_states":[],"warnings":["state 'blink' is unreachable"]}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	spec := MachineSpec{
+		Name:        "traffic-light",
+		Initial:     "red",
+		Determinism: "firstmatch",
+		States:      map[string]StateDef{"red": {}, "green": {}},
+		Transitions: []TransitionDef{},
+	}
+	result, err := c.CreateMachineDef(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ID != 1 || result.Name != "traffic-light" {
+		t.Errorf("got %+v", result)
+	}
+	if result.Analysis == nil {
+		t.Fatal("expected Analysis to be populated")
+	}
+	if !result.Analysis.Reachable || !result.Analysis.Deterministic {
+		t.Errorf("Analysis: got %+v", result.Analysis)
+	}
+	if len(result.Analysis.Warnings) != 1 {
+		t.Errorf("Warnings: got %v", result.Analysis.Warnings)
+	}
+}
+
+func TestCreateMachineDefValidationRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"error":{"code":"XOLU-FSM006","message":"determinism must be declared","status":422}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.CreateMachineDef(context.Background(), MachineSpec{Name: "bad"})
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusUnprocessableEntity {
+		t.Errorf("HTTPStatus: got %d", xoluErr.HTTPStatus)
+	}
+	if xoluErr.Code != "XOLU-FSM006" {
+		t.Errorf("Code: got %q", xoluErr.Code)
+	}
+}
+
+func TestReplaceMachineDefHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/fsm/def/7" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPut {
+			t.Errorf("method: got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":7,"name":"updated","analysis":{"reachable":true,"deterministic":true,"determinism":"firstmatch","terminal_states":[]}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	result, err := c.ReplaceMachineDef(context.Background(), 7, MachineSpec{Name: "updated"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ID != 7 || result.Name != "updated" {
+		t.Errorf("got %+v", result)
+	}
+}
+
+func TestReplaceMachineDefInvalidID(t *testing.T) {
+	c := New("http://example.com")
+	_, err := c.ReplaceMachineDef(context.Background(), 0, MachineSpec{})
+	if err == nil {
+		t.Fatal("expected an error for id=0")
+	}
+	_, err = c.ReplaceMachineDef(context.Background(), -1, MachineSpec{})
+	if err == nil {
+		t.Fatal("expected an error for a negative id")
+	}
+}
+
+func TestReplaceMachineDefNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"XOLU-FSM001","message":"definition not found","status":404}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.ReplaceMachineDef(context.Background(), 999, MachineSpec{Name: "x"})
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusNotFound {
+		t.Errorf("HTTPStatus: got %d", xoluErr.HTTPStatus)
+	}
+}
+
+func TestDeleteMachineDefHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/fsm/def/3" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodDelete {
+			t.Errorf("method: got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	if err := c.DeleteMachineDef(context.Background(), 3); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDeleteMachineDefInvalidID(t *testing.T) {
+	c := New("http://example.com")
+	if err := c.DeleteMachineDef(context.Background(), 0); err == nil {
+		t.Fatal("expected an error for id=0")
+	}
+}
+
+func TestDeleteMachineDefNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"XOLU-FSM001","message":"definition not found","status":404}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	err := c.DeleteMachineDef(context.Background(), 999)
+	xoluErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *client.Error, got %T: %v", err, err)
+	}
+	if xoluErr.HTTPStatus != http.StatusNotFound {
+		t.Errorf("HTTPStatus: got %d", xoluErr.HTTPStatus)
+	}
+}
+
+func TestValidateMachineDefValid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/fsm/def/validate" {
+			t.Errorf("path: got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK) // always 200, even though this test is the "valid" case
+		w.Write([]byte(`{"valid":true,"analysis":{"reachable":true,"deterministic":true,"determinism":"firstmatch","terminal_states":["done"]}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	result, err := c.ValidateMachineDef(context.Background(), MachineSpec{Name: "ok"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Valid {
+		t.Error("Valid: got false, want true")
+	}
+	if result.Analysis == nil {
+		t.Fatal("expected Analysis on a valid result")
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Errors should be empty on a valid result, got %v", result.Errors)
+	}
+}
+
+func TestValidateMachineDefInvalid_StillNoGoError(t *testing.T) {
+	// The whole point of this endpoint: an invalid spec is a normal,
+	// successful (200) response, never a Go error.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"valid":false,"errors":[{"code":"XOLU-FSM006","message":"determinism must be declared"}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	result, err := c.ValidateMachineDef(context.Background(), MachineSpec{Name: "bad"})
+	if err != nil {
+		t.Fatalf("an invalid spec must not produce a Go error, got: %v", err)
+	}
+	if result.Valid {
+		t.Error("Valid: got true, want false")
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != "XOLU-FSM006" {
+		t.Errorf("Errors: got %+v", result.Errors)
+	}
+	if result.Analysis != nil {
+		t.Error("Analysis should be nil/absent on an invalid result")
+	}
+}
+
+func TestValidateMachineDefTransportErrorIsGoError(t *testing.T) {
+	// Distinguishing case: an actual transport-level failure (this
+	// endpoint returning something other than 200, which shouldn't
+	// normally happen but the client must still handle correctly)
+	// DOES produce a Go error, unlike an invalid spec.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.ValidateMachineDef(context.Background(), MachineSpec{Name: "x"})
+	if err == nil {
+		t.Fatal("expected an error for a genuine 500")
+	}
+}
+
+// ─── MachineDef.ParsedAnalysis ──────────────────────────────────────────────
+
+func TestParsedAnalysis_HappyPath(t *testing.T) {
+	def := &MachineDef{
+		Analysis: json.RawMessage(`{"reachable":true,"deterministic":false,"determinism":"exclusive","terminal_states":["end"],"cycles":["a->b->a"],"warnings":["w1"]}`),
+	}
+	a, err := def.ParsedAnalysis()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if a == nil {
+		t.Fatal("expected a non-nil result")
+	}
+	if !a.Reachable || a.Deterministic {
+		t.Errorf("got %+v", a)
+	}
+	if len(a.Cycles) != 1 || a.Cycles[0] != "a->b->a" {
+		t.Errorf("Cycles: got %v", a.Cycles)
+	}
+}
+
+func TestParsedAnalysis_Empty(t *testing.T) {
+	def := &MachineDef{}
+	a, err := def.ParsedAnalysis()
+	if err != nil {
+		t.Fatalf("unexpected error for empty Analysis: %v", err)
+	}
+	if a != nil {
+		t.Errorf("expected nil for empty Analysis, got %+v", a)
+	}
+}
+
+func TestParsedAnalysis_Malformed(t *testing.T) {
+	def := &MachineDef{Analysis: json.RawMessage(`not valid json`)}
+	_, err := def.ParsedAnalysis()
+	if err == nil {
+		t.Fatal("expected an error for malformed Analysis JSON")
 	}
 }

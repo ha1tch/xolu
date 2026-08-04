@@ -108,7 +108,7 @@ func TestDBInit_PerFileLayout(t *testing.T) {
 		"--tenant", "acme", "--tenant", "beta:5", "--graph"})
 
 	// Each tenant (0, 1=acme, 5=beta) gets its own store file plus ts/blobs.
-	for _, id := range []uint16{0, 1, 5} {
+	for _, id := range []tenant.TenantID{0, 1, 5} {
 		mustExistFile(t, sl.TenantStorePath(base, id))
 		mustExistDir(t, sl.TenantTSDir(base, id))
 		mustExistDir(t, sl.TenantBlobDir(base, id))
@@ -118,10 +118,10 @@ func TestDBInit_PerFileLayout(t *testing.T) {
 		t.Error("per-file init must not create a shared store")
 	}
 	// Each tenant's node table lives in its own store file.
-	assertTableIn(t, sl.TenantStorePath(base, 1), tenant.NodesTableName(1), true)
-	assertTableIn(t, sl.TenantStorePath(base, 5), tenant.NodesTableName(5), true)
+	assertTableIn(t, sl.TenantStorePath(base, 1), tenant.TenantID(1).NodesTableName(), true)
+	assertTableIn(t, sl.TenantStorePath(base, 5), tenant.TenantID(5).NodesTableName(), true)
 	// And NOT in tenant 0's file.
-	assertTableIn(t, sl.TenantStorePath(base, 0), tenant.NodesTableName(1), false)
+	assertTableIn(t, sl.TenantStorePath(base, 0), tenant.TenantID(1).NodesTableName(), false)
 }
 
 func TestDBInit_SharedLayout(t *testing.T) {
@@ -131,7 +131,7 @@ func TestDBInit_SharedLayout(t *testing.T) {
 
 	// One shared store file; per-tenant ts/blobs dirs still present.
 	mustExistFile(t, sl.SharedStorePath(base))
-	for _, id := range []uint16{0, 1, 7} {
+	for _, id := range []tenant.TenantID{0, 1, 7} {
 		mustExistDir(t, sl.TenantTSDir(base, id))
 		mustExistDir(t, sl.TenantBlobDir(base, id))
 		// No per-tenant store files in shared mode.
@@ -140,8 +140,8 @@ func TestDBInit_SharedLayout(t *testing.T) {
 		}
 	}
 	// All tenants' node tables coexist in the one shared store.
-	for _, id := range []uint16{0, 1, 7} {
-		assertTableIn(t, sl.SharedStorePath(base), tenant.NodesTableName(id), true)
+	for _, id := range []tenant.TenantID{0, 1, 7} {
+		assertTableIn(t, sl.SharedStorePath(base), tenant.TenantID(id).NodesTableName(), true)
 	}
 }
 
@@ -262,9 +262,9 @@ func TestTenantDelete_SharedRemovesDirsAndTables(t *testing.T) {
 		t.Error("shared delete should remove the tenant blobs dir")
 	}
 	// ...and the tenant's tables dropped from the shared store.
-	assertTableIn(t, sl.SharedStorePath(base), tenant.NodesTableName(7), false)
+	assertTableIn(t, sl.SharedStorePath(base), tenant.TenantID(7).NodesTableName(), false)
 	// acme remains.
-	assertTableIn(t, sl.SharedStorePath(base), tenant.NodesTableName(1), true)
+	assertTableIn(t, sl.SharedStorePath(base), tenant.TenantID(1).NodesTableName(), true)
 }
 
 // ---------------------------------------------------------------------------

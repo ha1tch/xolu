@@ -12,10 +12,11 @@ import (
 	"testing"
 
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // newPerFileSQLiteStore creates a SQLiteStore in per-file tenant mode for OQL tests.
-func newPerFileSQLiteStore(t *testing.T, dbPath string, tenantID uint16) storage.Store {
+func newPerFileSQLiteStore(t *testing.T, dbPath string, tenantID tenant.TenantID) storage.Store {
 	t.Helper()
 	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:                 "sqlite",

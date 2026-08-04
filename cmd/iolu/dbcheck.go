@@ -59,11 +59,11 @@ func cmdDBCheck(args []string) {
 		// oracle's derived plane does not exist, so there is nothing to
 		// have drifted.
 		var exists int
-		table := fmt.Sprintf("t%04d_graph", tid)
+		table := tid.GraphTableName()
 		err = store.DB().QueryRowContext(ctx,
 			`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists)
 		if err != nil {
-			fmt.Printf("  t%04d  graph.edges   SKIP (no graph table)\n", tid)
+			fmt.Printf("  %s  graph.edges   SKIP (no graph table)\n", tenant.TenantID(tid).DirName())
 			_ = store.Close()
 			continue
 		}
@@ -71,14 +71,33 @@ func cmdDBCheck(args []string) {
 		oracles := []chronicle.RebuildOracle{store.GraphEdgesOracle()}
 		// bal oracles join when the tenant has bal tables (@B08).
 		var balExists int
-		balTable := fmt.Sprintf("t%04X_bal_journal", tid)
+		balTable := tid.TablePrefix() + "bal_journal"
+		var rp *bal.RollupPebble
 		if err := store.DB().QueryRowContext(ctx,
 			`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, balTable).Scan(&balExists); err == nil {
-			bs := bal.NewStore(store.DB(), tenant.TablePrefix(tid))
+			bs := bal.NewStore(store.DB(), tid)
 			oracles = append(oracles, bs.GlobalFoldOracle(), bs.ChainOracle())
+			// Rollup oracle only where the derived plane exists: it
+			// proves derive(journal) == cascade THROUGH the grains, so a
+			// lost carry upward is caught, not just a leaf mismatch.
+			// T-62: the plane is Pebble now, so "exists" means the
+			// rollup directory is there, not a SQL table.
+			rollupDir := sl.TenantBalRollupDir(*baseDir, tid)
+			if _, statErr := os.Stat(rollupDir); statErr == nil {
+				var openErr error
+				rp, openErr = bal.OpenRollupPebble(rollupDir)
+				if openErr != nil {
+					fatal("tenant %d: open rollup pebble: %v", tid, openErr)
+				}
+				bs.SetRollupPebble(rp)
+				oracles = append(oracles, bs.RollupOracle())
+			}
 		}
 		results, err := chronicle.CheckAll(ctx, oracles)
 		if err != nil {
+			if rp != nil {
+				_ = rp.Close()
+			}
 			_ = store.Close()
 			fatal("tenant %d: %v", tid, err)
 		}
@@ -94,6 +113,9 @@ func cmdDBCheck(args []string) {
 				fmt.Printf("    -- derived --\n%s\n    -- current --\n%s\n", indent(r.Derived), indent(r.Current))
 			}
 		}
+		if rp != nil {
+			_ = rp.Close()
+		}
 		_ = store.Close()
 	}
 
@@ -107,13 +129,13 @@ func cmdDBCheck(args []string) {
 // tXXXX directory holding a store file. Shared mode: tenant 0 plus every
 // row in the shared store's tenants registry (best-effort: a missing
 // registry yields just tenant 0).
-func listTenantIDs(baseDir string, mode storeMode) ([]uint16, error) {
+func listTenantIDs(baseDir string, mode storeMode) ([]tenant.TenantID, error) {
 	if mode == modePerFile {
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
 			return nil, err
 		}
-		var ids []uint16
+		var ids []tenant.TenantID
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
@@ -134,7 +156,7 @@ func listTenantIDs(baseDir string, mode storeMode) ([]uint16, error) {
 		return nil, err
 	}
 	defer func() { _ = store.Close() }()
-	ids := []uint16{0}
+	ids := []tenant.TenantID{0}
 	rows, err := store.DB().Query(`SELECT id FROM tenants ORDER BY id`)
 	if err != nil {
 		return ids, nil // no registry: tenant 0 only
@@ -146,7 +168,7 @@ func listTenantIDs(baseDir string, mode storeMode) ([]uint16, error) {
 			return ids, err
 		}
 		if id != 0 {
-			ids = append(ids, uint16(id))
+			ids = append(ids, tenant.TenantID(id))
 		}
 	}
 	return ids, rows.Err()

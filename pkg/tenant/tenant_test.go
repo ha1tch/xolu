@@ -12,7 +12,7 @@ import (
 
 func TestNodeID(t *testing.T) {
 	tests := []struct {
-		tenantID uint16
+		tenantID TenantID
 		entity   string
 		id       int
 		want     string
@@ -25,7 +25,7 @@ func TestNodeID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := NodeID(tt.tenantID, tt.entity, tt.id)
+			got := tt.tenantID.NodeID(tt.entity, tt.id)
 			if got != tt.want {
 				t.Errorf("NodeID(%d, %q, %d) = %q, want %q", tt.tenantID, tt.entity, tt.id, got, tt.want)
 			}
@@ -35,7 +35,7 @@ func TestNodeID(t *testing.T) {
 
 func TestCacheKey(t *testing.T) {
 	tests := []struct {
-		tenantID uint16
+		tenantID TenantID
 		entity   string
 		id       int
 		want     string
@@ -46,7 +46,7 @@ func TestCacheKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := CacheKey(tt.tenantID, tt.entity, tt.id)
+			got := tt.tenantID.CacheKey(tt.entity, tt.id)
 			if got != tt.want {
 				t.Errorf("CacheKey(%d, %q, %d) = %q, want %q", tt.tenantID, tt.entity, tt.id, got, tt.want)
 			}
@@ -55,19 +55,19 @@ func TestCacheKey(t *testing.T) {
 }
 
 func TestCachePattern(t *testing.T) {
-	if got := CachePattern(0, "users"); got != "users:*" {
+	if got := TenantID(0).CachePattern("users"); got != "users:*" {
 		t.Errorf("CachePattern(0, users) = %q", got)
 	}
-	if got := CachePattern(0xBEF0, "users"); got != "BEF0:users:*" {
+	if got := TenantID(0xBEF0).CachePattern("users"); got != "BEF0:users:*" {
 		t.Errorf("CachePattern(BEF0, users) = %q", got)
 	}
 }
 
 func TestCacheTenantPattern(t *testing.T) {
-	if got := CacheTenantPattern(0); got != "*" {
+	if got := TenantID(0).CacheTenantPattern(); got != "*" {
 		t.Errorf("CacheTenantPattern(0) = %q", got)
 	}
-	if got := CacheTenantPattern(0xBEF0); got != "BEF0:*" {
+	if got := TenantID(0xBEF0).CacheTenantPattern(); got != "BEF0:*" {
 		t.Errorf("CacheTenantPattern(BEF0) = %q", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	done := make(chan error, 100)
 	for i := 1; i <= 100; i++ {
 		go func(n int) {
-			done <- r.Register(context.Background(), fmt.Sprintf("tenant-%d", n), uint16(n))
+			done <- r.Register(context.Background(), fmt.Sprintf("tenant-%d", n), TenantID(n))
 		}(i)
 	}
 

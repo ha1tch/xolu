@@ -274,7 +274,7 @@ func MigrateAdaptedTable(
 	if newSpec.HasExtra {
 		hasExtraInt = 1
 	}
-	nsch := fmt.Sprintf("t%04X_n_sch", newSpec.TenantID)
+	nsch := newSpec.TenantID.NodeSchemaTableName()
 	_, err = tx.ExecContext(ctx,
 		"UPDATE "+nsch+" SET schema_hash = ?, column_spec = ?, has_extra = ? WHERE entity_type = ?",
 		newSpec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)
@@ -304,7 +304,7 @@ func updateSchemaMetadata(ctx context.Context, db *sql.DB, entity string, spec *
 	if spec.HasExtra {
 		hasExtraInt = 1
 	}
-	nsch := fmt.Sprintf("t%04X_n_sch", spec.TenantID)
+	nsch := spec.TenantID.NodeSchemaTableName()
 	_, err = db.ExecContext(ctx,
 		"UPDATE "+nsch+" SET schema_hash = ?, column_spec = ?, has_extra = ? WHERE entity_type = ?",
 		spec.SchemaHash, string(columnSpecJSON), hasExtraInt, entity)

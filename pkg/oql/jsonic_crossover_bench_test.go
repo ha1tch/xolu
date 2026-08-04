@@ -233,7 +233,7 @@ func benchJsonicRowCount(b *testing.B, n int) {
 	store.DB().Exec("PRAGMA synchronous=OFF")
 	store.DB().Exec("PRAGMA journal_mode=MEMORY")
 	tx, _ := store.DB().BeginTx(ctx, nil)
-	ins, _ := tx.Prepare(`INSERT INTO ` + tenant.NodesTableName(0) + ` (entity_type, id, data) VALUES ('things', ?, ?)`)
+	ins, _ := tx.Prepare(`INSERT INTO ` + tenant.TenantID(0).NodesTableName() + ` (entity_type, id, data) VALUES ('things', ?, ?)`)
 	for i := 0; i < n; i++ {
 		data := fmt.Sprintf(
 			`{"id":%d,"code":"T-%04d","status":"%s","value":%.1f,"floor":%d,"zone":"z%d","tag1":"aaa","tag2":"bbb"}`,
@@ -242,7 +242,7 @@ func benchJsonicRowCount(b *testing.B, n int) {
 		ins.Exec(i+1, data)
 	}
 	ins.Close()
-	tx.Exec(`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('things', ?)
+	tx.Exec(`INSERT INTO `+tenant.TenantID(0).NodeSeqTableName()+` (entity_type, next_id) VALUES ('things', ?)
 		ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, n, n)
 	tx.Commit()
 

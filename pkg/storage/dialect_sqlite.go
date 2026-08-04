@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // pow10 returns 10^n for n in [0, 18]. Panics for n outside this range.
@@ -189,8 +191,8 @@ func (d *SQLiteStorageDialect) ExistsSQL(spec *AdaptedTableSpec) string {
 	return fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)", spec.TableName())
 }
 
-func (d *SQLiteStorageDialect) NodeSchemaTableSQL(tenantID uint16) string {
-	table := fmt.Sprintf("t%04X_n_sch", tenantID)
+func (d *SQLiteStorageDialect) NodeSchemaTableSQL(tenantID tenant.TenantID) string {
+	table := tenantID.NodeSchemaTableName()
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     entity_type TEXT PRIMARY KEY,
     schema_hash TEXT NOT NULL,

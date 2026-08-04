@@ -637,11 +637,11 @@ func loadEntitiesFromEdgeTable(
 	for _, tid := range tenantIDs {
 		n, err := scanTenantEdges(ctx, scanner, g, tid, logger)
 		if err != nil {
-			logger.Warn().Err(err).Uint16("tenant", tid).Msg("loadEntitiesFromEdgeTable: tenant hydration failed; skipping")
+			logger.Warn().Err(err).Uint16("tenant", uint16(tid)).Msg("loadEntitiesFromEdgeTable: tenant hydration failed; skipping")
 			continue
 		}
 		if n > 0 {
-			logger.Info().Int("edges", n).Uint16("tenant", tid).Msg("Loaded tenant graph from edge table")
+			logger.Info().Int("edges", n).Uint16("tenant", uint16(tid)).Msg("Loaded tenant graph from edge table")
 		}
 	}
 	if n := g.VodeCount(); n > 0 {
@@ -665,24 +665,24 @@ func scanTenantEdges(
 	ctx context.Context,
 	scanner storage.GraphEdgeScanner,
 	g graph.Graph,
-	tid uint16,
+	tid tenant.TenantID,
 	logger zerolog.Logger,
 ) (int, error) {
 	count := 0
 	err := scanner.ScanGraphEdges(ctx, tid, func(e storage.GraphEdge) error {
-		if err := g.AddNode(tenant.NodeID(tid, e.SourceEntity, e.SourceID), e.SourceEntity); err != nil {
+		if err := g.AddNode(tid.NodeID(e.SourceEntity, e.SourceID), e.SourceEntity); err != nil {
 			logger.Warn().Err(err).
 				Str("source", e.SourceEntity).Int("id", e.SourceID).
 				Msg("scanTenantEdges: AddNode source failed")
 		}
-		if err := g.AddNode(tenant.NodeID(tid, e.TargetEntity, e.TargetID), e.TargetEntity); err != nil {
+		if err := g.AddNode(tid.NodeID(e.TargetEntity, e.TargetID), e.TargetEntity); err != nil {
 			logger.Warn().Err(err).
 				Str("target", e.TargetEntity).Int("id", e.TargetID).
 				Msg("scanTenantEdges: AddNode target failed")
 		}
 		if err := g.AddEdge(
-			tenant.NodeID(tid, e.SourceEntity, e.SourceID),
-			tenant.NodeID(tid, e.TargetEntity, e.TargetID),
+			tid.NodeID(e.SourceEntity, e.SourceID),
+			tid.NodeID(e.TargetEntity, e.TargetID),
 			e.Relationship,
 		); err != nil {
 			logger.Warn().Err(err).
@@ -737,11 +737,11 @@ func loadEntitiesFromStore(
 		if err != nil || parsed == 0 {
 			continue
 		}
-		tid := uint16(parsed)
+		tid := tenant.TenantID(parsed)
 		tenantSchemaPath := filepath.Join(schemaPath, name)
 		n := loadTenantEntitiesFromStore(ctx, cfg, store, g, tid, tenantSchemaPath, logger)
 		if n > 0 {
-			logger.Info().Int("count", n).Uint16("tenant", tid).Msg("Loaded tenant entities into graph")
+			logger.Info().Int("count", n).Uint16("tenant", uint16(tid)).Msg("Loaded tenant entities into graph")
 		}
 	}
 
@@ -757,7 +757,7 @@ func loadTenantEntitiesFromStore(
 	cfg *config.Config,
 	store storage.Store,
 	g graph.Graph,
-	tid uint16,
+	tid tenant.TenantID,
 	schemaPath string,
 	logger zerolog.Logger,
 ) int {
@@ -783,7 +783,7 @@ func loadTenantEntitiesFromStore(
 			SQLitePerFileTenants: baseCfg.SQLitePerFileTenants,
 		})
 		if err != nil {
-			logger.Warn().Err(err).Uint16("tenant", tid).Msg("loadTenantEntitiesFromStore: could not create scoped store; skipping tenant")
+			logger.Warn().Err(err).Uint16("tenant", uint16(tid)).Msg("loadTenantEntitiesFromStore: could not create scoped store; skipping tenant")
 			return 0
 		}
 		defer func() { _ = scopedStore.Close() }()
@@ -797,7 +797,7 @@ func loadTenantEntitiesFromStore(
 		entityName := entry.Name()
 		entities, err := scopedStore.List(ctx, entityName)
 		if err != nil {
-			logger.Warn().Err(err).Str("entity", entityName).Uint16("tenant", tid).Msg("Failed to list entities")
+			logger.Warn().Err(err).Str("entity", entityName).Uint16("tenant", uint16(tid)).Msg("Failed to list entities")
 			continue
 		}
 		for _, data := range entities {
@@ -813,7 +813,7 @@ func loadTenantEntitiesFromStore(
 				logger.Warn().Err(err).
 					Str("entity", entityName).
 					Int("id", int(id)).
-					Uint16("tenant", tid).
+					Uint16("tenant", uint16(tid)).
 					Msg("Failed to add entity to graph")
 			} else {
 				count++

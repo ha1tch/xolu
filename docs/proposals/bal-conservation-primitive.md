@@ -321,5 +321,5 @@ the same native locks.
 5. Client methods, integration-suite flow, molu tools (~1 d).
 
 Roughly a week wholesale, thin because the substrate carries the rest;
-stages wait for a consumer — Shelf's stock model being the obvious
+stages wait for a consumer — a stock-tracking application being the obvious
 first.

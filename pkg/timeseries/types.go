@@ -10,6 +10,7 @@ import (
 	"time"
 
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // ErrDeleteNotSupported is returned by Store implementations that do not
@@ -515,13 +516,13 @@ type StoreFactory func(dir string, cfg StoreConfig, tenantName string) (Store, e
 type Manager interface {
 	// Provision creates a timeseries store for a tenant.
 	// tenantName is used to scope dynconfig lookups.
-	Provision(ctx context.Context, tenantID uint16, tenantName string) error
+	Provision(ctx context.Context, tenantID tenant.TenantID, tenantName string) error
 
 	// StoreFor returns the Store for a tenant, or an error if not provisioned.
-	StoreFor(tenantID uint16) (Store, error)
+	StoreFor(tenantID tenant.TenantID) (Store, error)
 
 	// IsProvisioned reports whether a tenant has timeseries storage.
-	IsProvisioned(tenantID uint16) bool
+	IsProvisioned(tenantID tenant.TenantID) bool
 
 	// Close shuts down all stores.
 	Close() error

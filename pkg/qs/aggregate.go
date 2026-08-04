@@ -4,7 +4,7 @@
 
 package qs
 
-import "fmt"
+import "strconv"
 
 // toNumeric attempts to extract a float64 from any value, including
 // string-encoded numerics (e.g. SQLite decimal columns returned as text).
@@ -13,8 +13,14 @@ func toNumeric(v interface{}) (float64, bool) {
 		return f, true
 	}
 	if s, ok := v.(string); ok {
-		var f float64
-		if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+		// strconv.ParseFloat, not fmt.Sscanf: Sscanf's "%f" verb matches
+		// only a leading numeric prefix and reports success even with
+		// unconsumed trailing characters -- a string like "2026-08-03..."
+		// would silently parse as the bare number 2026. ParseFloat
+		// requires the whole string to be a valid float, which is what
+		// this function's own "string-encoded numerics" comment already
+		// assumes.
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			return f, true
 		}
 	}

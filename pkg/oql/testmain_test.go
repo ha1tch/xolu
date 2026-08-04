@@ -158,7 +158,7 @@ func seedItems(ctx context.Context, store *storage.SQLiteStore) error {
 
 	// Update entity sequence
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('items', ?)
+		`INSERT INTO `+tenant.TenantID(0).NodeSeqTableName()+` (entity_type, next_id) VALUES ('items', ?)
 		 ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
 		return fmt.Errorf("sequence items: %w", err)
 	}
@@ -235,7 +235,7 @@ func seedSales(ctx context.Context, store *storage.SQLiteStore) error {
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodeSeqTableName(0)+` (entity_type, next_id) VALUES ('sales', ?)
+		`INSERT INTO `+tenant.TenantID(0).NodeSeqTableName()+` (entity_type, next_id) VALUES ('sales', ?)
 		 ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`, goldenN, goldenN); err != nil {
 		return fmt.Errorf("sequence sales: %w", err)
 	}
@@ -255,7 +255,7 @@ func seedEquivalence(ctx context.Context, store *storage.SQLiteStore) error {
 	defer tx.Rollback()
 
 	insert, err := tx.PrepareContext(ctx,
-		`INSERT INTO `+tenant.NodesTableName(0)+` (entity_type, id, data) VALUES (?, ?, ?)`)
+		`INSERT INTO `+tenant.TenantID(0).NodesTableName()+` (entity_type, id, data) VALUES (?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare insert: %w", err)
 	}
@@ -321,7 +321,7 @@ func seedEquivalence(ctx context.Context, store *storage.SQLiteStore) error {
 	}
 
 	// Update entity_sequences for all four entity types
-	seqSQL := `INSERT INTO ` + tenant.NodeSeqTableName(0) + ` (entity_type, next_id) VALUES (?, ?)
+	seqSQL := `INSERT INTO ` + tenant.TenantID(0).NodeSeqTableName() + ` (entity_type, next_id) VALUES (?, ?)
 		ON CONFLICT(entity_type) DO UPDATE SET next_id = ?`
 	for _, etype := range []string{"sensors", "readings", "assets", "events"} {
 		if _, err := tx.ExecContext(ctx, seqSQL, etype, goldenN, goldenN); err != nil {

@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // ---------------------------------------------------------------------------
@@ -84,13 +86,13 @@ func (r *AdaptedRegistry) Entities() []string {
 // If the table already exists with the same schema hash, this is a no-op.
 // If the schema has changed, the caller must handle migration separately
 // (Phase 4 of the design).
-func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegistry, entity string, schema map[string]interface{}, dialect StorageDialect, tenantID uint16) error {
+func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegistry, entity string, schema map[string]interface{}, dialect StorageDialect, tenantID tenant.TenantID) error {
 	spec, err := DeriveAdaptedTableSpec(entity, schema, dialect, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to derive adapted table spec for %q: %w", entity, err)
 	}
 
-	nsch := fmt.Sprintf("t%04X_n_sch", tenantID)
+	nsch := tenantID.NodeSchemaTableName()
 
 	// Ensure the per-tenant schema registry table exists (lazy creation).
 	if _, err := db.ExecContext(ctx, dialect.NodeSchemaTableSQL(tenantID)); err != nil {
@@ -160,10 +162,10 @@ func RegisterAdaptedTable(ctx context.Context, db *sql.DB, registry *AdaptedRegi
 
 // LoadAdaptedRegistry reads the per-tenant t<X>_n_sch metadata table and
 // populates the registry. Called at store startup.
-func LoadAdaptedRegistry(ctx context.Context, db *sql.DB, tenantID uint16) (*AdaptedRegistry, error) {
+func LoadAdaptedRegistry(ctx context.Context, db *sql.DB, tenantID tenant.TenantID) (*AdaptedRegistry, error) {
 	registry := NewAdaptedRegistry()
 
-	nsch := fmt.Sprintf("t%04X_n_sch", tenantID)
+	nsch := tenantID.NodeSchemaTableName()
 
 	// Check if the per-tenant schema registry table exists.
 	var tableExists int

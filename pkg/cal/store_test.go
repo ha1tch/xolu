@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	ot "github.com/ha1tch/xolu/pkg/xolutime"
 	"github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
+	ot "github.com/ha1tch/xolu/pkg/xolutime"
 )
 
 // dumpIndex reads the entire occupancy keyspace into a comparable map
@@ -57,7 +58,7 @@ func indexEqual(a, b map[string]DayBitmap) (bool, string) {
 
 // openTestStore opens a cal index store under a temp dir using the real
 // storelayout path invariant (TenantCalDir), proving the directory convention.
-func openTestStore(t *testing.T, tenantID uint16) *IndexStore {
+func openTestStore(t *testing.T, tenantID tenant.TenantID) *IndexStore {
 	t.Helper()
 	base := t.TempDir()
 	dir := storelayout.TenantCalDir(base, tenantID)
@@ -92,7 +93,7 @@ func TestIndexEqualsRebuild(t *testing.T) {
 	base := ot.MustParse("2026-07-01T00:00:00Z")
 
 	for trial := 0; trial < 200; trial++ {
-		s := openTestStore(t, uint16(trial%5))
+		s := openTestStore(t, tenant.TenantID(trial%5))
 		src := NewMemBookingSource(rng.Intn(2) == 0)
 
 		// a few calendars

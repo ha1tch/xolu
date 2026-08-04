@@ -190,7 +190,7 @@ func setupPushDownFixture(t *testing.T) *pushDownFixture {
 	}
 
 	// Wire the push-down adapter.
-	edgeTable := tenant.GraphTableName(0)
+	edgeTable := tenant.TenantID(0).GraphTableName()
 	adapter := &testGraphQueryableAdapter{
 		AggregateQueryable: store,
 		edgeTable:          edgeTable,
@@ -445,7 +445,7 @@ func TestOperatorToSQL(t *testing.T) {
 func TestTenantIDFromPrefix(t *testing.T) {
 	cases := []struct {
 		prefix string
-		want   uint16
+		want   tenant.TenantID
 		err    bool
 	}{
 		{"", 0, false},
@@ -704,7 +704,7 @@ func TestWithGraphStore_Attaches(t *testing.T) {
 	f := setupPushDownFixture(t)
 
 	// The executor already has a graphStore. Verify the method is fluent.
-	edgeTable := tenant.GraphTableName(0)
+	edgeTable := tenant.TenantID(0).GraphTableName()
 	adapter := &testGraphQueryableAdapter{
 		AggregateQueryable: f.store,
 		edgeTable:          edgeTable,

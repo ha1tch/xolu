@@ -97,42 +97,15 @@ class Report:
 
 
 # ---------------------------------------------------------------------------
-# A. Register consistency.
+# A. Register consistency — delegated to scripts/register.py so the gate
+# and the register editor share one parser and cannot disagree. (The
+# gate's former inline regexes silently skipped items using ** emphasis
+# on the priority cell — T-51 was invisible to A2/A3 for two releases.)
 
 def check_register(r: Report):
-    t = read("docs/TRACKING.md")
-
-    # A1: no ✓ in status table.
-    for line in t.splitlines():
-        if re.match(r"^\| T-\d\d \|", line) and "✓" in line:
-            r.err("A1", f"closed item in register: {line.strip()[:70]}")
-
-    # A2, A3: rows and detail blocks must agree.
-    rows = {}
-    for m in re.finditer(
-        r"^\| (T-\d\d) \|[^|]*\| (\S+) \| (P\d) \| (\S+) \|", t, re.M
-    ):
-        rows[m.group(1)] = (m.group(2).strip(), m.group(3).strip(), m.group(4).strip())
-
-    fields = {}
-    for m in re.finditer(
-        r"^### (T-\d\d)\.[^\n]*\n\nTheme: (\S+) · Priority: (P\d) · Status: (\S+)",
-        t, re.M
-    ):
-        fields[m.group(1)] = (m.group(2), m.group(3), m.group(4))
-
-    row_ids = set(rows)
-    field_ids = set(fields)
-    only_rows = row_ids - field_ids
-    only_fields = field_ids - row_ids
-    if only_rows:
-        r.err("A2", f"rows without detail blocks: {sorted(only_rows)}")
-    if only_fields:
-        r.err("A2", f"detail blocks without rows: {sorted(only_fields)}")
-
-    for tid in row_ids & field_ids:
-        if rows[tid] != fields[tid]:
-            r.err("A3", f"{tid}: table {rows[tid]} vs detail {fields[tid]}")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import register
+    register.load().check(r)
 
 
 # ---------------------------------------------------------------------------

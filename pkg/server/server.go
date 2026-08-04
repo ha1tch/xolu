@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/ha1tch/xolu/pkg/bal"
 	"github.com/ha1tch/xolu/pkg/blob"
 	"github.com/ha1tch/xolu/pkg/cache"
 	"github.com/ha1tch/xolu/pkg/cal"
@@ -34,11 +35,12 @@ import (
 	xoluMiddleware "github.com/ha1tch/xolu/pkg/middleware"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/oql"
+	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/storage"
 	sl "github.com/ha1tch/xolu/pkg/storelayout"
 	"github.com/ha1tch/xolu/pkg/sulpher"
-	"github.com/ha1tch/xolu/pkg/refintegrity"
 	"github.com/ha1tch/xolu/pkg/tenant"
+	"github.com/ha1tch/xolu/pkg/tenantexport"
 	"github.com/ha1tch/xolu/pkg/timeseries"
 	"github.com/ha1tch/xolu/pkg/validation"
 	"github.com/ha1tch/xolu/pkg/version"
@@ -64,6 +66,8 @@ type Server struct {
 	sulpherJobs       *sulpher.JobManager
 	tenantSulpherJobs sync.Map // uint16 -> *sulpher.JobManager; lazily initialised
 	oqlJobs           *oql.JobManager
+	tenantExportJobs  *tenantexport.JobManager
+	promoteJobs       *PromoteJobManager
 	rateLimiter       *xoluMiddleware.RateLimiter
 	metrics           *xoluMiddleware.Metrics
 	logger            zerolog.Logger
@@ -72,17 +76,36 @@ type Server struct {
 	tsManager         timeseries.Manager // nil when timeseries disabled; production value is *DefaultManager
 	tsRetention       *gcpkg.Worker      // nil when retention disabled
 	httpServer        *http.Server
-	metricsServer     *http.Server         // non-nil only when config.MetricsPort > 0
-	s3Server          *http.Server         // non-nil only when config.S3Enabled && config.S3Port > 0
-	blobMgr           *blobManager         // nil when BlobEnabled is false
-	calMgr            *cal.Manager         // nil when CalEnabled is false (T-18)
-	balInit           sync.Map             // tenantID → *sync.Once for bal DDL (per-instance)
-	dynConfig         *dynconfig.DynConfig // nil when DynConfigEnabled is false
-	dynWatcher        *dynconfig.Watcher   // nil when DynConfigEnabled is false
-	gcWorkers         []*gcpkg.Worker      // all registered GC workers; used by admin endpoint
-	tenantStores      sync.Map             // tenantID (uint16) -> storage.Store; avoids per-request sql.Open
-	pickCursors       sync.Map             // "tenant:name" -> *int64; in-memory round-robin cursor (S10; persisted in S21)
-	ready             int32                // atomic: 0 = not ready, 1 = ready; set when Start() is called
+	metricsServer     *http.Server // non-nil only when config.MetricsPort > 0
+	s3Server          *http.Server // non-nil only when config.S3Enabled && config.S3Port > 0
+	// startReady is closed by Start() once httpServer/metricsServer/s3Server
+	// are all assigned, immediately before the blocking ListenAndServe call.
+	// T-140: these three fields are plain pointers written once in Start()
+	// and read in Shutdown(); the realistic production pattern (Start() in
+	// one goroutine, Shutdown() from a signal handler in another -- see
+	// cmd/xolu/main.go) has no other happens-before edge between the two,
+	// which -race correctly flags as a data race regardless of how narrow
+	// the practical timing window is. Shutdown() receives from this channel
+	// (respecting the caller's context) before touching any of the three
+	// fields, establishing that edge properly instead of the ad-hoc
+	// `time.Sleep` a test previously used to paper over the same gap.
+	startReady   chan struct{}
+	blobMgr      *blobManager         // nil when BlobEnabled is false
+	calMgr       *cal.Manager         // nil when CalEnabled is false (T-18)
+	balInit      sync.Map             // tenantID → *sync.Once for bal DDL (per-instance)
+	balRollup    sync.Map             // tenantID → *bal.RollupPebble (T-62: long-lived, attached per request via SetRollupPebble)
+	balSealer    sync.Map             // tenantID → *chronicle.Sealer (item 16 §7: long-lived, attached per request via SetSealer)
+	dxpCache     sync.Map             // tenantID → *dxp.MemCache (item 21: long-lived, shared across every participant adapter for one tenant so cross-primitive resource conflicts are actually detected — mirrors balRollup/balSealer's own pattern exactly)
+	locInit      sync.Map             // tenantID → *sync.Once for loc's own per-tenant SQLite file (T-118, wave 9): unlike bal's shared-store DDL, opening loc's dedicated file is not safe to repeat per request
+	locDB        sync.Map             // tenantID → *sql.DB for loc's own dedicated per-tenant file (storelayout.TenantLocDir) — cached, mirrors tenantStores' own "avoids per-request sql.Open" comment
+	objInit      sync.Map             // tenantID → *sync.Once for obj's own per-tenant SQLite file (T-119, wave 10), identical reasoning to locInit
+	objDB        sync.Map             // tenantID → *sql.DB for obj's own dedicated per-tenant file (storelayout.TenantObjDir), identical reasoning to locDB
+	dynConfig    *dynconfig.DynConfig // nil when DynConfigEnabled is false
+	dynWatcher   *dynconfig.Watcher   // nil when DynConfigEnabled is false
+	gcWorkers    []*gcpkg.Worker      // all registered GC workers; used by admin endpoint
+	tenantStores sync.Map             // tenantID (uint16) -> storage.Store; avoids per-request sql.Open
+	pickCursors  sync.Map             // "tenant:name" -> *int64; in-memory round-robin cursor (S10; persisted in S21)
+	ready        int32                // atomic: 0 = not ready, 1 = ready; set when Start() is called
 }
 
 // storeForTenant returns a Store scoped to the given tenant ID.
@@ -145,17 +168,17 @@ type graphQueryableAdapter struct {
 
 func (a *graphQueryableAdapter) GraphEdgesTable() string { return a.edgeTable }
 
-func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
+func (s *Server) sulpherJobsForTenant(tenantID tenant.TenantID) *sulpher.JobManager {
 	if s.sulpherJobs == nil {
 		return nil
 	}
 	if v, ok := s.tenantSulpherJobs.Load(tenantID); ok {
 		return v.(*sulpher.JobManager)
 	}
-	prefix := tenant.GraphNodePrefix(tenantID)
+	prefix := tenantID.GraphNodePrefix()
 	tenantStore, err := s.storeForTenant(tenantID)
 	if err != nil {
-		s.logger.Warn().Err(err).Uint16("tenant", tenantID).
+		s.logger.Warn().Err(err).Uint16("tenant", uint16(tenantID)).
 			Msg("sulpherJobsForTenant: could not get tenant store; property conditions will not hydrate")
 	}
 	executor := sulpher.NewExecutorForTenant(s.graph, s.config.MaxQueryDepth, prefix).WithLogger(s.logger)
@@ -163,7 +186,7 @@ func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 		executor = executor.WithStore(tenantStore)
 		// Also wire graph push-down if the store supports aggregate queries.
 		if aq, ok := tenantStore.(storage.AggregateQueryable); ok {
-			edgeTable := tenant.GraphEdgesTableName(tenantID)
+			edgeTable := tenantID.GraphEdgesTableName()
 			executor = executor.WithGraphStore(&graphQueryableAdapter{
 				AggregateQueryable: aq,
 				edgeTable:          edgeTable,
@@ -187,11 +210,11 @@ func (s *Server) sulpherJobsForTenant(tenantID uint16) *sulpher.JobManager {
 // Mirrors the timeseries layout:
 // tenantDBPath returns the SQLite file for a tenant under the invariant layout:
 // <BaseDir>/tXXXX/store/xolu.db. The directory is created by the caller.
-func tenantDBPath(baseDir string, tenantID uint16) string {
+func tenantDBPath(baseDir string, tenantID tenant.TenantID) string {
 	return sl.TenantStorePath(baseDir, tenantID)
 }
 
-func (s *Server) storeForTenant(tenantID uint16) (storage.Store, error) {
+func (s *Server) storeForTenant(tenantID tenant.TenantID) (storage.Store, error) {
 	if tenantID == 0 {
 		return s.storage, nil
 	}
@@ -268,7 +291,7 @@ func (s *Server) getStore(ctx context.Context) storage.Store {
 }
 
 // getTenantIDNumeric returns the numeric tenant ID from context, or 0.
-func getTenantIDNumeric(ctx context.Context) uint16 {
+func getTenantIDNumeric(ctx context.Context) tenant.TenantID {
 	if v := ctx.Value(storeContextKey); v != nil {
 		return v.(storage.Store).Config().TenantID
 	}
@@ -320,7 +343,7 @@ func (s *Server) tenantMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		var tid uint16
+		var tid tenant.TenantID
 		if s.config.Tenancy().Has(config.TenantRequireRoute) {
 			// Strict routing: tenant must be pre-registered. Set by TenantMode
 			// "strict" and, structurally, by "scoped" (which implies it). Because
@@ -384,16 +407,28 @@ func (s *Server) tenantMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// resolveNumericTenant attempts to parse raw as a decimal uint16 and look up
-// the corresponding tenant name in the registry. Returns the tenant ID,
-// resolved name, and true on success. Returns zero values and false if raw
-// is not numeric, out of range, zero, or not registered.
-func (s *Server) resolveNumericTenant(raw string) (uint16, string, bool) {
-	n, err := strconv.ParseUint(raw, 10, 16)
+// resolveNumericTenant attempts to parse raw as the 4-digit uppercase-hex
+// tenant ID (tenant.TenantID.String()'s format — the same encoding
+// pkg/client.WithTenantID sends, and the one used for every other
+// tenant-scoped string in this codebase) and look up the corresponding
+// tenant name in the registry. Returns the tenant ID, resolved name, and
+// true on success. Returns zero values and false if raw is not valid hex,
+// out of range, zero, or not registered.
+//
+// Fixed 2026-07-28 (T-60): this previously parsed as base-10 decimal,
+// while pkg/client and every other tenant-ID string in the substrate use
+// base-16 hex. The two only coincide for tenant IDs 0-9, where the
+// decimal and hex digit strings are identical by chance. For ID 10-15
+// (e.g. "000B") base-10 parsing failed outright; for ID 16 and any tenant
+// ID whose hex digits also happen to form a valid smaller decimal number
+// (e.g. "0010" hex=16 read as decimal=10), it silently resolved to the
+// WRONG tenant with no error at all. See TestResolveNumericTenant_HexNotDecimal.
+func (s *Server) resolveNumericTenant(raw string) (tenant.TenantID, string, bool) {
+	n, err := strconv.ParseUint(raw, 16, 16)
 	if err != nil || n == 0 {
 		return 0, "", false
 	}
-	id := uint16(n)
+	id := tenant.TenantID(n)
 	name, ok := s.tenantRegistry.Name(id)
 	if !ok {
 		return 0, "", false
@@ -515,6 +550,7 @@ func New(
 		router:         chi.NewRouter(),
 		tenantRegistry: tenant.NewRegistry(),
 		riRegistry:     refintegrity.NewRegistry(),
+		startReady:     make(chan struct{}),
 	}
 
 	// Initialize rate limiter if enabled
@@ -539,7 +575,7 @@ func New(
 	if cfg.GraphEnabled {
 		executor := sulpher.NewExecutor(g, cfg.MaxQueryDepth).WithStore(s.storage)
 		if aq, ok := s.storage.(storage.AggregateQueryable); ok {
-			edgeTable := tenant.GraphEdgesTableName(0)
+			edgeTable := tenant.TenantID(0).GraphEdgesTableName()
 			executor = executor.WithGraphStore(&graphQueryableAdapter{
 				AggregateQueryable: aq,
 				edgeTable:          edgeTable,
@@ -591,6 +627,23 @@ func New(
 	if cfg.QueryTimeout > 0 {
 		s.oqlJobs.SetQueryTimeout(time.Duration(cfg.QueryTimeout) * time.Second)
 	}
+
+	// Deliberately small and not currently configurable: export work is
+	// explicitly meant to be low-priority (the team's own framing when
+	// this was designed, 2026-08-03) -- it should never meaningfully
+	// compete with normal request traffic for CPU/IO, regardless of
+	// how many tenants try to export concurrently. Per-tenant
+	// throttling (one export in flight per tenant) is a separate,
+	// additional bound the job manager also enforces.
+	s.tenantExportJobs = tenantexport.NewJobManager(2)
+
+	// Same low-priority posture as tenantExportJobs: strict promotion
+	// (T-151) validates and migrates every row of an entity type, real
+	// work that should never compete unbounded with normal request
+	// traffic. Throttled per (tenant, entity type), not per tenant --
+	// see PromoteJobManager's own doc comment for why that's a
+	// deliberate difference from tenantExportJobs' own key shape.
+	s.promoteJobs = NewPromoteJobManager(2)
 
 	// Attach tenant persistence if using SQLite storage.
 	// This ensures name-to-ID mappings are stable across restarts.
@@ -673,6 +726,26 @@ func New(
 					Int("grace_secs", cfg.BlobGCGracePeriodSecs).
 					Msg("Blob GC worker started")
 			}
+
+			// A second, independent worker named "blob-export-sweep"
+			// (T-149) enforces a TTL on async-export blobs specifically
+			// -- separate from ordinary blob GC above, which never
+			// touches an export blob at all since it's still referenced
+			// by its own key alias for as long as it hasn't expired.
+			// See blobExportSweeper's own doc comment in
+			// blob_manager.go for why this is a distinct Sweeper rather
+			// than folded into blobManager.Sweep.
+			if cfg.BlobExportSweepEnabled && cfg.BlobExportSweepIntervalSecs > 0 {
+				interval := time.Duration(cfg.BlobExportSweepIntervalSecs) * time.Second
+				sweeper := &blobExportSweeper{mgr: mgr, ttl: time.Duration(cfg.BlobExportTTLSecs) * time.Second}
+				w := gcpkg.NewWorker("blob-export-sweep", sweeper, interval, logger)
+				w.Start()
+				s.gcWorkers = append(s.gcWorkers, w)
+				logger.Info().
+					Int("interval_secs", cfg.BlobExportSweepIntervalSecs).
+					Int("ttl_secs", cfg.BlobExportTTLSecs).
+					Msg("Blob export sweep worker started")
+			}
 		}
 	}
 
@@ -709,6 +782,27 @@ func New(
 						s.gcWorkers = append(s.gcWorkers, w)
 						logger.Info().Int("interval_secs", cfg.MetaGCIntervalSecs).
 							Msg("Metadata GC worker started")
+					}
+				}
+
+				// S15-dxp / T-100+T-102: register the dxp_txn deadline and
+				// retention sweeper. Marks instances stuck 'active' past
+				// their own deadline_ns (a crash or unrecovered panic
+				// mid-dispatch — ordinary dispatch is synchronous and marks
+				// its own terminal state) as 'expired', and purges terminal
+				// instances past cfg.DxpTxnRetentionSecs (default 48h).
+				// Nothing did either before T-100; see v2_dxp_sweeper.go's
+				// own doc for the full finding.
+				if cfg.DxpGCEnabled && cfg.DxpGCIntervalSecs > 0 {
+					if wdp, ok := store.(storage.WriterDBProvider); ok {
+						interval := time.Duration(cfg.DxpGCIntervalSecs) * time.Second
+						sweeper := NewDxpSweeper(wdp.WriterDB(), cfg.DxpTxnRetentionSecs)
+						w := gcpkg.NewWorker("dxp-gc", sweeper, interval, logger)
+						w.Start()
+						s.gcWorkers = append(s.gcWorkers, w)
+						logger.Info().Int("interval_secs", cfg.DxpGCIntervalSecs).
+							Int("retention_secs", cfg.DxpTxnRetentionSecs).
+							Msg("dxp deadline/retention sweeper started")
 					}
 				}
 
@@ -825,6 +919,24 @@ func (s *Server) setupRoutes() {
 		r.Delete("/{entity}/{id}", s.handleDelete)
 		r.Post("/{entity}/save/{id}", s.handleSave)
 		r.Post("/commit", s.handleCommit)
+		// Entity type listing (T-151) -- deliberately /entities, not
+		// /entity/list: the latter is structurally two segments, the
+		// same shape as GET /{entity}/{id} just above, and would risk
+		// being silently intercepted as "get the entity of type
+		// 'entity' with id 'list'" rather than reaching this handler.
+		// /entities is a single literal segment, the same shape as
+		// /schemas (already proven safe alongside /{entity} in
+		// production) -- verified directly, not assumed, before this
+		// shipped.
+		r.Get("/entities", s.handleListEntities)
+		// Schema promotion (T-151) -- literal "entity" first segment,
+		// three segments deep, structurally distinct from the two-
+		// segment /{entity}/{id} CRUD route. See this feature's own
+		// header comment in schema_promotion_handlers.go.
+		r.Get("/entity/{entity}/schema-suggestion", s.handleSchemaSuggestion)
+		r.Post("/entities/promote/flex/{entity}", s.handlePromoteFlex)
+		r.Post("/entities/promote/strict/{entity}", s.handlePromoteStrict)
+		r.Get("/entities/promote/status/{ticket}", s.handlePromoteStatus)
 		r.Route("/tenant/{tenant_id}", func(tr chi.Router) {
 			tr.Use(s.tenantMiddleware)
 			tr.Post("/{entity}", s.handleCreate)
@@ -835,6 +947,11 @@ func (s *Server) setupRoutes() {
 			tr.Delete("/{entity}/{id}", s.handleDelete)
 			tr.Post("/{entity}/save/{id}", s.handleSave)
 			tr.Post("/commit", s.handleCommit)
+			tr.Get("/entities", s.handleListEntities)
+			tr.Get("/entity/{entity}/schema-suggestion", s.handleSchemaSuggestion)
+			tr.Post("/entities/promote/flex/{entity}", s.handlePromoteFlex)
+			tr.Post("/entities/promote/strict/{entity}", s.handlePromoteStrict)
+			tr.Get("/entities/promote/status/{ticket}", s.handlePromoteStatus)
 			tr.Get("/search", s.handleFullTextSearch)
 
 			// Tenant-scoped OQL queries
@@ -914,6 +1031,10 @@ func (s *Server) setupRoutes() {
 			tr.Get("/blob/{key}", s.handleBlobGet)
 			tr.Head("/blob/{key}", s.handleBlobHead)
 			tr.Delete("/blob/{key}", s.handleBlobDelete)
+			// Async, blob-backed tenant export (T-149) -- see
+			// blob_export_handlers.go's own header comment.
+			tr.Post("/blob/export", s.handleBlobExportStart)
+			tr.Get("/blob/export/{ticket}", s.handleBlobExportStatus)
 
 			// Tenant-scoped graph routes — available in both path and strict mode.
 			// Node IDs in requests/responses use the client-facing "entity:id"
@@ -1014,6 +1135,8 @@ func (s *Server) setupRoutes() {
 			r.Get("/blob/{key}", s.handleBlobGet)
 			r.Head("/blob/{key}", s.handleBlobHead)
 			r.Delete("/blob/{key}", s.handleBlobDelete)
+			r.Post("/blob/export", s.handleBlobExportStart)
+			r.Get("/blob/export/{ticket}", s.handleBlobExportStatus)
 		}
 	})
 
@@ -1111,13 +1234,33 @@ func (s *Server) Start() error {
 		}()
 	}
 
+	// All three server-handle fields are now set (metricsServer/s3Server
+	// stay nil when their respective config isn't enabled, which is a
+	// valid, expected value Shutdown() already checks for) -- safe for
+	// Shutdown() to read from here on. See startReady's own doc comment.
+	close(s.startReady)
+
 	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully shuts down the HTTP server, allowing in-flight
 // requests to complete within the given context deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Shut down auxiliary listeners first (best-effort).
+	// See startReady's own doc comment (T-140): wait for Start() to have
+	// finished assigning httpServer/metricsServer/s3Server before reading
+	// any of them. A nil-or-already-closed channel both behave correctly
+	// here -- closed is checked first below in the common case, but if
+	// Start() is never going to run at all, the caller's own ctx deadline
+	// (never block forever on a context.Background() caller's behalf
+	// alone -- that would hang indefinitely with no Start() ever coming)
+	// still bounds the wait.
+	select {
+	case <-s.startReady:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Shut down auxiliary listeners first (best-effort), then the main one.
 	if s.s3Server != nil {
 		_ = s.s3Server.Shutdown(ctx)
 	}
@@ -1139,6 +1282,19 @@ func (s *Server) Stop() {
 	if s.tsRetention != nil {
 		s.tsRetention.Stop()
 	}
+	// Stop every registered GC worker (meta-gc, dxp-gc, and any future
+	// addition to s.gcWorkers) — found missing while verifying the new
+	// dxp-gc worker's own shutdown path (T-100). s.tsRetention's own
+	// worker is also present in this slice (registered into both at
+	// construction), so it gets Stop() called twice here — safe,
+	// checked directly: gc.Worker.Stop() is idempotent, guarded by
+	// w.stopped under its own mutex. Without this loop, every worker
+	// appended to s.gcWorkers leaked its ticker goroutine on every
+	// Stop() call — real for meta-gc already, not something this
+	// session introduced, just found in the course of fixing it here.
+	for _, w := range s.gcWorkers {
+		w.Stop()
+	}
 	if s.blobMgr != nil {
 		_ = s.blobMgr.Close()
 	}
@@ -1159,6 +1315,37 @@ func (s *Server) Stop() {
 		s.tenantStores.Delete(key)
 		return true
 	})
+	// Close cached bal rollup Pebble handles (T-62's own long-lived-per-tenant
+	// resource, mirroring tenantStores above) -- found missing while
+	// diagnosing an intermittent "too many open files" failure in pkg/server's
+	// own full test run: every test server that touched a /bal endpoint left
+	// its RollupPebble's file descriptors open for the lifetime of the TEST
+	// BINARY PROCESS, not the individual test, since nothing here ever called
+	// balStore's own cached handle's Close(). Across pkg/server's several
+	// hundred /bal-touching tests running in one process, the leak
+	// accumulated past this environment's ulimit -n partway through the run
+	// -- order-dependent, so which specific test tripped it varied by run,
+	// presenting as unreproducible flakiness rather than a deterministic
+	// failure. Filed as T-139.
+	s.balRollup.Range(func(key, value interface{}) bool {
+		if rp, ok := value.(*bal.RollupPebble); ok {
+			_ = rp.Close()
+		}
+		s.balRollup.Delete(key)
+		return true
+	})
+	// s.balSealer is NOT closed here: chronicle.Sealer is a pure in-memory
+	// struct (mutex + frontier + WindowFn), holds no file descriptors, and
+	// has no Close method -- checked directly rather than assumed, so this
+	// omission is deliberate, not a second instance of the same miss.
+	// cal.Manager's own per-tenant Pebble-backed IndexStore has the identical
+	// shape of leak (Close exists, per pkg/cal/manager.go, but was never
+	// called from here either) -- same root cause, same fix, same T-139.
+	if s.calMgr != nil {
+		if err := s.calMgr.Close(); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to close cal manager")
+		}
+	}
 }
 
 // Handler returns the HTTP handler (useful for testing)
@@ -1181,7 +1368,7 @@ func (s *Server) S3Handler() http.Handler {
 // BlobSamplerFor returns the UsageSampler for a tenant, or nil when blobs are
 // disabled, the tenant's store is not open, or the sampler interval is zero.
 // Exposed for tests that need to call ForceResample() deterministically.
-func (s *Server) BlobSamplerFor(tenantID uint16) *blob.UsageSampler {
+func (s *Server) BlobSamplerFor(tenantID tenant.TenantID) *blob.UsageSampler {
 	if s.blobMgr == nil {
 		return nil
 	}
@@ -1191,7 +1378,7 @@ func (s *Server) BlobSamplerFor(tenantID uint16) *blob.UsageSampler {
 // BlobStoreForTest opens (if needed) and returns a tenant's blob store via the
 // manager. Exposed for tests that need to seed blobs through the same store
 // instance the server uses, so the per-tenant sampler is created and warm.
-func (s *Server) BlobStoreForTest(tenantID uint16) (*blob.Store, error) {
+func (s *Server) BlobStoreForTest(tenantID tenant.TenantID) (*blob.Store, error) {
 	if s.blobMgr == nil {
 		return nil, fmt.Errorf("blob support not enabled")
 	}
@@ -1423,7 +1610,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 	// Build cache key including filters and tenant scope
 	tid := getTenantIDNumeric(r.Context())
-	cacheKey := tenant.ScopeKey(tid, buildListCacheKey(entity, page, perPage, filters))
+	cacheKey := tid.ScopeKey(buildListCacheKey(entity, page, perPage, filters))
 	if cached, err := s.cache.Get(r.Context(), cacheKey); err == nil {
 		s.writeJSON(w, http.StatusOK, cached)
 		return
@@ -1612,7 +1799,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Check cache for raw entity data
 	tid := getTenantIDNumeric(r.Context())
-	cacheKey := tenant.CacheKey(tid, entity, id)
+	cacheKey := tid.CacheKey(entity, id)
 	var data map[string]interface{}
 
 	if cached, err := s.cache.Get(r.Context(), cacheKey); err == nil {
@@ -1961,7 +2148,7 @@ func (s *Server) updateGraph(ctx context.Context, entityType string, id int, dat
 	}
 
 	tid := getTenantIDNumeric(ctx)
-	nodeID := tenant.NodeID(tid, entityType, id)
+	nodeID := tid.NodeID(entityType, id)
 
 	// Add/update the node — index by entity schema name, not data["type"].
 	if err := s.graph.AddNode(nodeID, entityType); err != nil {
@@ -1993,7 +2180,7 @@ func (s *Server) updateGraph(ctx context.Context, entityType string, id int, dat
 		}
 	}
 	for _, ee := range graphEdges {
-		targetNodeID := tenant.NodeID(tid, ee.TargetEntity, ee.TargetID)
+		targetNodeID := tid.NodeID(ee.TargetEntity, ee.TargetID)
 		if err := s.graph.AddEdge(nodeID, targetNodeID, ee.Relationship); err != nil {
 			s.logger.Error().Err(err).
 				Str("from", nodeID).Str("to", targetNodeID).
@@ -2035,7 +2222,7 @@ func (s *Server) reloadGraphFromStore(ctx context.Context, store storage.Store) 
 	}
 
 	// Determine which tenant IDs to hydrate.
-	var tenantIDs []uint16
+	var tenantIDs []tenant.TenantID
 	if lister, hasLister := store.(storage.TenantIDLister); hasLister {
 		ids, err := lister.GraphTenantIDs(ctx)
 		if err != nil {
@@ -2043,16 +2230,16 @@ func (s *Server) reloadGraphFromStore(ctx context.Context, store storage.Store) 
 		}
 		tenantIDs = ids
 	} else if sqlStore, ok := store.(*storage.SQLiteStore); ok {
-		tenantIDs = []uint16{sqlStore.Config().TenantID}
+		tenantIDs = []tenant.TenantID{sqlStore.Config().TenantID}
 	} else {
-		tenantIDs = []uint16{0}
+		tenantIDs = []tenant.TenantID{0}
 	}
 
 	// Scan each tenant's edge table and populate the in-memory graph.
 	for _, tid := range tenantIDs {
 		err := scanner.ScanGraphEdges(ctx, tid, func(e storage.GraphEdge) error {
-			srcID := tenant.NodeID(tid, e.SourceEntity, e.SourceID)
-			dstID := tenant.NodeID(tid, e.TargetEntity, e.TargetID)
+			srcID := tid.NodeID(e.SourceEntity, e.SourceID)
+			dstID := tid.NodeID(e.TargetEntity, e.TargetID)
 			if addErr := s.graph.AddNode(srcID, e.SourceEntity); addErr != nil {
 				s.logger.Debug().Err(addErr).Str("node", srcID).Msg("reloadGraphFromStore: AddNode src")
 			}
@@ -2067,7 +2254,7 @@ func (s *Server) reloadGraphFromStore(ctx context.Context, store storage.Store) 
 			return nil
 		})
 		if err != nil {
-			s.logger.Warn().Err(err).Uint16("tenant", tid).Msg("reloadGraphFromStore: scan failed")
+			s.logger.Warn().Err(err).Uint16("tenant", uint16(tid)).Msg("reloadGraphFromStore: scan failed")
 		}
 	}
 	s.invalidateGraphQueryCache(ctx)
@@ -2095,9 +2282,9 @@ func (s *Server) validateGraphEdges(ctx context.Context, entityType string, id i
 		return nil
 	}
 	tid := getTenantIDNumeric(ctx)
-	fromNodeID := tenant.NodeID(tid, entityType, id)
+	fromNodeID := tid.NodeID(entityType, id)
 	for _, ee := range graphEdges {
-		toNodeID := tenant.NodeID(tid, ee.TargetEntity, ee.TargetID)
+		toNodeID := tid.NodeID(ee.TargetEntity, ee.TargetID)
 		if err := s.graph.CheckEdge(fromNodeID, toNodeID, ee.Relationship); err != nil {
 			if errors.Is(err, graph.ErrCycleDetected) {
 				return fmt.Errorf("edge %s->%s (%s) would create a cycle: %w",
@@ -2130,19 +2317,19 @@ func (s *Server) SetGraphQueryCacheTTL(seconds int) {
 // Using FNV-64a: non-cryptographic, collision probability negligible for the
 // cardinality of distinct Sulpher queries in a single deployment, and the
 // runtime cost is ~30ns vs ~300ns for SHA-256.
-func graphQueryCacheKey(tenantID uint16, query string, maxDepth int) string {
+func graphQueryCacheKey(tenantID tenant.TenantID, query string, maxDepth int) string {
 	h := fnv.New64a()
 	h.Write([]byte(query))
 	h.Write([]byte{0}) // separator — prevents "ab"+"c" == "a"+"bc" collisions
 	_, _ = fmt.Fprintf(h, "%d", maxDepth)
 	digest := fmt.Sprintf("%016x", h.Sum64())
-	return tenant.ScopeKey(tenantID, "graph:qresult:"+digest)
+	return tenantID.ScopeKey("graph:qresult:" + digest)
 }
 
 // graphQueryCachePattern returns the DeletePattern argument that matches all
 // cached Sulpher query results for a given tenant.
-func graphQueryCachePattern(tenantID uint16) string {
-	return tenant.ScopeKey(tenantID, "graph:qresult:")
+func graphQueryCachePattern(tenantID tenant.TenantID) string {
+	return tenantID.ScopeKey("graph:qresult:")
 }
 
 // invalidateGraphQueryCache drops all cached Sulpher query results for the
@@ -2166,7 +2353,7 @@ func (s *Server) removeGraph(ctx context.Context, entityType string, id int) {
 		return
 	}
 	tid := getTenantIDNumeric(ctx)
-	nodeID := tenant.NodeID(tid, entityType, id)
+	nodeID := tid.NodeID(entityType, id)
 	if err := s.graph.RemoveNode(nodeID); err != nil {
 		s.logger.Error().Err(err).Str("node", nodeID).Msg("Failed to remove graph node")
 	}

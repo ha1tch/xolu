@@ -31,7 +31,6 @@ import (
 	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/xolu/pkg/sulpher"
-	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // addPrefix prepends the tenant prefix to a client-facing node ID.
@@ -162,7 +161,7 @@ func (s *Server) handleTenantGraphStats(w http.ResponseWriter, r *http.Request) 
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	nodeCount, err := s.graph.NodeCountForTenant(prefix)
 	if err != nil {
@@ -197,7 +196,7 @@ func (s *Server) handleTenantGraphNodeInfo(w http.ResponseWriter, r *http.Reques
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	internalID := addPrefix(prefix, nodeID)
 
 	info, err := s.graph.GetNodeInfo(internalID)
@@ -240,7 +239,7 @@ func (s *Server) handleTenantGraphNodeDegree(w http.ResponseWriter, r *http.Requ
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	internalID := addPrefix(prefix, nodeID)
 
 	degree, err := s.graph.GetDegree(internalID)
@@ -285,7 +284,7 @@ func (s *Server) handleTenantGraphIncoming(w http.ResponseWriter, r *http.Reques
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	internalID := addPrefix(prefix, nodeID)
 
 	incoming, err := s.graph.GetIncomingEdges(internalID)
@@ -334,7 +333,7 @@ func (s *Server) handleTenantGraphOutgoing(w http.ResponseWriter, r *http.Reques
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	internalID := addPrefix(prefix, nodeID)
 
 	outgoing, err := s.graph.GetNeighbors(internalID)
@@ -409,7 +408,7 @@ func (s *Server) handleTenantGraphPath(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	path, err := s.graph.FindPath(addPrefix(prefix, req.From), addPrefix(prefix, req.To), req.MaxDepth)
 	if err != nil {
@@ -454,7 +453,7 @@ func (s *Server) handleTenantGraphNeighbors(w http.ResponseWriter, r *http.Reque
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 	internalID := addPrefix(prefix, req.NodeID)
 
 	result := make(map[string]interface{})
@@ -509,7 +508,7 @@ func (s *Server) handleTenantGraphShortestPath(w http.ResponseWriter, r *http.Re
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	path, err := s.graph.FindPath(addPrefix(prefix, req.From), addPrefix(prefix, req.To), req.MaxDepth)
 	if err != nil {
@@ -557,7 +556,7 @@ func (s *Server) handleTenantGraphPathExists(w http.ResponseWriter, r *http.Requ
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	exists, length, err := s.graph.PathExists(addPrefix(prefix, req.From), addPrefix(prefix, req.To), req.MaxDepth)
 	if err != nil {
@@ -597,7 +596,7 @@ func (s *Server) handleTenantGraphCommonNeighbors(w http.ResponseWriter, r *http
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	common, err := s.graph.SharedOutNeighbors(addPrefix(prefix, req.NodeA), addPrefix(prefix, req.NodeB))
 	if err != nil {
@@ -631,7 +630,7 @@ func (s *Server) handleTenantGraphNodeSearch(w http.ResponseWriter, r *http.Requ
 	}
 
 	tid := getTenantIDNumeric(r.Context())
-	prefix := tenant.GraphNodePrefix(tid)
+	prefix := tid.GraphNodePrefix()
 
 	var rawNodes []string
 	if req.Entity != "" {

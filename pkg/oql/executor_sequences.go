@@ -23,18 +23,19 @@ import (
 	"fmt"
 
 	"github.com/ha1tch/tsqlparser/ast"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // seqSessionState tracks per-query state for sequence functions.
 // A single Executor is reused across queries; this struct is allocated fresh
 // at the start of each Execute call that references sequences.
 type seqSessionState struct {
-	tenantID   uint16
+	tenantID   tenant.TenantID
 	lastValues map[string]int64 // name → last value returned by NEXT VALUE FOR
 	seenFirst  map[string]bool  // name → whether NEXT VALUE FOR has been called
 }
 
-func newSeqSessionState(tenantID uint16) *seqSessionState {
+func newSeqSessionState(tenantID tenant.TenantID) *seqSessionState {
 	return &seqSessionState{
 		tenantID:   tenantID,
 		lastValues: make(map[string]int64),
@@ -45,7 +46,7 @@ func newSeqSessionState(tenantID uint16) *seqSessionState {
 // SetSeqIncrementor wires in the server's sequence increment function.
 // Call once at server startup after the Executor is created.
 // fn receives the tenant ID and sequence name and returns the new current value.
-func (e *Executor) SetSeqIncrementor(fn func(tenantID uint16, name string) (int64, error)) {
+func (e *Executor) SetSeqIncrementor(fn func(tenantID tenant.TenantID, name string) (int64, error)) {
 	e.seqIncrementor = fn
 }
 
@@ -53,7 +54,7 @@ func (e *Executor) SetSeqIncrementor(fn func(tenantID uint16, name string) (int6
 // Call once at server startup after the Executor is created. fn receives the
 // tenant ID and generator name, resolves the named definition in
 // gen_definitions, and produces one value. Nil leaves @GEN returning nil.
-func (e *Executor) SetGenDispatcher(fn func(tenantID uint16, name string) (string, error)) {
+func (e *Executor) SetGenDispatcher(fn func(tenantID tenant.TenantID, name string) (string, error)) {
 	e.genDispatcher = fn
 }
 

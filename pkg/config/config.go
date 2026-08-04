@@ -5,12 +5,13 @@
 package config
 
 import (
-	"github.com/ha1tch/xolu/pkg/authconfig"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/ha1tch/xolu/pkg/authconfig"
 )
 
 // Config holds application configuration
@@ -62,6 +63,26 @@ type Config struct {
 	MetaGCEnabled bool
 	// MetaGCIntervalSecs is how often the metadata GC sweep runs (default 300).
 	MetaGCIntervalSecs int
+	// DxpGCEnabled enables the dxp_txn deadline sweeper (default true when
+	// v2 enabled) — marks instances stuck 'active' past their own deadline
+	// (a crash or unrecovered panic mid-dispatch, T-100) as 'expired'.
+	DxpGCEnabled bool
+	// DxpGCIntervalSecs is how often the dxp sweep runs (default 60 — dxp's
+	// own phase_ttl deadlines run in seconds-to-minutes, shorter than
+	// meta's TTLs, so a stuck instance is worth noticing sooner).
+	DxpGCIntervalSecs int
+	// DxpTxnRetentionSecs is how long a dxp_txn instance is kept after
+	// reaching a terminal state (committed/released/expired) before the
+	// same dxp-gc sweep purges it — direct instruction (2026-07-31):
+	// "keep tombstones for a configurable period... defaults to 48
+	// hours before they're gone." Measured from created_at: dispatch is
+	// synchronous, so creation and termination are the same instant for
+	// every ordinary instance; only T-100's own sweep-caught crash
+	// residue terminates later than it was created, and retention from
+	// created_at is still the honest, simpler choice there — no
+	// separate terminal_at column exists, and this is a coarse cleanup
+	// window, not a tight SLA. Default 172800 (48h).
+	DxpTxnRetentionSecs int
 	// Set XOLU_API_V2_ENABLED=true to enable experimental v2 functionality.
 	APIV2Enabled bool
 
@@ -155,7 +176,7 @@ type Config struct {
 	// X-Forwarded-For headers. When empty (default), header-based IP
 	// spoofing is refused and the TCP peer is authoritative. See T-38.
 	TrustedProxies string `json:"trusted_proxies"`
-	RateLimitByKey   bool // Rate limit by API key or JWT subject
+	RateLimitByKey bool   // Rate limit by API key or JWT subject
 
 	// Metrics
 	MetricsEnabled bool
@@ -415,6 +436,24 @@ type Config struct {
 	// Default: 600 (10 minutes).
 	BlobGCGracePeriodSecs int
 
+	// BlobExportSweepEnabled enables the background sweep that deletes
+	// expired async-export blobs (T-149, POST .../blob/export). Separate
+	// from BlobGCEnabled: export blobs are ordinary blobs from GC's own
+	// point of view (referenced by their key alias, so GC alone would
+	// never reclaim them) -- this sweep exists specifically to enforce a
+	// TTL on top of that, not to replace GC.
+	// Default: false (must be explicitly opted in, matching BlobGCEnabled).
+	BlobExportSweepEnabled bool
+	// BlobExportSweepIntervalSecs is the time between export-sweep passes.
+	// Default: 900 (15 minutes).
+	BlobExportSweepIntervalSecs int
+	// BlobExportTTLSecs is how long (in seconds) a completed export blob
+	// is kept before the sweep deletes it -- the team's own framing when
+	// this was designed (2026-08-03): "a TTL so that the export expires
+	// in the next few hours".
+	// Default: 14400 (4 hours).
+	BlobExportTTLSecs int
+
 	// BlobUsageSampleIntervalSecs is how often (in seconds) the background
 	// usage sampler walks the blob store to update cached totals served by
 	// the usage API and telemetry endpoint. 0 disables the sampler.
@@ -500,6 +539,9 @@ func Default() *Config {
 		MetaMaxValueBytes:           65536,
 		MetaGCEnabled:               true,
 		MetaGCIntervalSecs:          300,
+		DxpGCEnabled:                true,
+		DxpGCIntervalSecs:           60,
+		DxpTxnRetentionSecs:         172800, // 48h
 		DynConfigEnabled:            false,
 		DynConfigFile:               "", // resolved to {BaseDir}/dynconfig.json at startup
 		DynConfigReloadSecs:         30,
@@ -507,7 +549,7 @@ func Default() *Config {
 		CORSOrigins:                 []string{},
 		TenantMode:                  "path",
 		TenantAuthMode:              "open",
-		TimeseriesEnabled:           true,  // default on (mature; regression-guarded — see validateSubsystemParity)
+		TimeseriesEnabled:           true,     // default on (mature; regression-guarded — see validateSubsystemParity)
 		TSMemtableSize:              67108864, // 64 MB
 		TSBlockSize:                 32768,    // 32 KB
 		TSCompression:               "zstd",
@@ -539,6 +581,9 @@ func Default() *Config {
 		BlobGCEnabled:               false,
 		BlobGCIntervalSecs:          3600,
 		BlobGCGracePeriodSecs:       600,
+		BlobExportSweepEnabled:      false,
+		BlobExportSweepIntervalSecs: 900,
+		BlobExportTTLSecs:           14400,
 		BlobUsageSampleIntervalSecs: 300,
 		SQLiteMaxOpenConns:          0, // 0 = backend default (1 for SQLite, higher for Postgres)
 		SQLiteMaxIdleConns:          0, // 0 = backend default
@@ -565,7 +610,7 @@ func LoadFromEnv(cfg *Config) {
 	if val := os.Getenv("XOLU_TRUSTED_PROXIES"); val != "" {
 		cfg.TrustedProxies = val
 	}
-		if val := os.Getenv("XOLU_ADDR"); val != "" {
+	if val := os.Getenv("XOLU_ADDR"); val != "" {
 		if h, p, err := net.SplitHostPort(val); err == nil {
 			cfg.Host = h
 			if port, err := strconv.Atoi(p); err == nil {
@@ -796,6 +841,19 @@ func LoadFromEnv(cfg *Config) {
 			cfg.MetaGCIntervalSecs = n
 		}
 	}
+	if val := os.Getenv("XOLU_DXP_GC_ENABLED"); val != "" {
+		cfg.DxpGCEnabled = parseBool(val)
+	}
+	if val := os.Getenv("XOLU_DXP_GC_INTERVAL_SECS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.DxpGCIntervalSecs = n
+		}
+	}
+	if val := os.Getenv("XOLU_DXP_TXN_RETENTION_SECS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.DxpTxnRetentionSecs = n
+		}
+	}
 	if val := os.Getenv("XOLU_DYNCONFIG_ENABLED"); val != "" {
 		cfg.DynConfigEnabled = parseBool(val)
 	}
@@ -981,6 +1039,19 @@ func LoadFromEnv(cfg *Config) {
 	if val := os.Getenv("XOLU_BLOB_GC_GRACE_PERIOD"); val != "" {
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.BlobGCGracePeriodSecs = n
+		}
+	}
+	if val := os.Getenv("XOLU_BLOB_EXPORT_SWEEP_ENABLED"); val != "" {
+		cfg.BlobExportSweepEnabled = parseBool(val)
+	}
+	if val := os.Getenv("XOLU_BLOB_EXPORT_SWEEP_INTERVAL"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.BlobExportSweepIntervalSecs = n
+		}
+	}
+	if val := os.Getenv("XOLU_BLOB_EXPORT_TTL"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.BlobExportTTLSecs = n
 		}
 	}
 	if val := os.Getenv("XOLU_BLOB_USAGE_INTERVAL"); val != "" {
@@ -1273,6 +1344,9 @@ func (c *Config) Validate() (errs []string, warnings []string) {
 		if c.BlobGCEnabled {
 			warnings = append(warnings, "BlobGCEnabled is set but BlobEnabled is false; GC will not start")
 		}
+		if c.BlobExportSweepEnabled {
+			warnings = append(warnings, "BlobExportSweepEnabled is set but BlobEnabled is false; the export sweep will not start")
+		}
 	}
 	if c.BlobEnabled && c.BlobGCEnabled {
 		if c.BlobGCIntervalSecs <= 0 {
@@ -1280,6 +1354,14 @@ func (c *Config) Validate() (errs []string, warnings []string) {
 		}
 		if c.BlobGCGracePeriodSecs < 0 {
 			errs = append(errs, "BlobGCGracePeriodSecs must be >= 0")
+		}
+	}
+	if c.BlobEnabled && c.BlobExportSweepEnabled {
+		if c.BlobExportSweepIntervalSecs <= 0 {
+			errs = append(errs, "BlobExportSweepIntervalSecs must be > 0")
+		}
+		if c.BlobExportTTLSecs < 0 {
+			errs = append(errs, "BlobExportTTLSecs must be >= 0")
 		}
 	}
 	if c.BlobEnabled && c.BlobUsageSampleIntervalSecs < 0 {

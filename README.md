@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://golang.org/)
 
 <!-- RELEASE_BADGE -->
-> **v0.16.3** — 4704 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
+> **v0.26.0** — 5456 tests passing. See [MANUAL.md](MANUAL.md) for complete documentation.
 <!-- /RELEASE_BADGE -->
 
 ---
@@ -183,7 +183,7 @@ See [MANUAL.md](MANUAL.md) for the complete list.
 
 ## Development workflow
 
-Build, test, version, and release each have a canonical tool. Prefer these over invoking `go` or the Python scripts directly — they encode conventions (flags, scopes, output paths) that are easy to get wrong by hand.
+Build, test, version, and release each have a canonical tool. Prefer these over invoking `go` or the Python scripts directly — they encode conventions (flags, scopes, output paths) that are easy to get wrong by hand. **[docs/TOOLING.md](docs/TOOLING.md)** is the full operating manual for the `scripts/` toolset (checkpoint intake, the live register, dormant guards, mid-session regression, cutting a release) — written to assume zero session context; read it before touching the tree.
 
 ### Building
 
@@ -282,6 +282,7 @@ xolu/
 Core references:
 
 - **[Manual](MANUAL.md)** — configuration and operational reference
+- **[Development Tooling](docs/TOOLING.md)** — the `scripts/` toolset: checkpoint intake, the live register, dormant guards, mid-session regression, releases
 - **[API Reference](docs/API_REFERENCE.md)** — complete `/api/v1` REST reference
 - **[API v2](docs/API_V2.md)** — FSM, events, meta, generators, sequences
 - **[Error Codes](docs/ERROR_CODES.md)** — complete error-code reference

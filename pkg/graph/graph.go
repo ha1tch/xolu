@@ -4,7 +4,11 @@
 
 package graph
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
+)
 
 // PathDirection controls which edges are followed during path traversal.
 type PathDirection int
@@ -97,7 +101,7 @@ type Graph interface {
 	// so that a cycle-detection rejection cannot leave the SQLite edge table and
 	// the in-memory graph in disagreement.
 	CheckEdge(from, to, relationship string) error
-	UpdateFromEntityForTenant(tenantID uint16, entity string, id int, data map[string]interface{}) error
+	UpdateFromEntityForTenant(tenantID tenant.TenantID, entity string, id int, data map[string]interface{}) error
 	UpdateFromEntity(entity string, id int, data map[string]interface{}) error
 
 	// Traversal

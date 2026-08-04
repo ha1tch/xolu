@@ -410,7 +410,7 @@ func TestAdversarial_FindPath_TenantSelfPath_MaxDepthZero(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			t.Parallel()
 			g := impl.new()
-			id := tenant.NodeID(3, "item", 7)
+			id := tenant.TenantID(3).NodeID("item", 7)
 			mustAddNodeG(t, g, id, "item")
 
 			path, err := g.FindPath(id, id, 0)

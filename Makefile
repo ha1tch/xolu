@@ -1,4 +1,4 @@
-.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration
+.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration waves
 
 # Binary name
 BINARY_NAME=xolu
@@ -81,19 +81,25 @@ clean:
 # =============================================================================
 
 # Run all tests (excludes stress tests)
+# All test targets below go through run_tests.sh -> scripts/runtests.py,
+# the one canonical orchestration path this repo's Python tooling
+# (baseline.py/release.py/regrun.py) already shares. T-139's own
+# investigation is why: a bare `go test ./...` here and a second,
+# independent bash implementation in run_tests.sh could silently
+# diverge in what they'd catch, and did -- an intermittent leak
+# reproduced under one and was invisible under the other. One
+# implementation means a result means the same thing regardless of
+# which target produced it.
 test:
-	@echo "Running tests..."
-	@go test -short ./...
+	@./run_tests.sh --quiet
 
-# Run all tests with verbose output
+# Run all tests with fuller per-package detail
 test-v:
-	@echo "Running tests (verbose)..."
-	@go test -short -v ./...
+	@./run_tests.sh
 
 # Run tests with race detector
 test-race:
-	@echo "Running tests with race detector..."
-	@go test -short -race ./...
+	@./run_tests.sh --race --quiet
 
 # Run tests with coverage
 coverage:
@@ -113,14 +119,20 @@ THRESHOLD ?= 75
 coverage-check:
 	@./run_tests.sh --threshold $(THRESHOLD)
 
-# Quick test (no verbose, cached results ok)
+# Quick test (same canonical path as `test` -- see the comment above
+# `test:`. Historically this relied on go's test cache for speed;
+# runtests.py always runs with -count=1 for the same reason baseline.py/
+# release.py do, so a cached-but-stale result can never masquerade as a
+# fresh one. Kept as a separate target for callers who depend on the
+# name, not because its behaviour still differs from `test`.)
 test-quick:
-	@go test -short ./...
+	@./run_tests.sh --quiet
 
-# Generate test report in JSON
+# Generate test report in JSON — reuses runtests.py's own -json capture
+# rather than a second, separate `go test -json` invocation.
 test-report:
-	@echo "Generating test report..."
-	@go test -short -v -json ./... > test-report.json
+	@./run_tests.sh --quiet
+	@cp test-output.json test-report.json
 	@echo "Test report: test-report.json"
 
 # =============================================================================
@@ -364,6 +376,18 @@ docker-clean:
 	@docker compose --profile redis --profile full --profile test down -v
 
 # =============================================================================
+# Wave programme progress
+# =============================================================================
+
+# Print wave-programme progress (bars + debt/blockers subtitles) to the
+# terminal -- freshly computed from docs/TRACKING.md and
+# docs/SUBSTRATE_TRACKING.md §2, not a cached read of the doc's own
+# checked-in copy, so this is never stale even if nobody's run the
+# generator since the last edit. Touches nothing on disk.
+waves:
+	@python3 scripts/wave_progress.py --show
+
+# =============================================================================
 # Help
 # =============================================================================
 
@@ -392,6 +416,9 @@ help:
 	@echo "  coverage-html   - Coverage with HTML report"
 	@echo "  coverage-check  - Fail if coverage below threshold (THRESHOLD=75)"
 	@echo "  test-report     - Generate JSON test report"
+	@echo ""
+	@echo "Wave Programme:"
+	@echo "  waves           - Print wave-programme progress bars + debt/blockers"
 	@echo ""
 	@echo "Package Tests:"
 	@echo "  test-storage    - Run storage tests"

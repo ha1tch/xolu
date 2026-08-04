@@ -13,7 +13,6 @@ import (
 
 	"github.com/ha1tch/xolu/pkg/chronicle"
 	"github.com/ha1tch/xolu/pkg/models"
-	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // GraphEdgesOracle is the first real rebuild oracle (@C §4 extraction #3
@@ -81,7 +80,7 @@ func (s *SQLiteStore) deriveGraphEdgeFingerprint(ctx context.Context) (string, e
 
 // currentGraphEdgeFingerprint reads the live derived plane.
 func (s *SQLiteStore) currentGraphEdgeFingerprint(ctx context.Context) (string, error) {
-	table := tenant.GraphTableName(s.config.TenantID)
+	table := s.config.TenantID.GraphTableName()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT source_entity, source_id, target_entity, target_id, relationship_name FROM `+table)
 	if err != nil {

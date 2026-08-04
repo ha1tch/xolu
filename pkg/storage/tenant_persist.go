@@ -8,6 +8,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // SQLiteTenantPersister implements tenant.Persister using the tenants table
@@ -26,7 +28,7 @@ func NewSQLiteTenantPersister(db, readDB *sql.DB) *SQLiteTenantPersister {
 }
 
 // LoadAll returns all persisted tenant name-to-ID mappings.
-func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]uint16, error) {
+func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]tenant.TenantID, error) {
 	rows, err := p.readDB.QueryContext(ctx,
 		`SELECT name, id FROM tenants ORDER BY id`)
 	if err != nil {
@@ -34,7 +36,7 @@ func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]uint16,
 	}
 	defer func() { _ = rows.Close() }()
 
-	result := make(map[string]uint16)
+	result := make(map[string]tenant.TenantID)
 	for rows.Next() {
 		var name string
 		var id int
@@ -42,7 +44,7 @@ func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]uint16,
 			return nil, fmt.Errorf("scan tenant row: %w", err)
 		}
 		if id > 0 && id <= 65535 {
-			result[name] = uint16(id)
+			result[name] = tenant.TenantID(id)
 		}
 	}
 	return result, rows.Err()
@@ -51,7 +53,7 @@ func (p *SQLiteTenantPersister) LoadAll(ctx context.Context) (map[string]uint16,
 // Save persists a tenant mapping. Idempotent: re-saving the same
 // (name, id) pair is not an error. Conflicts (same ID with different name,
 // or same name with different ID) return an error.
-func (p *SQLiteTenantPersister) Save(ctx context.Context, name string, id uint16) error {
+func (p *SQLiteTenantPersister) Save(ctx context.Context, name string, id tenant.TenantID) error {
 	// Check for conflicts explicitly before inserting.
 	// This prevents the silent-success problem where ON CONFLICT DO UPDATE
 	// with a WHERE clause can match zero rows without error.

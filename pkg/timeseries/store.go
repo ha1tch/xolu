@@ -1643,6 +1643,20 @@ func (s *PebbleStore) counter(id TimelineID) *atomic.Int64 {
 	return c
 }
 
+// PebbleDBProvider is the Pebble-side analog of
+// storage.WriterDBProvider — gives access to the underlying raw
+// *pebble.DB. Used exactly once: by the dxp coordinator's phased
+// execution path (pkg/server/v2_dxp_dispatch.go), which needs to
+// construct one independent *pebble.Batch per Pebble-backed
+// participant, the same way it constructs one independent *sql.Tx per
+// SQL-backed one.
+type PebbleDBProvider interface {
+	PebbleDB() *pebble.DB
+}
+
+// PebbleDB returns the store's underlying *pebble.DB.
+func (s *PebbleStore) PebbleDB() *pebble.DB { return s.db }
+
 func (s *PebbleStore) validateEvent(e Event) error {
 	if e.Timeline == 0 {
 		return fmt.Errorf("ts: timeline ID 0x0000 is reserved (%s)", xoluerr.ErrTSReservedID)

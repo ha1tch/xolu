@@ -115,7 +115,7 @@ func (e *Engine[T]) FoldRange(from, to time.Time) T {
 	if !from.Before(to) {
 		return acc
 	}
-	e.foldRangeAt(e.h.Levels()-1, from, to, &acc)
+	e.foldRangeAt(e.h.CoarsestLeafFor(from, to), from, to, &acc)
 	return acc
 }
 
@@ -127,8 +127,11 @@ func (e *Engine[T]) FoldRange(from, to time.Time) T {
 // care about exactness (AsOf truncates accordingly).
 func (e *Engine[T]) foldRangeAt(level int, from, to time.Time, acc *T) {
 	g := e.h.Grain(level)
-	if level == 0 {
-		e.s.RangeLevel(0, from, to, func(_ BucketKey, v T) bool {
+	// Descend toward the root — the next FINER grain. The root itself
+	// is the resolution floor.
+	child := e.h.Parent(level)
+	if child == -1 {
+		e.s.RangeLevel(level, from, to, func(_ BucketKey, v T) bool {
 			*acc = e.m.Combine(*acc, v)
 			return true
 		})
@@ -138,26 +141,26 @@ func (e *Engine[T]) foldRangeAt(level int, from, to time.Time, acc *T) {
 	// or before `to`.
 	alignedFrom := g.Truncate(from)
 	if alignedFrom.Before(from) {
-		alignedFrom = alignedFrom.Add(g.Width)
+		alignedFrom = g.Next(alignedFrom)
 	}
 	alignedTo := g.Truncate(to)
 
 	if !alignedFrom.Before(alignedTo) {
 		// No whole bucket of this grain fits; the entire window is
-		// handled one level finer.
-		e.foldRangeAt(level-1, from, to, acc)
+		// handled by the finer child.
+		e.foldRangeAt(child, from, to, acc)
 		return
 	}
 	// Leading partial, whole buckets, trailing partial.
 	if from.Before(alignedFrom) {
-		e.foldRangeAt(level-1, from, alignedFrom, acc)
+		e.foldRangeAt(child, from, alignedFrom, acc)
 	}
 	e.s.RangeLevel(level, alignedFrom, alignedTo, func(_ BucketKey, v T) bool {
 		*acc = e.m.Combine(*acc, v)
 		return true
 	})
 	if alignedTo.Before(to) {
-		e.foldRangeAt(level-1, alignedTo, to, acc)
+		e.foldRangeAt(child, alignedTo, to, acc)
 	}
 }
 
@@ -168,7 +171,8 @@ func (e *Engine[T]) foldRangeAt(level int, from, to time.Time, acc *T) {
 // directly; AsOf is the common inclusive read (bal: balance as of a
 // posting instant includes the instant's bucket).
 func (e *Engine[T]) AsOf(epoch, t time.Time) T {
-	fineEnd := e.h.Grain(0).Truncate(t).Add(e.h.Grain(0).Width)
+	fl := e.h.Grain(e.h.Root())
+	fineEnd := fl.Next(fl.Truncate(t))
 	return e.FoldRange(epoch, fineEnd)
 }
 
@@ -183,14 +187,24 @@ func (e *Engine[T]) AsOf(epoch, t time.Time) T {
 // replay refills every fine bucket in the window via Append, so any
 // bucket left standing would double-count its replayed values.
 func (e *Engine[T]) Recompute(t time.Time, replay func(from, to time.Time, emit func(v T, at time.Time))) {
-	coarsest := e.h.Grain(e.h.Levels() - 1)
+	// The coarsest grain overall bounds the window to clear.
+	leaves := e.h.Leaves()
+	coarsestLevel := leaves[0]
+	for _, l := range leaves[1:] {
+		g, b := e.h.Grain(l), e.h.Grain(coarsestLevel)
+		gs, bs := g.Truncate(t), b.Truncate(t)
+		if g.Next(gs).Sub(gs) > b.Next(bs).Sub(bs) {
+			coarsestLevel = l
+		}
+	}
+	coarsest := e.h.Grain(coarsestLevel)
 	from := coarsest.Truncate(t)
-	to := from.Add(coarsest.Width)
+	to := coarsest.Next(from)
 
 	// Clear every bucket at every level within [from, to).
 	for level := 0; level < e.h.Levels(); level++ {
 		g := e.h.Grain(level)
-		for start := g.Truncate(from); start.Before(to); start = start.Add(g.Width) {
+		for start := g.Truncate(from); start.Before(to); start = g.Next(start) {
 			e.s.Delete(BucketKey{Level: level, Start: start})
 		}
 	}

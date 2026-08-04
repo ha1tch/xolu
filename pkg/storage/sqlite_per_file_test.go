@@ -16,7 +16,7 @@ import (
 // newPerFileStore creates a SQLiteStore in per-file tenant mode.
 // Each call produces a store whose file lives at dbPath; the caller is
 // responsible for using distinct paths when testing isolation.
-func newPerFileStore(t *testing.T, dbPath string, tenantID uint16) *SQLiteStore {
+func newPerFileStore(t *testing.T, dbPath string, tenantID tenant.TenantID) *SQLiteStore {
 	t.Helper()
 	store, err := NewSQLiteStore(dbPath, SQLiteConfig{
 		DBPath:            dbPath,
@@ -40,7 +40,7 @@ func newPerFileStore(t *testing.T, dbPath string, tenantID uint16) *SQLiteStore 
 // ---------------------------------------------------------------------------
 
 // TestPerFile_SchemaHasNoTenantIDColumn verifies that the entities,
-// `+tenant.NodeSeqTableName(1)+`, and `+tenant.NodeFTSTableName(1)+` tables are created without a tenant_id
+// `+tenant.TenantID(1).NodeSeqTableName()+`, and `+tenant.TenantID(1).NodeFTSTableName()+` tables are created without a tenant_id
 // column when PerFileTenants = true.
 func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 	dir := t.TempDir()
@@ -50,7 +50,7 @@ func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 	db := store.DB()
 	ctx := context.Background()
 
-	tables := []string{tenant.NodesTableName(1), tenant.NodeSeqTableName(1)}
+	tables := []string{tenant.TenantID(1).NodesTableName(), tenant.TenantID(1).NodeSeqTableName()}
 	for _, tbl := range tables {
 		rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tbl))
 		if err != nil {
@@ -75,25 +75,25 @@ func TestPerFile_SchemaHasNoTenantIDColumn(t *testing.T) {
 		}
 	}
 
-	// `+tenant.NodeFTSTableName(1)+`: check via fts5 content table (no PRAGMA table_info for virtual tables)
+	// `+tenant.TenantID(1).NodeFTSTableName()+`: check via fts5 content table (no PRAGMA table_info for virtual tables)
 	// Insert a row and confirm it only has (entity_type, entity_id, content) columns.
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodeFTSTableName(1)+` (entity_type, entity_id, content) VALUES (?, ?, ?)`,
+		`INSERT INTO `+tenant.TenantID(1).NodeFTSTableName()+` (entity_type, entity_id, content) VALUES (?, ?, ?)`,
 		"probe", "1", "hello")
 	if err != nil {
-		t.Errorf(tenant.NodeFTSTableName(1)+" INSERT without tenant_id failed: %v", err)
+		t.Errorf(tenant.TenantID(1).NodeFTSTableName()+" INSERT without tenant_id failed: %v", err)
 	}
 
 	// Also confirm entities PRIMARY KEY is (entity_type, id), not (tenant_id, entity_type, id).
 	// A duplicate insert with the same (entity_type, id) should fail.
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO `+tenant.TenantID(1).NodesTableName()+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
 		"widget", 1, `{"id":1}`, 1)
 	if err != nil {
 		t.Fatalf("first entities INSERT failed: %v", err)
 	}
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO `+tenant.NodesTableName(1)+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO `+tenant.TenantID(1).NodesTableName()+` (entity_type, id, data, _version) VALUES (?, ?, ?, ?)`,
 		"widget", 1, `{"id":1}`, 1)
 	if err == nil {
 		t.Error("duplicate (entity_type, id) INSERT should have failed under per-file PK, but did not")
@@ -290,7 +290,7 @@ func TestPerFile_QueryWithPlan(t *testing.T) {
 
 	// QueryWithPlan takes raw SQL + args; in per-file mode there's no tenant_id param.
 	results, err := store.QueryWithPlan(ctx,
-		`SELECT data, _version FROM `+tenant.NodesTableName(1)+` WHERE entity_type = ? ORDER BY id`,
+		`SELECT data, _version FROM `+tenant.TenantID(1).NodesTableName()+` WHERE entity_type = ? ORDER BY id`,
 		[]interface{}{"tag"})
 	if err != nil {
 		t.Fatalf("QueryWithPlan: %v", err)

@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/fsm/eval"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // fsmMachineParseID parses {id}, writing XOLU-FSM002 on a bad value.
@@ -44,7 +45,7 @@ func (s *Server) fsmMachineParseID(w http.ResponseWriter, r *http.Request) (int6
 
 // loadMachineSnapshot loads and unmarshals a machine's snapshot, current
 // state, vars, ref, and definition lineage. Returns sql.ErrNoRows if absent.
-func (s *Server) loadMachineSnapshot(r *http.Request, db *sql.DB, tenantID uint16, id int64) (
+func (s *Server) loadMachineSnapshot(r *http.Request, db *sql.DB, tenantID tenant.TenantID, id int64) (
 	snap fsmMachineSnapshot, defID int64, defName, state string, vars map[string]interface{}, ref *string, createdAt string, err error) {
 	var snapJSON, varsJSON string
 	var refNull sql.NullString
@@ -72,7 +73,7 @@ func (s *Server) loadMachineSnapshot(r *http.Request, db *sql.DB, tenantID uint1
 
 // definitionExists reports whether a definition with the given id still
 // exists for the tenant (drives the definition_deleted flag).
-func (s *Server) definitionExists(r *http.Request, db *sql.DB, tenantID uint16, defID int64) bool {
+func (s *Server) definitionExists(r *http.Request, db *sql.DB, tenantID tenant.TenantID, defID int64) bool {
 	var n int
 	_ = db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM fsm_definitions WHERE tenant_id = ? AND id = ?`,

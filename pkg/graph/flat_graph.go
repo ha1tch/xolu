@@ -27,6 +27,7 @@ import (
 	"github.com/rs/zerolog"
 
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
+	"github.com/ha1tch/xolu/pkg/graphalgo"
 	"github.com/ha1tch/xolu/pkg/models"
 	"github.com/ha1tch/xolu/pkg/tenant"
 )
@@ -333,35 +334,19 @@ func (g *FlatGraph) RemoveEdge(from, to string) error {
 	return nil
 }
 
-// wouldCreateCycle reports whether adding from→to would create a cycle.
-// Caller must hold at least a read lock.
+// wouldCreateCycle reports whether adding from→to would create a
+// cycle. Caller must hold at least a read lock.
 //
-// BFS from `to`; if we reach `from`, a cycle would be created.
-// Budget is measured by unique nodes visited (len(visited)), not total
-// dequeues — this is the canonical metric, chosen because bushy graphs
-// with many parallel paths over-counted with the old `steps` variable,
-// triggering conservative rejection earlier than intended.
+// T-120 (wave 10): the algorithm itself now lives in pkg/graphalgo,
+// extracted so /obj's own containment guard can reuse the identical
+// bounded-BFS-with-conservative-budget shape against its own
+// transaction-scoped SQL rows. This wrapper supplies the same
+// neighbour-lookup and cross-tenant-prefix-filtering FlatGraph always
+// did — behaviour is unchanged, only the traversal itself moved.
 func (g *FlatGraph) wouldCreateCycle(from, to string) bool {
-	if from == to {
-		return true
-	}
 	fromPrefix := tenant.NodeIDPrefix(from)
-	visited := make(map[string]struct{})
-	queue := []string{to}
-	head := 0
-	for head < len(queue) {
-		cur := queue[head]
-		head++
-		if cur == from {
-			return true
-		}
-		if g.cycleCheckLimit > 0 && len(visited) >= g.cycleCheckLimit {
-			return true // budget exhausted — conservatively assume cycle
-		}
-		if _, seen := visited[cur]; seen {
-			continue
-		}
-		visited[cur] = struct{}{}
+	result, _ := graphalgo.WouldCreateCycle(from, to, g.cycleCheckLimit, func(cur string) ([]string, error) {
+		var out []string
 		if rec, ok := g.nodes[cur]; ok {
 			for neighbour := range rec.out {
 				// Skip neighbours from a different non-zero tenant: cross-tenant
@@ -370,24 +355,23 @@ func (g *FlatGraph) wouldCreateCycle(from, to string) bool {
 				if npfx != "" && fromPrefix != "" && npfx != fromPrefix {
 					continue
 				}
-				if _, seen := visited[neighbour]; !seen {
-					queue = append(queue, neighbour)
-				}
+				out = append(out, neighbour)
 			}
 		}
-	}
-	return false
+		return out, nil // an in-memory map lookup never errors
+	})
+	return result
 }
 
-func (g *FlatGraph) UpdateFromEntityForTenant(tenantID uint16, entity string, id int, data map[string]interface{}) error {
-	nodeID := tenant.NodeID(tenantID, entity, id)
+func (g *FlatGraph) UpdateFromEntityForTenant(tenantID tenant.TenantID, entity string, id int, data map[string]interface{}) error {
+	nodeID := tenantID.NodeID(entity, id)
 	rawEdges, err := models.ExtractEntityEdges(data)
 	if err != nil {
 		return err
 	}
 	newEdges := make(map[string]string, len(rawEdges))
 	for _, ee := range rawEdges {
-		targetNodeID := tenant.NodeID(tenantID, ee.TargetEntity, ee.TargetID)
+		targetNodeID := tenantID.NodeID(ee.TargetEntity, ee.TargetID)
 		newEdges[targetNodeID] = ee.Relationship
 	}
 	g.mu.Lock()

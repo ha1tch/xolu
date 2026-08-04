@@ -85,16 +85,25 @@ store, err := storage.NewStore("sqlite", map[string]interface{}{
 	ts := httptest.NewServer(srv.Handler())
 
 	return &TestServer{
-		server: srv,
-		ts:     ts,
-		cfg:    cfg,
-		t:      t,
+		server:      srv,
+		ts:          ts,
+		cfg:         cfg,
+		t:           t,
+		sqliteStore: store,
 	}
 }
 
 // cleanup removes temporary test data
 func (ts *TestServer) cleanup() {
 	ts.ts.Close()
+	// Stop() drains and closes any per-tenant SQLite stores the server lazily
+	// created during the test (s.tenantStores), mirroring stdTestServer's own
+	// cleanup. Without it, tenant-scoped tests using setupTestServer leaked
+	// those connections indefinitely -- the base sqliteStore.Close() below
+	// only ever closed the single store passed in at construction time.
+	if ts.server != nil {
+		ts.server.Stop()
+	}
 	if ts.sqliteStore != nil {
 		ts.sqliteStore.Close()
 	}

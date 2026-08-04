@@ -75,7 +75,7 @@ func (s *SQLiteStore) RegisterAdaptedEdge(ctx context.Context, rel string, schem
 	}
 	spec.Kind = tenant.ElementEdge // override: this is an edge spec
 
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 
 	// Marshal schema JSON once for all uses below.
 	schJSON, err := json.Marshal(schema)
@@ -147,7 +147,7 @@ func (s *SQLiteStore) RegisterAdaptedEdge(ctx context.Context, rel string, schem
 // upsertEdgeAdaptedMeta writes or updates the column_spec and has_extra
 // fields in t<X>_e_sch for the given rel.
 func (s *SQLiteStore) upsertEdgeAdaptedMeta(ctx context.Context, rel string, spec *AdaptedTableSpec, schemaJSON string) error {
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 
 	colSpecJSON, err := json.Marshal(spec.Columns)
 	if err != nil {
@@ -202,7 +202,7 @@ func (s *SQLiteStore) edgeSpecFor(rel string) *AdaptedTableSpec {
 // loadAdaptedEdgeSpecs reads any populated column_spec rows from t<X>_e_sch
 // at store startup and populates the adapted registry with ElementEdge specs.
 func (s *SQLiteStore) loadAdaptedEdgeSpecs(ctx context.Context, db *sql.DB) error {
-	esch := tenant.EdgeSchemaTableName(s.config.TenantID)
+	esch := s.config.TenantID.EdgeSchemaTableName()
 
 	// Table may not exist for databases created before Stage 6.
 	var tableExists int

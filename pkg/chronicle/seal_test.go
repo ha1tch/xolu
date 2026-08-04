@@ -12,7 +12,7 @@ import (
 )
 
 func TestSealer_MonotoneFrontier(t *testing.T) {
-	s, err := NewSealer(GrainWindows(Grain{Name: "day", Width: 24 * time.Hour}))
+	s, err := NewSealer(GrainWindows(FixedGrain("day", 24 * time.Hour)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestSealer_MonotoneFrontier(t *testing.T) {
 }
 
 func TestSealer_SealedSemantics_DayWindows(t *testing.T) {
-	s, _ := NewSealer(GrainWindows(Grain{Name: "day", Width: 24 * time.Hour}))
+	s, _ := NewSealer(GrainWindows(FixedGrain("day", 24 * time.Hour)))
 	// Frontier at noon on the 21st: the 20th (ends midnight 21st) is
 	// sealed; the 21st (ends midnight 22nd) is not — cal's exact rule.
 	s.AdvanceTo(time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC))
@@ -81,7 +81,7 @@ func TestSealer_MonthWindows_BalPeriodClose(t *testing.T) {
 // remains sound for the interleavings exercised; the multi-core hammer
 // stays with cal's own G-11-class guards on real silicon.
 func TestSealer_GuardDiscipline_Race(t *testing.T) {
-	s, _ := NewSealer(GrainWindows(Grain{Name: "hour", Width: time.Hour}))
+	s, _ := NewSealer(GrainWindows(FixedGrain("hour", time.Hour)))
 	base := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
 
 	var mu sync.Mutex
@@ -137,8 +137,8 @@ func TestSealer_GuardDiscipline_Race(t *testing.T) {
 // sealed periods reject postings; reads (AsOf) need no guard.
 func TestSealer_ComposesWithEngine(t *testing.T) {
 	h, _ := NewHierarchy(
-		Grain{Name: "day", Width: 24 * time.Hour},
-		Grain{Name: "month30", Width: 30 * 24 * time.Hour}, // engine grain: fixed; seal uses true months
+		FixedGrain("day", 24 * time.Hour),
+		FixedGrain("month30", 30 * 24 * time.Hour), // engine grain: fixed; seal uses true months
 	)
 	eng, _ := NewEngine[int64](SumInt64{}, h, NewMemStore[int64]())
 	seal, _ := NewSealer(MonthWindows)

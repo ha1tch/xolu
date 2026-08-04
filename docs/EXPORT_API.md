@@ -26,7 +26,7 @@ The archive always contains:
 
 ```
 manifest.json     Export metadata (see below)
-entities.db       SQLite database — the primary data file
+xolu.db           SQLite database — the primary data file
 ```
 
 When the graph is enabled, a human-readable JSON representation of the graph is
@@ -45,7 +45,7 @@ graph.json        Human-readable graph export
   "exported_at":  "2026-06-14T12:00:00Z",
   "storage_type": "sqlite",
   "graph_enabled": true,
-  "entities_file": "entities.db",
+  "database_file": "xolu.db",
   "graph_json":   "graph.json"
 }
 ```
@@ -56,13 +56,12 @@ graph.json        Human-readable graph export
 | `exported_at` | RFC 3339 timestamp |
 | `storage_type` | Always `"sqlite"` |
 | `graph_enabled` | Whether the graph subsystem was active |
-| `entities_file` | Always `"entities.db"` for SQLite deployments |
-| `graph_files` | Array of binary graph filenames (if present) |
+| `database_file` | Always `"xolu.db"` for SQLite deployments |
 | `graph_json` | `"graph.json"` if a JSON graph export was included |
 
-## The `entities.db` file
+## The `xolu.db` file
 
-For SQLite deployments (the only production-supported backend), `entities.db`
+For SQLite deployments (the only production-supported backend), `xolu.db`
 is a copy of the live SQLite database file. The server issues
 `PRAGMA wal_checkpoint(TRUNCATE)` immediately before copying to ensure all
 recent writes are flushed from the WAL into the main file.
@@ -78,8 +77,10 @@ schema may change between minor versions.
 **Reimport into a fresh xolu instance:**
 
 ```bash
-# Stop the new instance, replace its database, restart
-cp entities.db /path/to/new/xolu.db
+# Extract the export zip first, then stop the new instance and replace
+# its database with the extracted xolu.db, then restart
+unzip xolu-export-*.zip -d extracted/
+cp extracted/xolu.db /path/to/new-instance/xolu.db
 ```
 
 **Offline read-only queries:**
@@ -88,10 +89,10 @@ Use `sqlite3` or any SQLite-aware tool and inspect `sqlite_master` first to
 discover the current table names:
 
 ```bash
-sqlite3 entities.db ".tables"
+sqlite3 xolu.db ".tables"
 # t0000_nodes  t0000_nseq  t0001_nodes  ...
 
-sqlite3 entities.db "SELECT entity_type, COUNT(*) FROM t0000_nodes GROUP BY entity_type"
+sqlite3 xolu.db "SELECT entity_type, COUNT(*) FROM t0000_nodes GROUP BY entity_type"
 ```
 
 **Backup and disaster recovery:**
@@ -121,3 +122,12 @@ curl -sf -o "xolu-backup-${TIMESTAMP}.zip" http://localhost:8080/api/v1/export
 
 There is no per-tenant export endpoint. The export always covers the entire
 database file including all tenants.
+
+**Disabled entirely under `XOLU_TENANT_MODE=strict`.** `/export` is
+registered only among xolu's non-tenant-scoped routes (it operates
+against the default/tenant-0 store, matching `/oql/query` and
+`/search`'s own scoping); strict mode disables that whole route group
+to prevent accidental unscoped queries. A client that prefixes requests
+with a tenant path (the usual pattern for every other endpoint) must
+not do so here — `/export` does not exist under any tenant-prefixed
+path, only the bare, unprefixed one, and only outside strict mode.

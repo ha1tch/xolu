@@ -33,6 +33,7 @@ import (
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	gcpkg "github.com/ha1tch/xolu/pkg/gc"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ var metaKeyRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,64}$`)
 // metaDB returns the underlying *sql.DB from the store for tenant-aware
 // entity_meta queries. entity_meta is a global table (not per-tenant-prefix)
 // with tenant_id as a column, so we always use the writer DB directly.
-func (s *Server) metaDB(r *http.Request) (*sql.DB, uint16) {
+func (s *Server) metaDB(r *http.Request) (*sql.DB, tenant.TenantID) {
 	store := s.getStore(r.Context())
 	tenantID := getTenantIDNumeric(r.Context())
 	if wdp, ok := store.(storage.WriterDBProvider); ok {

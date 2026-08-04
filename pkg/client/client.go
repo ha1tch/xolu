@@ -13,19 +13,36 @@
 //
 // The client covers xolu's data-plane and semantic-map surface: entity
 // CRUD, Commit, Search, OQL, Sulpher, graph basics (neighbours, query,
-// shortest path), schemas (get + list), named sequences and generators,
-// the full FSM machine surface, event-definition reads, cal
-// (check/openings/propose/confirm), and health/availability. This is
-// the surface molu Parts 2–3 consume, and it is version-tied to the
-// server.
+// shortest path), schemas (get + write + list, including schemaless
+// entity types via ListEntities, added 2026-08-04, T-151), named
+// sequences and generators, the full FSM machine surface, the full FSM
+// definition surface (added 2026-08-04: Create/Replace/Delete/Validate,
+// alongside the existing List/Get -- previously read-only), event-
+// definition reads, cal (check/openings/propose/confirm), health/
+// availability, the native blob surface (added 2026-08-03, T-142:
+// put/get/head/delete/list/usage), and async tenant-scoped export
+// (added 2026-08-03, T-145: BlobExportStart/BlobExportStatus plus the
+// Export convenience wrapper). This is the surface molu Parts 2–3
+// consume, and it is version-tied to the server.
 //
 // Deliberately out of scope — documented exclusions, not omissions:
-// timeseries, blob, meta, admin, dynconfig, stats, export, async-query
-// polling, and the deep graph analytics (pathExists, commonNeighbors,
-// per-node inspection, edges, admin rebuild/verify). See
-// docs/CLIENT_STAGE6_PLAN.md for the audit that drew this line; a
-// consumer needing an excluded family reopens the scope decision
-// rather than finding an accidental gap.
+// timeseries, meta, admin, dynconfig, stats, async-query polling, and
+// the deep graph analytics (pathExists, commonNeighbors, per-node
+// inspection, edges, admin rebuild/verify). See docs/CLIENT_STAGE6_PLAN.md
+// for the audit that drew this line; a consumer needing an excluded
+// family reopens the scope decision rather than finding an accidental
+// gap.
+//
+// Export specifically, for anyone reading history in the register: a
+// synchronous streaming client method (T-145, first draft) was built
+// against the old, non-tenant-scoped GET /api/v1/export, then
+// deliberately shelved (2026-08-03) in favour of the async, tenant-
+// scoped, blob-backed design this package now implements — see
+// pkg/tenantexport's own doc comment for the full history. The
+// requirement T-145 named (the client has to actually deliver export
+// data to the caller, streamed) didn't change; only the mechanism did.
+// The old, now-unused GET /api/v1/export endpoint is untouched
+// server-side.
 package client
 
 import (

@@ -44,7 +44,7 @@ type WindowFn func(t time.Time) (start, end time.Time)
 func GrainWindows(g Grain) WindowFn {
 	return func(t time.Time) (time.Time, time.Time) {
 		s := g.Truncate(t)
-		return s, s.Add(g.Width)
+		return s, g.Next(s)
 	}
 }
 

@@ -18,14 +18,15 @@ import (
 	"time"
 
 	"github.com/ha1tch/xolu/pkg/cal"
-	ot "github.com/ha1tch/xolu/pkg/xolutime"
 	"github.com/ha1tch/xolu/pkg/storage"
 	"github.com/ha1tch/xolu/pkg/storelayout"
+	"github.com/ha1tch/xolu/pkg/tenant"
+	ot "github.com/ha1tch/xolu/pkg/xolutime"
 )
 
 // openSQLiteSource creates a migrated SQLite store and a cal source over it,
 // plus a cal index store, returning all three with cleanup registered.
-func openSQLiteSource(t *testing.T, tenantID uint16, reuse bool) (*cal.SQLiteBookingSource, *cal.IndexStore) {
+func openSQLiteSource(t *testing.T, tenantID tenant.TenantID, reuse bool) (*cal.SQLiteBookingSource, *cal.IndexStore) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cal-sqlite-src")
 	if err != nil {

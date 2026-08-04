@@ -37,6 +37,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/config"
 	"github.com/ha1tch/xolu/pkg/graph"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 	"github.com/rs/zerolog"
 )
 
@@ -84,7 +85,7 @@ func newThreeTenantServer(t *testing.T) *Server {
 	ctx := context.Background()
 	for _, reg := range []struct {
 		name string
-		id   uint16
+		id   tenant.TenantID
 	}{
 		{"alpha", 1}, {"beta", 2}, {"gamma", 3},
 	} {

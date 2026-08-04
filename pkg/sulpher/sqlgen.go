@@ -15,6 +15,8 @@ package sulpher
 import (
 	"fmt"
 	"strings"
+
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // graphPlan describes how a query will be executed.
@@ -71,8 +73,8 @@ func operatorToSQL(op Operator) (string, error) {
 	}
 }
 
-// tenantIDFromPrefix parses "XXXX@" → uint16. Empty prefix returns 0.
-func tenantIDFromPrefix(prefix string) (uint16, error) {
+// tenantIDFromPrefix parses "XXXX@" → tenant.TenantID. Empty prefix returns 0.
+func tenantIDFromPrefix(prefix string) (tenant.TenantID, error) {
 	if prefix == "" {
 		return 0, nil
 	}
@@ -85,7 +87,7 @@ func tenantIDFromPrefix(prefix string) (uint16, error) {
 	if err != nil {
 		return 0, fmt.Errorf("tenant prefix %q: %w", prefix, err)
 	}
-	return uint16(v), nil
+	return tenant.TenantID(v), nil
 }
 
 // isSimpleIdent reports whether s is safe to use as a SQL alias.

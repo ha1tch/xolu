@@ -210,7 +210,7 @@ func TestSQLiteTenantIsolation_ConcurrentWrites(t *testing.T) {
 
 	stores := make([]*SQLiteStore, numTenants)
 	for i := 0; i < numTenants; i++ {
-		stores[i] = newTenantSQLiteStore(t, dbPath, uint16(i+1), false, false)
+		stores[i] = newTenantSQLiteStore(t, dbPath, tenant.TenantID(i+1), false, false)
 		defer stores[i].Close()
 	}
 
@@ -273,7 +273,7 @@ func TestSQLiteTenantIsolation_ConcurrentWrites(t *testing.T) {
 	var total int
 	for i := 0; i < numTenants; i++ {
 		var n int
-		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(uint16(i+1)) + " WHERE entity_type = 'events'").Scan(&n)
+		stores[0].db.QueryRow("SELECT COUNT(*) FROM " + tenant.TenantID(i+1).NodesTableName() + " WHERE entity_type = 'events'").Scan(&n)
 		total += n
 	}
 	if total != numTenants*writesPerTenant {
@@ -457,9 +457,9 @@ func TestSQLiteTenantIsolation_ZeroAndNonZeroCoexist(t *testing.T) {
 
 	// Total across all tenant tables: each tenant now has its own table.
 	var total0, total1, total2 int
-	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(0) + " WHERE entity_type = 'widgets'").Scan(&total0)
-	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(1) + " WHERE entity_type = 'widgets'").Scan(&total1)
-	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.NodesTableName(2) + " WHERE entity_type = 'widgets'").Scan(&total2)
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.TenantID(0).NodesTableName() + " WHERE entity_type = 'widgets'").Scan(&total0)
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.TenantID(1).NodesTableName() + " WHERE entity_type = 'widgets'").Scan(&total1)
+	store0.db.QueryRow("SELECT COUNT(*) FROM " + tenant.TenantID(2).NodesTableName() + " WHERE entity_type = 'widgets'").Scan(&total2)
 	total := total0 + total1 + total2
 	if total != 13 { // 3 + 3 + 7
 		t.Errorf("raw DB total = %d, want 13 (t0=%d t1=%d t2=%d)", total, total0, total1, total2)

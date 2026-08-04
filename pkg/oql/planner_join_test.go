@@ -101,8 +101,8 @@ func newMockJoinStore(leftEntity string, leftAdapted bool, rightEntity string, r
 		rightEntity: rightAdapted,
 	}
 	tableNames := map[string]string{
-		leftEntity:  tenant.AdaptedNodeTableName(0, leftEntity),
-		rightEntity: tenant.AdaptedNodeTableName(0, rightEntity),
+		leftEntity:  tenant.TenantID(0).AdaptedNodeTableName(leftEntity),
+		rightEntity: tenant.TenantID(0).AdaptedNodeTableName(rightEntity),
 	}
 	columnInfos := map[string]map[string]string{
 		leftEntity:  {"id": "id", "author_id": "author_id", "title": "title", "status": "status", "name": "name"},

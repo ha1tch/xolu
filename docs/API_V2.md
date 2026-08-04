@@ -1100,6 +1100,27 @@ convention.
 
 ---
 
+## /api/v2/bal — Conservation Primitive (rollup surface)
+
+Beyond def/transfer/balance/entries (stage 2), the derived rollup plane
+adds two reads/writes:
+
+- `GET /bal/asof?account={id}&at={RFC3339}` — balance at an instant,
+  served from the DERIVED cascade: nearest sealed checkpoint + the fold
+  of intervening buckets. Response declares `"source": "rollup"`. This
+  is the fast path; the exact/audit path is the journal chain, and the
+  rollup oracle (`bal.rollup`, wired into `iolu db check`) proves the two
+  agree through the cascade — a lost carry upward is caught, not just a
+  leaf mismatch.
+- `POST /bal/close` `{account_id, at}` — writes a closing checkpoint at
+  a period boundary. Checkpoints make as-of independent of journal
+  length and are the precondition for prefix-collapse retention.
+
+Guard locality (@C04a): no admission guard ever reads the rollup plane.
+Transfers emit deltas into the cascade AFTER the authoritative commit,
+best-effort; a stale rollup is a performance matter, never a
+correctness one, and `RebuildRollup` re-derives it from the journal.
+
 ## /api/v2/meta — Subject Metadata
 
 Since S13 (item 7, @C04c) the meta sidecar addresses **subjects**, not

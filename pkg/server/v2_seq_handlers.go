@@ -30,13 +30,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // seqNameRe validates sequence names: same rule as meta keys.
 var seqNameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,64}$`)
 
 // seqDB returns the writer DB and tenant ID for sequence operations.
-func (s *Server) seqDB(r *http.Request) (*sql.DB, uint16) {
+func (s *Server) seqDB(r *http.Request) (*sql.DB, tenant.TenantID) {
 	store := s.getStore(r.Context())
 	tenantID := getTenantIDNumeric(r.Context())
 	if wdp, ok := store.(storage.WriterDBProvider); ok {
@@ -361,7 +362,7 @@ func (s *Server) handleSeqDelete(w http.ResponseWriter, r *http.Request) {
 // seqIncrement atomically increments the named sequence for the given tenant
 // and returns the new value. Returns sql.ErrNoRows if the sequence doesn't
 // exist, or an error if the sequence is exhausted and not cyclic.
-func seqIncrement(ctx context.Context, db *sql.DB, tenantID uint16, name string) (int64, error) {
+func seqIncrement(ctx context.Context, db *sql.DB, tenantID tenant.TenantID, name string) (int64, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -376,8 +377,8 @@ func seqIncrement(ctx context.Context, db *sql.DB, tenantID uint16, name string)
 }
 
 // serverSeqIncrementor returns the OQL seqIncrementor closure for this server.
-func (s *Server) serverSeqIncrementor() func(tenantID uint16, name string) (int64, error) {
-	return func(tenantID uint16, name string) (int64, error) {
+func (s *Server) serverSeqIncrementor() func(tenantID tenant.TenantID, name string) (int64, error) {
+	return func(tenantID tenant.TenantID, name string) (int64, error) {
 		store, err := s.storeForTenant(tenantID)
 		if err != nil {
 			return 0, err

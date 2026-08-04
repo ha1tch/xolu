@@ -20,10 +20,11 @@ import (
 	xoluerr "github.com/ha1tch/xolu/pkg/errors"
 	"github.com/ha1tch/xolu/pkg/fsm/eval"
 	"github.com/ha1tch/xolu/pkg/storage"
+	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
 // fsmDB returns the writer DB and tenant ID, mirroring seqDB.
-func (s *Server) fsmDB(r *http.Request) (*sql.DB, uint16) {
+func (s *Server) fsmDB(r *http.Request) (*sql.DB, tenant.TenantID) {
 	store := s.getStore(r.Context())
 	tenantID := getTenantIDNumeric(r.Context())
 	if wdp, ok := store.(storage.WriterDBProvider); ok {
@@ -35,7 +36,7 @@ func (s *Server) fsmDB(r *http.Request) (*sql.DB, uint16) {
 // allocFSMID atomically allocates the next monotonic ID for the given kind
 // ('def', 'machine', 'history') within a tenant, using the same RETURNING
 // upsert pattern as the node-sequence allocator. Must be called inside tx.
-func allocFSMID(ctx context.Context, tx *sql.Tx, tenantID uint16, kind string) (int64, error) {
+func allocFSMID(ctx context.Context, tx *sql.Tx, tenantID tenant.TenantID, kind string) (int64, error) {
 	var id int64
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO fsm_id_seq (tenant_id, kind, next_id)
