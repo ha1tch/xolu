@@ -1763,6 +1763,7 @@ not a versioned feature. The response body is always a `gc.Report`.
 | `XOLU-FSM011` | 422 | Set clause expression failed to parse or evaluate |
 | `XOLU-FSM012` | 404 | Child definition (linked state) not found at machine creation time |
 | `XOLU-FSM013` | 422 | Override block references transition input not present in definition |
+| `XOLU-FSM014` | 422 | Transition payload key outside strict-identifier characters (letters/digits/underscores, leading letter) |
 
 ### Event
 

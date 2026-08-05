@@ -44,13 +44,49 @@ ROOT = Path(__file__).resolve().parent.parent
 TRACKING = ROOT / "docs" / "TRACKING.md"
 RESOLVED = ROOT / "docs" / "RESOLVED.md"
 
+# NEW_PREFIX: forward-only project prefix for new register items, added
+# 2026-08-04 -- Horacio's own decision, directly motivated by a real
+# collision found while syncing repoman upstream (T-163): a closure
+# narrative in a DIFFERENT project's own register (seam-ui) was
+# confused by xolu's own bare "T-160"/"T-161" mentioned in prose,
+# jumping their own next_id() sequence. A per-project prefix
+# (xolu="XOT", xoluman="XMT", seam="SET") makes that structurally
+# impossible instead of merely unlikely -- an ID from another project
+# can never collide with or be mistaken for one of xolu's own,
+# regardless of what free-form prose quotes it.
+#
+# Deliberately forward-only, not retroactive: this project's own "IDs
+# are never reused and never renumbered" rule treats a full ID string
+# as permanent once assigned. T-1 through T-163 keep their original,
+# unprefixed form forever, exactly as filed; only T-164 onward uses the
+# new "XOT<n>" shape (no hyphen, matching the literal example given
+# when this was decided). Both shapes are matched throughout this file
+# so the existing history and new items are read, sorted, and
+# cross-checked together -- neither format is ever assumed exclusively.
+NEW_PREFIX = "XOT"
+
 STATUS_SYMBOLS = {"✓", "◐", "☐", "✗"}
-ID_RE = re.compile(r"T-\d+")
-ROW_RE = re.compile(r"^\| (T-\d+) \|")
-HEAD_RE = re.compile(r"^### (T-\d+)\. (.*)$")
+_ID_ALT = r"(?:T-|" + re.escape(NEW_PREFIX) + r")\d+"
+ID_RE = re.compile(_ID_ALT)
+ROW_RE = re.compile(r"^\| (" + _ID_ALT + r") \|")
+HEAD_RE = re.compile(r"^### (" + _ID_ALT + r")\. (.*)$")
 FIELD_RE = re.compile(
     r"^Theme: (\S+) · Priority: \*{0,2}(P\d)\*{0,2} · Status: (\S+)(?: · Blocks/after: (.*))?$",
     re.M)
+
+
+def _id_num(tid: str) -> int:
+    """The numeric portion of an id, old ("T-NNN") or new ("XOTNNN")
+    format -- the two prefixes differ in length (2 chars vs. 3, and
+    only one carries a hyphen), so a fixed-offset slice like the old
+    t[2:] is wrong for one of them. Raises ValueError on anything
+    matching neither shape, rather than silently returning a wrong
+    number."""
+    if tid.startswith("T-"):
+        return int(tid[2:])
+    if tid.startswith(NEW_PREFIX):
+        return int(tid[len(NEW_PREFIX):])
+    raise ValueError(f"unrecognized id format: {tid!r}")
 
 
 class Item:
@@ -81,12 +117,12 @@ class Register:
         self._parse()
 
     def _parse(self):
-        for m in re.finditer(r"^\| (T-\d+) \|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|.*$",
+        for m in re.finditer(r"^\| (" + _ID_ALT + r") \|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|.*$",
                              self.text, re.M):
             self.rows[m.group(1)] = (m.group(3).strip(),
                                      m.group(4).strip().strip('*'),
                                      m.group(5).strip(), m.group(0))
-        heads = list(re.finditer(r"^### (T-\d+)\. (.*)$", self.text, re.M))
+        heads = list(re.finditer(r"^### (" + _ID_ALT + r")\. (.*)$", self.text, re.M))
         for i, h in enumerate(heads):
             start = h.start()
             # section ends at the next ### / ## heading or trailing ---
@@ -104,7 +140,7 @@ class Register:
             self.spans[h.group(1)] = (start, end)
 
     def next_id(self) -> str:
-        ids = [int(t[2:]) for t in set(self.rows) | set(self.items)]
+        ids = [_id_num(t) for t in set(self.rows) | set(self.items)]
         # BUGFIX (found 2026-07-29): IDs must never be reused, including
         # a closed item's — but this only ever scanned TRACKING.md's
         # currently-open items. Closing an item removes it from
@@ -115,9 +151,19 @@ class Register:
         # not a theoretical one (T-82 was assigned to two different
         # items this way). RESOLVED.md is append-only and never purged,
         # so it must be included in the max() every single time.
+        #
+        # Scans both id formats (old "T-NNN", new "XOTNNN") to find the
+        # true maximum regardless of which shape produced it, but always
+        # ISSUES the new one -- T-164 never gets assigned even if for
+        # some reason only "T-" entries existed; forward-only means
+        # forward from here, not "whichever format was seen last."
         if RESOLVED.exists():
-            ids += [int(t) for t in re.findall(r"^## \[.*?\] T-(\d+)\s", RESOLVED.read_text(), re.M)]
-        return f"T-{(max(ids) + 1) if ids else 1:02d}"
+            ids += [int(t) for t in re.findall(
+                r"^## \[.*?\] T-(\d+)\s", RESOLVED.read_text(), re.M)]
+            ids += [int(t) for t in re.findall(
+                r"^## \[.*?\] " + re.escape(NEW_PREFIX) + r"(\d+)\s",
+                RESOLVED.read_text(), re.M)]
+        return f"{NEW_PREFIX}{(max(ids) + 1) if ids else 1}"
 
     def check(self, r) -> None:
         """A1–A3 plus symbol validity. `r` needs .err(section, msg) and
@@ -162,7 +208,7 @@ def write_with_diff(path: Path, new_text: str, dry: bool, label: str) -> None:
 
 
 def cmd_list(reg: Register) -> int:
-    for tid in sorted(reg.items, key=lambda t: int(t[2:])):
+    for tid in sorted(reg.items, key=_id_num):
         it = reg.items[tid]
         print(f"{tid}  {it.status}  {it.priority}  [{it.theme}]  {it.title}")
     return 0
@@ -196,7 +242,7 @@ def cmd_add(reg: Register, args) -> int:
 
     text = reg.text
     # Row: insert after the last existing T-row in the status table.
-    row_matches = list(re.finditer(r"^\| T-\d+ \|.*$", text, re.M))
+    row_matches = list(re.finditer(r"^\| " + _ID_ALT + r" \|.*$", text, re.M))
     if not row_matches:
         print("cannot locate the status table", file=sys.stderr)
         return 1

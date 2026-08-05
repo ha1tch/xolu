@@ -1887,7 +1887,7 @@ curl http://localhost:8080/api/v1/users
 
 xolu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.27.2`.
+or API. The current version is `0.28.0`.
 
 ### Database Format Stability
 

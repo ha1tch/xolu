@@ -16,6 +16,7 @@ package server_test
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -219,5 +220,150 @@ func TestWalkAdversarial_WalkAfterDefinitionDeleted(t *testing.T) {
 	}
 	if resp["current"] != "AwaitingInspection" {
 		t.Errorf("walk after def delete: want AwaitingInspection, got %v", resp["current"])
+	}
+}
+
+// ─── Guard-syntax warning and payload key validation (Seam AMS report) ────
+//
+// Reported by the Seam AMS team (2026-08-04): xolu's guard syntax is
+// T-SQL, where '...' is a string literal and "..." is a quoted
+// IDENTIFIER -- the opposite of JSON/JavaScript convention. A guard
+// written payload.x != "" parses without error but silently compares
+// against nothing, never what the author meant. Horacio's own
+// decision, directly relevant to why auto-correcting instead of
+// warning was rejected: key names with spaces (and anything else
+// outside strict-identifier characters) are illegal in xolu, closing
+// the one legitimate reason a double-quoted identifier could ever
+// have been needed in a guard (payload."odd key").
+
+func TestValidateDefinition_DoubleQuotedGuard_WarnsWithoutRejecting(t *testing.T) {
+	env := newV2Server(t)
+	spec := map[string]interface{}{
+		"name":        "guard_syntax_bad",
+		"determinism": "strict",
+		"initial":     "draft",
+		"states": map[string]interface{}{
+			"draft":     map[string]interface{}{},
+			"completed": map[string]interface{}{"terminal": true},
+		},
+		"transitions": []interface{}{
+			map[string]interface{}{
+				"from": "draft", "input": "complete", "to": "completed",
+				"guard": `payload.technician_signature != ""`,
+			},
+		},
+	}
+	status, resp := doJSONRequest(t, "POST", fsmDefURL(env, ""), spec)
+	if status != http.StatusCreated {
+		t.Fatalf("a double-quoted guard should still be accepted (a warning, not a rejection): got %d: %v", status, resp)
+	}
+	analysis, ok := resp["analysis"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected an analysis object in the response: %v", resp)
+	}
+	warnings, _ := analysis["warnings"].([]interface{})
+	found := false
+	for _, w := range warnings {
+		if s, ok := w.(string); ok && strings.Contains(s, "double-quoted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a double-quoted-string warning in analysis.warnings, got: %v", warnings)
+	}
+}
+
+func TestValidateDefinition_SingleQuotedGuard_NoWarning(t *testing.T) {
+	env := newV2Server(t)
+	spec := map[string]interface{}{
+		"name":        "guard_syntax_good",
+		"determinism": "strict",
+		"initial":     "draft",
+		"states": map[string]interface{}{
+			"draft":     map[string]interface{}{},
+			"completed": map[string]interface{}{"terminal": true},
+		},
+		"transitions": []interface{}{
+			map[string]interface{}{
+				"from": "draft", "input": "complete", "to": "completed",
+				"guard": `payload.technician_signature != ''`,
+			},
+		},
+	}
+	status, resp := doJSONRequest(t, "POST", fsmDefURL(env, ""), spec)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %v", status, resp)
+	}
+	analysis, ok := resp["analysis"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected an analysis object: %v", resp)
+	}
+	warnings, _ := analysis["warnings"].([]interface{})
+	for _, w := range warnings {
+		if s, ok := w.(string); ok && strings.Contains(s, "double-quoted") {
+			t.Errorf("a correctly single-quoted guard should never produce this warning, got: %v", warnings)
+		}
+	}
+}
+
+func TestValidateDefinition_DoubleQuotedSetClause_Warns(t *testing.T) {
+	env := newV2Server(t)
+	spec := map[string]interface{}{
+		"name":        "set_syntax_bad",
+		"determinism": "strict",
+		"initial":     "draft",
+		"states": map[string]interface{}{
+			"draft":     map[string]interface{}{},
+			"completed": map[string]interface{}{"terminal": true},
+		},
+		"transitions": []interface{}{
+			map[string]interface{}{
+				"from": "draft", "input": "complete", "to": "completed",
+				"set": map[string]interface{}{"@status": `"done"`},
+			},
+		},
+	}
+	status, resp := doJSONRequest(t, "POST", fsmDefURL(env, ""), spec)
+	if status != http.StatusCreated {
+		t.Fatalf("a double-quoted set clause should still be accepted: got %d: %v", status, resp)
+	}
+	analysis, _ := resp["analysis"].(map[string]interface{})
+	warnings, _ := analysis["warnings"].([]interface{})
+	found := false
+	for _, w := range warnings {
+		if s, ok := w.(string); ok && strings.Contains(s, "double-quoted") && strings.Contains(s, "set clause") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a double-quoted set-clause warning, got: %v", warnings)
+	}
+}
+
+// TestWalk_PayloadKeyWithSpace_Rejected is the direct XOLU-FSM014
+// regression: a transition payload key outside strict-identifier
+// characters must be rejected before it can ever reach a guard.
+func TestWalk_PayloadKeyWithSpace_Rejected(t *testing.T) {
+	env := newV2Server(t)
+	id := newAssetMachine(t, env)
+	st, resp := walk(t, env, id, "ready_for_inspection", map[string]interface{}{
+		"technician signature": "x",
+	})
+	if st != http.StatusUnprocessableEntity {
+		t.Fatalf("payload key with a space: want 422, got %d: %v", st, resp)
+	}
+	if errCode(resp) != "XOLU-FSM014" {
+		t.Errorf("payload key with a space: want XOLU-FSM014, got %v", resp["error"])
+	}
+}
+
+func TestWalk_PayloadKeyValid_StillWorks(t *testing.T) {
+	env := newV2Server(t)
+	id := newAssetMachine(t, env)
+	st, resp := walk(t, env, id, "ready_for_inspection", map[string]interface{}{
+		"technician_signature": "x",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("a validly-named payload key should not be rejected: got %d: %v", st, resp)
 	}
 }

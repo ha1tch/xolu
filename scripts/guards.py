@@ -72,13 +72,25 @@ class Guard:
     def last_date(self):
         if not self.last_line:
             return None
-        # A "Last exercised" bullet can carry multiple dated addenda
-        # appended over time (this project's own convention -- append
-        # a new dated entry rather than rewrite history). Currency
-        # must reflect the MOST RECENT date, not whichever happens to
-        # appear first in the bullet's own prose.
+        # A "Last exercised" bullet can carry multiple dated addenda --
+        # cmd_record's own append order is new-first (new_val =
+        # f"{date} ..."; new_val += f" Previous: {prev}"), but this
+        # file also carries many hand-written, free-form bullets (e.g.
+        # G-13's own multi-sentence narrative) where dates appear in
+        # whatever order the prose put them, not that convention.
+        # max() over ISO-8601 "YYYY-MM-DD" strings is the one approach
+        # correct for both shapes -- lexicographic string comparison
+        # is equivalent to chronological comparison for this format,
+        # so position in the text never matters. Verified directly
+        # against a real KNOWN_ISSUES.md bullet, not assumed: an
+        # earlier version of this fix used dates[-1] on the strength
+        # of a comment claiming that was correct, and a second version
+        # used dates[0] after checking cmd_record's own order in
+        # isolation -- both looked right in a synthetic test and both
+        # were wrong the moment they hit a real, hand-written,
+        # non-cmd_record bullet.
         dates = DATE_RE.findall(self.last_line)
-        return dates[-1] if dates else None
+        return max(dates) if dates else None
 
     @property
     def invocations(self):

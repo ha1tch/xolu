@@ -66,7 +66,7 @@ COVER_SUMMARY = ROOT / "cover-summary.txt"
 ZIP_SOURCES = [
     "README.md", "CHANGELOG.md", "MANUAL.md", "TESTING.md", "VERSION",
     "LICENSE", "Makefile", "Dockerfile", "docker-compose.yml",
-    ".golangci.yml", "run_tests.sh", "syncver.sh", "release.sh",
+    ".golangci.yml", ".repoman.json", "run_tests.sh", "syncver.sh", "release.sh",
     "go.mod", "go.sum",
     "cmd", "pkg", "docs", "scripts", "tests", ".github", "tools", "examples",
 ]

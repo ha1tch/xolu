@@ -133,7 +133,14 @@ WAVE_THEMES = {
 }
 
 TRACKING = ROOT / "docs" / "TRACKING.md"
-ROW_T_RE = re.compile(r"^\|\s*(T-\d+)\s*\|[^|]*\|\s*([a-z0-9-]+)\s*\|", re.M)
+# Matches register.py's own NEW_PREFIX/_ID_ALT (2026-08-04, forward-only
+# "XOT" prefix for new register items -- see register.py's own header
+# comment for the full story). Kept as a separate local constant, not
+# imported, since this is a standalone script like every other tool
+# here; duplicated deliberately rather than adding a cross-script
+# dependency for one shared regex fragment.
+_ID_ALT = r"(?:T-|XOT)\d+"
+ROW_T_RE = re.compile(r"^\|\s*(" + _ID_ALT + r")\s*\|[^|]*\|\s*([a-z0-9-]+)\s*\|", re.M)
 
 
 def debt_by_wave(full_text: str) -> dict[str, list[str]]:
@@ -205,9 +212,9 @@ def fmt_item_count(done_equiv: float, total: int) -> str:
     return f"{d}/{total} items"
 
 
-AFTER_RE = re.compile(r"After:\s*(T-\d+)")
+AFTER_RE = re.compile(r"After:\s*(" + _ID_ALT + r")")
 TRACKING_ROW_RE = re.compile(
-    r"^\| (T-\d+) \| ([^|]*) \| ([a-z0-9-]+) \| (P\d) \| ([✓◐☐]) \| ([^|]*) \|", re.M)
+    r"^\| (" + _ID_ALT + r") \| ([^|]*) \| ([a-z0-9-]+) \| (P\d) \| ([✓◐☐]) \| ([^|]*) \|", re.M)
 
 
 def blockers_by_wave(full_text: str, waves: list[dict]) -> dict[str, list[tuple[str, list[str]]]]:

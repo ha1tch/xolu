@@ -415,7 +415,23 @@ func validateDefinition(spec *fsmDefinitionSpec, ev *eval.Evaluator) (*fsmAnalys
 		}
 	}
 
-	// Guard and set expression syntax (parse only, no evaluation).
+	// Guard and set expression syntax (parse only, no evaluation). Also
+	// flags a real, silent footgun (reported by the Seam AMS team,
+	// 2026-08-04): xolu's guard language is T-SQL, where '...' is a
+	// string literal and "..." is a quoted IDENTIFIER -- the opposite
+	// of JSON/JavaScript convention. A guard written with a double-
+	// quoted string, e.g. payload.x != "", parses without error but
+	// silently compares against nothing (a lookup for an identifier
+	// with that literal text), never what the author meant. Confirmed
+	// directly this couldn't be auto-corrected instead of flagged:
+	// payload."odd key" was, before XOLU-FSM014 closed it, the only
+	// syntax able to reference a payload field whose name wasn't a
+	// bare identifier -- rewriting every " to ' would have silently
+	// broken that legitimate case rather than the mistaken one. See
+	// hasSuspiciousDoubleQuote's own doc comment for the detection
+	// approach and why it works at the raw-text level, not the parsed
+	// AST (the quote-style distinction does not survive tokenizing).
+	var guardSyntaxWarnings []string
 	for i := range spec.Transitions {
 		ts := &spec.Transitions[i]
 		if ts.Guard != "" {
@@ -425,6 +441,16 @@ func validateDefinition(spec *fsmDefinitionSpec, ev *eval.Evaluator) (*fsmAnalys
 					Message: fmt.Sprintf("guard %q failed to parse: %v", ts.Guard, err),
 				}
 			}
+			if hasSuspiciousDoubleQuote(ts.Guard) {
+				froms, _ := ts.fromStates()
+				guardSyntaxWarnings = append(guardSyntaxWarnings, fmt.Sprintf(
+					"guard %q on transition %v->%q contains a double-quoted "+
+						"string -- xolu's guard syntax uses single quotes for "+
+						"string literals ('...'); double quotes (\"...\") are "+
+						"a quoted identifier reference, almost certainly not "+
+						"what was intended here",
+					ts.Guard, froms, ts.To))
+			}
 		}
 		for name, expr := range ts.Set {
 			if _, err := eval.ParseGuard(expr); err != nil {
@@ -432,6 +458,16 @@ func validateDefinition(spec *fsmDefinitionSpec, ev *eval.Evaluator) (*fsmAnalys
 					Code:    "XOLU-FSM011",
 					Message: fmt.Sprintf("set clause for %s (%q) failed to parse: %v", name, expr, err),
 				}
+			}
+			if hasSuspiciousDoubleQuote(expr) {
+				froms, _ := ts.fromStates()
+				guardSyntaxWarnings = append(guardSyntaxWarnings, fmt.Sprintf(
+					"set clause %q (%q) on transition %v->%q contains a "+
+						"double-quoted string -- xolu's guard syntax uses "+
+						"single quotes for string literals ('...'); double "+
+						"quotes (\"...\") are a quoted identifier reference, "+
+						"almost certainly not what was intended here",
+					name, expr, froms, ts.To))
 			}
 		}
 	}
@@ -500,7 +536,50 @@ func validateDefinition(spec *fsmDefinitionSpec, ev *eval.Evaluator) (*fsmAnalys
 	for _, w := range f.Analyse() {
 		analysis.Warnings = append(analysis.Warnings, w.Message)
 	}
+	analysis.Warnings = append(analysis.Warnings, guardSyntaxWarnings...)
 	return analysis, nil
+}
+
+// hasSuspiciousDoubleQuote reports whether expr contains a double-quote
+// character outside any single-quoted string literal.
+//
+// Deliberately a raw-text scan, not an AST walk: checked directly before
+// choosing this approach (2026-08-04) that tsqlparser's own lexer does
+// not preserve the distinction downstream -- a double-quoted token and a
+// bare identifier both come out as the same IDENT token type once
+// tokenized, so there is no way to ask a parsed guard's AST "was this
+// originally double-quoted." The information only exists in the raw
+// source text, before lexing.
+//
+// Correct in the presence of escaped single-quotes: T-SQL's own escaping
+// convention is to double a literal single-quote inside a string
+// ('it”s fine'), and toggling a boolean on every ' character handles
+// that correctly without special-casing it -- two toggles from the
+// escaped pair cancel out, leaving the scanner in the same in/out-of-
+// string state it was already in.
+//
+// This flags a real quote character appearing anywhere outside a
+// single-quoted string, including inside what would otherwise be a
+// legitimate quoted-identifier reference (payload."odd_key"). That is
+// intentional, not a gap: XOLU-FSM014 (validatePayloadKeys,
+// pkg/server/v2_fsm_walk.go) now rejects any payload key that isn't a
+// bare strict identifier, so a transition payload can never actually
+// carry a field needing that syntax -- confirmed directly before
+// relying on it, not assumed. A double-quoted token in a guard is
+// always worth a second look now, not merely usually.
+func hasSuspiciousDoubleQuote(expr string) bool {
+	inSingle := false
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '\'':
+			inSingle = !inSingle
+		case '"':
+			if !inSingle {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // terminalStateList returns the declared terminal states in a stable form.

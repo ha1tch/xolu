@@ -1,6 +1,6 @@
 # Known Issues and Intentional Limits
 
-Version: 0.27.2
+Version: 0.28.0
 Last reviewed: 2026-08-04
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
