@@ -45,7 +45,7 @@ const sqliteConstraintUnique = 2067
 type Store struct {
 	db       *sql.DB
 	tenantID tenant.TenantID // canonical tenant identity; prefix is DERIVED from this, never independently supplied
-	prefix   string // tenant table prefix, e.g. "t0000_" — tenant.TablePrefix(tenantID)
+	prefix   string          // tenant table prefix, e.g. "t0000_" — tenant.TablePrefix(tenantID)
 
 	// claims, when set, gives Transfer visibility into live dxp
 	// reservations against an account before its guarded UPDATE runs
@@ -542,6 +542,70 @@ func (s *Store) Balance(ctx context.Context, accountID string) (value int64, ver
 		return 0, 0, &UnknownAccountError{AccountID: accountID}
 	}
 	return value, version, err
+}
+
+// AccountSummary is one row of ListAccounts -- an account's own
+// definition joined with its current balance, sparing a caller the
+// N+1 round trip of listing accounts and then calling Balance on
+// each one individually. Floor/Ceiling/Value are minor-unit int64 at
+// the account's own Scale, matching every other bal type's own
+// internal representation (@B04) -- the server handler, not this
+// method, is responsible for formatting them as decimal strings on
+// the wire.
+type AccountSummary struct {
+	AccountID string
+	Unit      string
+	Scale     uint8
+	Floor     int64
+	Ceiling   *int64
+	Postable  bool
+	Policy    string
+	Value     int64
+	Version   int64
+}
+
+// ListAccounts returns every account defined on the tenant, joined
+// with each one's current balance, ordered by account_id for a
+// stable, predictable listing. Requested by xoluman (XM-2, XOT172) --
+// no way existed to enumerate a tenant's own accounts at all before
+// this; BalDefine/BalBalance/BalEntries all require already knowing
+// an account's own id.
+func (s *Store) ListAccounts(ctx context.Context) ([]AccountSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.account_id, a.unit, a.scale, a.floor, a.ceiling, a.postable, a.temporal_policy,
+		        b.value, b.version
+		 FROM `+s.accountsTable()+` a
+		 JOIN `+s.balancesTable()+` b ON b.account_key = a.account_key
+		 ORDER BY a.account_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AccountSummary
+	for rows.Next() {
+		var (
+			as       AccountSummary
+			scale    int64
+			postable int
+			ceiling  sql.NullInt64
+		)
+		if err := rows.Scan(&as.AccountID, &as.Unit, &scale, &as.Floor, &ceiling, &postable, &as.Policy,
+			&as.Value, &as.Version); err != nil {
+			return nil, err
+		}
+		as.Scale = uint8(scale)
+		as.Postable = postable != 0
+		if ceiling.Valid {
+			v := ceiling.Int64
+			as.Ceiling = &v
+		}
+		out = append(out, as)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Entry is one journal row on the API surface: external account id,

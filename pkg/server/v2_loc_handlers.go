@@ -70,6 +70,24 @@ func (s *Server) TenantIDForTest(name string) (tenant.TenantID, bool) {
 	return s.tenantRegistry.Lookup(name)
 }
 
+// IsAdaptedForTest reports whether entity has an adapted table on the
+// ACTUAL store instance a given tenant's own requests use -- not
+// s.storage, which is what naive test code would check first and get a
+// wrong answer from for any non-zero tenant. Exists for XOT178's own
+// verification: confirms registerAdaptedEverywhere/replayAdaptedSchemas
+// genuinely reach the right store, not just that they ran without error.
+func (s *Server) IsAdaptedForTest(tenantID tenant.TenantID, entity string) (bool, error) {
+	store, err := s.storeForTenant(tenantID)
+	if err != nil {
+		return false, err
+	}
+	sqlStore, ok := store.(*storage.SQLiteStore)
+	if !ok {
+		return false, fmt.Errorf("store for tenant %d is not *storage.SQLiteStore", tenantID)
+	}
+	return sqlStore.AdaptedRegistry().IsAdapted(entity), nil
+}
+
 func (s *Server) locStoreForTenant(ctx context.Context, tenantID tenant.TenantID) (*loc.Store, error) {
 	onceI, _ := s.locInit.LoadOrStore(tenantID, &sync.Once{})
 	var initErr error

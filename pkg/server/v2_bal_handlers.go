@@ -31,6 +31,7 @@ import (
 func (s *Server) setupV2BalRoutes(r chi.Router) {
 	r.Post("/bal/def", s.handleBalDefine)
 	r.Post("/bal/transfer", s.handleBalTransfer)
+	r.Get("/bal/accounts", s.handleBalListAccounts)
 	// Account ids are namespaced strings containing '/', so they travel
 	// as a query parameter, never a path segment.
 	r.Get("/bal/balance", s.handleBalBalance)
@@ -186,6 +187,58 @@ func (s *Server) handleBalDefine(w http.ResponseWriter, r *http.Request) {
 		"account_id": def.ID, "unit": def.Unit, "scale": def.Scale,
 		"floor": bal.FormatAmount(def.Floor, def.Scale), "postable": def.Postable,
 	})
+}
+
+// handleBalListAccounts returns every account defined on the tenant,
+// each with its own definition and current balance -- xoluman's own
+// XM-2 report: no way existed to enumerate a tenant's own accounts at
+// all, every other bal endpoint (BalBalance, BalEntries, BalDefine)
+// requires already knowing an account's own id.
+//
+//	GET /api/v2/.../bal/accounts
+func (s *Server) handleBalListAccounts(w http.ResponseWriter, r *http.Request) {
+	st, err := s.balStore(r)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
+		return
+	}
+	accts, err := st.ListAccounts(r.Context())
+	if err != nil {
+		s.writeBalError(w, err)
+		return
+	}
+
+	type accountWire struct {
+		AccountID string `json:"account_id"`
+		Unit      string `json:"unit"`
+		Scale     uint8  `json:"scale"`
+		Floor     string `json:"floor"`
+		Ceiling   string `json:"ceiling,omitempty"`
+		Postable  bool   `json:"postable"`
+		Policy    string `json:"policy"`
+		Value     string `json:"value"`
+		Minor     int64  `json:"minor"`
+		Version   int64  `json:"version"`
+	}
+	out := make([]accountWire, 0, len(accts))
+	for _, a := range accts {
+		aw := accountWire{
+			AccountID: a.AccountID,
+			Unit:      a.Unit,
+			Scale:     a.Scale,
+			Floor:     bal.FormatAmount(a.Floor, a.Scale),
+			Postable:  a.Postable,
+			Policy:    a.Policy,
+			Value:     bal.FormatAmount(a.Value, a.Scale),
+			Minor:     a.Value,
+			Version:   a.Version,
+		}
+		if a.Ceiling != nil {
+			aw.Ceiling = bal.FormatAmount(*a.Ceiling, a.Scale)
+		}
+		out = append(out, aw)
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"accounts": out})
 }
 
 type balTransferReq struct {
@@ -396,7 +449,7 @@ func (s *Server) handleBalClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sealed_through": at.UTC(),
+		"sealed_through":  at.UTC(),
 		"accounts_closed": n,
 		"status":          "closed",
 	})

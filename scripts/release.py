@@ -82,7 +82,6 @@ ZIP_EXCLUDE = [
     "*.so", "*.dylib", "*.dll", "*.exe", "*.a", "*.o",
     ".release-state.json", "release-*.log", ".ed-journal.json",
     "*.pyc", "*.pyo", "__pycache__/*",
-    "examples/crm/xolu-crm-data/*",
 ]
 
 CONTAMINATION_RE = re.compile(
@@ -278,6 +277,31 @@ def step_c04dcheck(ctx: Ctx):
     return {}
 
 
+def step_critrepro(ctx: Ctx):
+    """Critical-scenario reproducer (T-168, 2026-08-07): scenarios whose
+    own correctness genuinely depends on true multi-core timing are not
+    verified via `go test -count=N` -- confirmed directly that the
+    harness itself, not the application code, was the source of a
+    stable ~33-43% failure rate seen there on real multi-core hardware,
+    while the identical scenario run through cmd/critrepro's own bare
+    `func main()` loop passed 500/500 on the same machine. Each such
+    scenario keeps its own single-run go test coverage (already
+    exercised by the normal `test` step above) and additionally runs
+    repeatedly here. 200 iterations, not 500 -- this step's own budget
+    is release verification, not exhaustive stress testing; 200 was
+    enough to distinguish the harness-caused ~33% rate from a genuine
+    fix cleanly in practice, and stress-scale iteration counts belong
+    to Horacio's own hardware (Part 1 §5.3), not this pipeline."""
+    tool = Path("/tmp/critrepro")
+    rc = ctx.run(["go", "build", "-o", str(tool), "./cmd/critrepro"], timeout=120)
+    if rc != 0:
+        raise StepFailed("critrepro build failed")
+    rc, out = ctx.capture([str(tool), "-n", "200"], timeout=300)
+    if rc != 0:
+        raise StepFailed(f"critrepro: one or more scenarios failed (rc={rc}):\n{out[-2000:]}")
+    return {}
+
+
 def step_generate(ctx: Ctx):
     meta = ctx.journal.data.get("test", {})
     total = meta.get("tests_run", 0)
@@ -400,6 +424,7 @@ STEPS = [
     ("test",        step_test,        True,  False),
     ("lint",        step_lint,        True,  False),
     ("c04dcheck",   step_c04dcheck,   True,  False),
+    ("critrepro",   step_critrepro,   True,  False),
     ("generate",    step_generate,    False, True),
     ("consistency", step_consistency, False, True),
     ("gate",        step_gate,        False, True),

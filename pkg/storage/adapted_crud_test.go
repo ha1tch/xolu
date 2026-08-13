@@ -453,6 +453,106 @@ func TestAdaptedCRUD_UpdateWithVersionCheck(t *testing.T) {
 	tx.Rollback()
 }
 
+// TestAdaptedCRUD_NestedObjectField reproduces xoluman's own XM-6
+// report directly: a plain nested (non-REF) object field on an
+// adapted table, matching their own real schema (`companies.address`,
+// `{street, city, state, country}`, no `format: ref`). Confirmed
+// root cause: PartitionData's own write side never JSON-encoded
+// array/object-typed column values before storage, even though
+// ReassembleData -- its own documented inverse -- already expected
+// and json.Unmarshal'd exactly that shape on the read side. A raw Go
+// map handed to the SQL driver as a bind parameter is rejected
+// outright, matching xoluman's own reported error text
+// ("unsupported type map[string]interface {}, a map") exactly.
+func TestAdaptedCRUD_NestedObjectField(t *testing.T) {
+	db, dialect, cleanup := setupAdaptedTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	registry := NewAdaptedRegistry()
+
+	schema := map[string]interface{}{
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string"},
+			"address": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"street":  map[string]interface{}{"type": "string"},
+					"city":    map[string]interface{}{"type": "string"},
+					"state":   map[string]interface{}{"type": "string"},
+					"country": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+		"required": []interface{}{"name"},
+	}
+
+	if err := RegisterAdaptedTable(ctx, db, registry, "companies", schema, dialect, 0); err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+	spec := registry.Get("companies")
+
+	address := map[string]interface{}{
+		"street": "1 Main St", "city": "X", "state": "Y", "country": "Z",
+	}
+	data := map[string]interface{}{"name": "With Address Co", "address": address}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adaptedCreate(ctx, tx, spec, dialect, 1, data); err != nil {
+		t.Fatalf("adaptedCreate with nested object field failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := adaptedGet(ctx, db, spec, dialect, 1)
+	if err != nil {
+		t.Fatalf("adaptedGet failed: %v", err)
+	}
+	gotAddress, ok := result["address"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("address: want map[string]interface{}, got %T: %v", result["address"], result["address"])
+	}
+	if gotAddress["street"] != "1 Main St" || gotAddress["city"] != "X" ||
+		gotAddress["state"] != "Y" || gotAddress["country"] != "Z" {
+		t.Errorf("address round-trip mismatch: got %+v, want %+v", gotAddress, address)
+	}
+
+	// Update: change one address field, confirm the merged write path
+	// (patchInner, and by extension adaptedUpdate -- same shared
+	// PartitionData this fix touches) also round-trips correctly, not
+	// just the create path.
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAddress := map[string]interface{}{
+		"street": "2 Side St", "city": "X", "state": "Y", "country": "Z",
+	}
+	if err := adaptedUpdate(ctx, tx, spec, dialect, 1,
+		map[string]interface{}{"name": "With Address Co", "address": newAddress}, 1, true); err != nil {
+		t.Fatalf("adaptedUpdate with nested object field failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err = adaptedGet(ctx, db, spec, dialect, 1)
+	if err != nil {
+		t.Fatalf("adaptedGet after update failed: %v", err)
+	}
+	gotAddress, ok = result["address"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("address after update: want map[string]interface{}, got %T", result["address"])
+	}
+	if gotAddress["street"] != "2 Side St" {
+		t.Errorf("address after update: want street=2 Side St, got %+v", gotAddress)
+	}
+}
+
 func TestAdaptedCRUD_Delete(t *testing.T) {
 	db, dialect, cleanup := setupAdaptedTestDB(t)
 	defer cleanup()

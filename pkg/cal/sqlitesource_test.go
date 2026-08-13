@@ -166,6 +166,73 @@ func TestSQLiteSourceRebuildEqualsIndex(t *testing.T) {
 	}
 }
 
+// TestSQLiteSourceBookingsInRange proves the overlap predicate directly
+// (start < to AND end > from, not exact containment) plus calendar
+// scoping, using five bookings chosen to cover every boundary case: one
+// fully inside the query window, one fully outside (before), one fully
+// outside (after), one straddling the query window's own start, one
+// straddling its own end, and one on a DIFFERENT calendar with a span
+// that would otherwise match -- to prove calendar_id is genuinely part
+// of the WHERE clause, not just the overlap predicate alone.
+func TestSQLiteSourceBookingsInRange(t *testing.T) {
+	src, _ := openSQLiteSource(t, 1, false)
+	if _, err := src.CreateCalendar(cal.Calendar{
+		CalendarID: "room-a", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("CreateCalendar room-a: %v", err)
+	}
+	if _, err := src.CreateCalendar(cal.Calendar{
+		CalendarID: "room-b", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("CreateCalendar room-b: %v", err)
+	}
+
+	base := ot.FromUnixNano(1750000000 * int64(time.Second))
+	hour := time.Hour
+	put := func(id, calendarID string, startOffset, endOffset time.Duration) {
+		t.Helper()
+		b := cal.Booking{
+			BookingID: id, CalendarID: calendarID, State: cal.StateBinding,
+			Span: cal.Span{Start: base.Add(startOffset), End: base.Add(endOffset)},
+			Mode: cal.ModeExclusive, Bearer: 1,
+			CreatedAt: base, UpdatedAt: base,
+		}
+		if err := src.PutBooking(b); err != nil {
+			t.Fatalf("PutBooking %s: %v", id, err)
+		}
+	}
+
+	// Query window: [base+2h, base+6h).
+	put("fully-inside", "room-a", 3*hour, 4*hour)
+	put("fully-before", "room-a", -2*hour, -1*hour)
+	put("fully-after", "room-a", 8*hour, 9*hour)
+	put("straddles-start", "room-a", 1*hour, 3*hour)
+	put("straddles-end", "room-a", 5*hour, 7*hour)
+	put("other-calendar", "room-b", 3*hour, 4*hour) // would match if calendar_id weren't scoped
+
+	got := src.BookingsInRange("room-a", base.Add(2*hour), base.Add(6*hour))
+	gotIDs := make(map[string]bool, len(got))
+	for _, b := range got {
+		gotIDs[b.BookingID] = true
+	}
+
+	want := []string{"fully-inside", "straddles-start", "straddles-end"}
+	for _, id := range want {
+		if !gotIDs[id] {
+			t.Errorf("expected %q in range result, got %v", id, gotIDs)
+		}
+	}
+	notWant := []string{"fully-before", "fully-after", "other-calendar"}
+	for _, id := range notWant {
+		if gotIDs[id] {
+			t.Errorf("did not expect %q in range result, got %v", id, gotIDs)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("want exactly %d bookings, got %d: %v", len(want), len(got), gotIDs)
+	}
+}
+
 // TestSQLiteSourceOrdinalAllocation: ordinals come from cal_ord_seq, dense
 // ascending.
 func TestSQLiteSourceOrdinalAllocation(t *testing.T) {
@@ -207,5 +274,112 @@ func TestSQLiteSourceTimePersistsAsUTC(t *testing.T) {
 	if got.Span.Start.UnixNano() != wantUTC.UnixNano() {
 		t.Fatalf("stored start %d != UTC equivalent %d (offset not normalised to instant)",
 			got.Span.Start.UnixNano(), wantUTC.UnixNano())
+	}
+}
+
+// TestSQLiteSourceBookingsForBearer proves the cross-calendar bearer
+// query (XOT180, 2026-08-11): bearer 100 holds bookings on two
+// different calendars plus one non-live (declined) booking that must
+// be excluded; bearer 200 holds one booking that must not appear in
+// bearer 100's own result.
+func TestSQLiteSourceBookingsForBearer(t *testing.T) {
+	src, _ := openSQLiteSource(t, 1, false)
+	for _, id := range []string{"room-a", "room-b"} {
+		if _, err := src.CreateCalendar(cal.Calendar{
+			CalendarID: id, DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+		}); err != nil {
+			t.Fatalf("CreateCalendar %s: %v", id, err)
+		}
+	}
+
+	base := ot.FromUnixNano(1750000000 * int64(time.Second))
+	hour := time.Hour
+	put := func(id, calendarID string, bearer uint64, state cal.State, startOffset, endOffset time.Duration) {
+		t.Helper()
+		b := cal.Booking{
+			BookingID: id, CalendarID: calendarID, State: state,
+			Span: cal.Span{Start: base.Add(startOffset), End: base.Add(endOffset)},
+			Mode: cal.ModeExclusive, Bearer: bearer,
+			CreatedAt: base, UpdatedAt: base,
+		}
+		if err := src.PutBooking(b); err != nil {
+			t.Fatalf("PutBooking %s: %v", id, err)
+		}
+	}
+
+	put("b100-room-a", "room-a", 100, cal.StateBinding, hour, 2*hour)
+	put("b100-room-b", "room-b", 100, cal.StateBinding, 3*hour, 4*hour)
+	put("b100-declined", "room-a", 100, cal.StateCancelled, 5*hour, 6*hour)
+	put("b200-room-a", "room-a", 200, cal.StateBinding, hour, 2*hour)
+
+	got := src.BookingsForBearer(100)
+	gotIDs := make(map[string]bool, len(got))
+	for _, b := range got {
+		gotIDs[b.BookingID] = true
+	}
+
+	for _, id := range []string{"b100-room-a", "b100-room-b"} {
+		if !gotIDs[id] {
+			t.Errorf("expected %q in bearer 100's own result, got %v", id, gotIDs)
+		}
+	}
+	for _, id := range []string{"b100-declined", "b200-room-a"} {
+		if gotIDs[id] {
+			t.Errorf("did not expect %q in bearer 100's own result, got %v", id, gotIDs)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("want exactly 2 bookings for bearer 100, got %d: %v", len(got), gotIDs)
+	}
+}
+
+// TestSQLiteSourceBookingsForBearer_TenantIsolation proves isolation
+// directly for this new query, matching XOT180's own general
+// discipline of not assuming a new query is safe by construction.
+func TestSQLiteSourceBookingsForBearer_TenantIsolation(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewSQLiteStore(dir+"/store.db", storage.SQLiteConfig{DBPath: dir + "/store.db"})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.InitV2Schema(context.Background()); err != nil {
+		t.Fatalf("InitV2Schema: %v", err)
+	}
+
+	srcA := cal.NewSQLiteBookingSource(store.DB(), 1, false)
+	srcB := cal.NewSQLiteBookingSource(store.DB(), 2, false)
+	if _, err := srcA.CreateCalendar(cal.Calendar{CalendarID: "room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding}); err != nil {
+		t.Fatalf("tenant 1 CreateCalendar: %v", err)
+	}
+	if _, err := srcB.CreateCalendar(cal.Calendar{CalendarID: "room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding}); err != nil {
+		t.Fatalf("tenant 2 CreateCalendar: %v", err)
+	}
+
+	base := ot.FromUnixNano(1750000000 * int64(time.Second))
+	// Same bearer ID (100) on both tenants -- the case most likely to
+	// leak if tenant scoping were ever forgotten on this new query.
+	if err := srcA.PutBooking(cal.Booking{
+		BookingID: "a-booking", CalendarID: "room", State: cal.StateBinding,
+		Span: cal.Span{Start: base, End: base.Add(time.Hour)}, Mode: cal.ModeExclusive, Bearer: 100,
+		CreatedAt: base, UpdatedAt: base,
+	}); err != nil {
+		t.Fatalf("tenant 1 PutBooking: %v", err)
+	}
+	if err := srcB.PutBooking(cal.Booking{
+		BookingID: "b-booking", CalendarID: "room", State: cal.StateBinding,
+		Span: cal.Span{Start: base, End: base.Add(time.Hour)}, Mode: cal.ModeExclusive, Bearer: 100,
+		CreatedAt: base, UpdatedAt: base,
+	}); err != nil {
+		t.Fatalf("tenant 2 PutBooking: %v", err)
+	}
+
+	gotA := srcA.BookingsForBearer(100)
+	if len(gotA) != 1 || gotA[0].BookingID != "a-booking" {
+		t.Fatalf("tenant isolation violated: tenant 1 wants exactly its own booking, got %+v", gotA)
+	}
+	gotB := srcB.BookingsForBearer(100)
+	if len(gotB) != 1 || gotB[0].BookingID != "b-booking" {
+		t.Fatalf("tenant isolation violated: tenant 2 wants exactly its own booking, got %+v", gotB)
 	}
 }

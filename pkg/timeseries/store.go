@@ -568,6 +568,29 @@ func (s *PebbleStore) QueryRange(ctx context.Context, q RangeQuery) ([]Event, er
 			return nil, fmt.Errorf("ts: iter: %w", err)
 		}
 	}
+
+	// Re-check existence after the scan, not just before it (2026-08-13,
+	// found via TestDeleteTimeline_DeletingMarker's own concurrent-reader
+	// case, reproducible at a real, non-zero rate even on a single core --
+	// the check-then-scan gap this closes is structurally the kind that
+	// widens under true multi-core parallelism specifically, since
+	// DeleteTimeline's own multi-step teardown (list rollups, delete each,
+	// clear the data range) can now run genuinely concurrently with, not
+	// merely time-sliced against, this function's own scan). The initial
+	// s.reg.get() above only proves the timeline was defined at the moment
+	// this call started; a concurrent DeleteTimeline can mark the timeline
+	// deleting and clear its data range entirely while this scan runs,
+	// silently returning an empty-but-successful result to a caller who
+	// would reasonably read that as "still defined, just no data in
+	// range" -- exactly the defined-but-empty state the deleting marker
+	// exists to prevent, just not fully, since nothing here re-validated
+	// after the scan actually started reading. Trusting the scan's own
+	// results only after confirming the timeline is still visible closes
+	// that gap down to the width of this one extra registry lookup,
+	// rather than the width of the entire scan.
+	if _, ok := s.reg.get(q.Timeline); !ok {
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
+	}
 	return results, nil
 }
 
@@ -623,6 +646,16 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 	}
 	if err := iter.Error(); err != nil {
 		return nil, fmt.Errorf("ts: iter: %w", err)
+	}
+
+	// Re-check existence after the scan, not just before it (2026-08-13).
+	// Same fix, same reasoning, as QueryRange's own identical re-check
+	// above -- see that comment for the full mechanism. Latest shares the
+	// exact same shape (an initial s.reg.get() only proves the timeline
+	// was defined when this call started, then an unguarded scan follows)
+	// and so shares the exact same gap, previously untested here.
+	if _, ok := s.reg.get(q.Timeline); !ok {
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	return results, nil
 }
@@ -758,6 +791,15 @@ func (s *PebbleStore) Aggregate(ctx context.Context, q AggregateQuery) ([]Bucket
 			t = q.From
 		}
 		results = append(results, Bucket{Time: t, Value: v, Count: b.count})
+	}
+
+	// Re-check existence after the scan, not just before it (2026-08-13).
+	// Same fix, same reasoning, as QueryRange's own identical re-check --
+	// see that comment for the full mechanism. Aggregate shares the exact
+	// same shape and so shares the exact same gap, previously untested
+	// here.
+	if _, ok := s.reg.get(q.Timeline); !ok {
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
 	}
 	return results, nil
 }

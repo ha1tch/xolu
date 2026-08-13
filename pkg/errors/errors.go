@@ -554,6 +554,16 @@ const (
 	// pkg/cal type surface.
 	ErrCalModeNotSupported Code = "XOLU-CAL007"
 
+	// ErrCalCalendarExists is returned when a request tries to create
+	// a calendar_id that already exists in the current tenant scope.
+	// Added alongside POST /cal/calendars (XM-8, 2026-08-12) -- until
+	// then classifyCalError's own cal.ErrCalendarExists case mapped
+	// here to ErrCalCalendarNotFound ("not found"), a genuine,
+	// pre-existing mismatch (semantically the wrong code for a
+	// conflict) that sat dormant purely because no route existed that
+	// could ever trigger it.
+	ErrCalCalendarExists Code = "XOLU-CAL008"
+
 	// ─── DXP family — declarative composed commitments ────────────────────
 	// Introduced with the reserved-commit facility (item 18, v0.16.20),
 	// reserved for the dxp coordinator per the dxp proposal §10.

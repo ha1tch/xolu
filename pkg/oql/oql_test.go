@@ -5,6 +5,9 @@
 package oql
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ha1tch/tsqlparser"
@@ -226,28 +229,159 @@ func TestValidatorRejectsDeleteWithoutWhere(t *testing.T) {
 // TestValidatorNamesSetOperator confirms the set-operation rejection names the
 // actual operator (UNION/INTERSECT/EXCEPT) rather than always saying "UNION".
 // Regression test for the TD-002 error-message fix.
-func TestValidatorNamesSetOperator(t *testing.T) {
-	v := NewValidator("/tmp/nonexistent")
-	cases := []struct {
-		query string
-		want  string
+// mockEntityChecker is a minimal EntityChecker for validator tests that
+// need real entities to exist, rather than the "/tmp/nonexistent" schema
+// dir every other validator test in this file uses (which is fine for
+// tests that only care about rejection before entity resolution is ever
+// reached, but not for UNION/INTERSECT/EXCEPT tests, which need both
+// branches' own entities to resolve successfully to test the set-operator
+// logic itself, not an unrelated "entity doesn't exist" failure).
+type mockEntityChecker struct{ names []string }
+
+func (m *mockEntityChecker) ListEntities(_ context.Context) ([]string, error) {
+	return m.names, nil
+}
+
+// TestValidatorUnionChain covers UNION/INTERSECT/EXCEPT validation
+// (2026-08-12): previously rejected outright ("UNION is not supported");
+// now validated properly. Positive cases confirm a well-formed chain is
+// accepted; negative cases confirm the two deliberate restrictions this
+// implementation chose (homogeneous operator type across a chain, matching
+// column counts on both sides) are enforced, and that an invalid entity on
+// either branch still propagates as a real error, not silently ignored.
+func TestValidatorUnionChain(t *testing.T) {
+	v := NewValidatorWithStore("/tmp/nonexistent", &mockEntityChecker{names: []string{"items", "other", "third"}})
+
+	tests := []struct {
+		name    string
+		query   string
+		wantErr bool
+		errSub  string
 	}{
-		{"SELECT id FROM items UNION SELECT id FROM other", "UNION is not supported"},
-		{"SELECT id FROM items INTERSECT SELECT id FROM other", "INTERSECT is not supported"},
-		{"SELECT id FROM items EXCEPT SELECT id FROM other", "EXCEPT is not supported"},
+		{"plain UNION accepted", "SELECT id FROM items UNION SELECT id FROM other", false, ""},
+		{"UNION ALL accepted", "SELECT id FROM items UNION ALL SELECT id FROM other", false, ""},
+		{"INTERSECT accepted", "SELECT id FROM items INTERSECT SELECT id FROM other", false, ""},
+		{"EXCEPT accepted", "SELECT id FROM items EXCEPT SELECT id FROM other", false, ""},
+		{"chained UNION (3 branches) accepted", "SELECT id FROM items UNION SELECT id FROM other UNION SELECT id FROM third", false, ""},
+		{"mixed operators rejected", "SELECT id FROM items UNION SELECT id FROM other INTERSECT SELECT id FROM third",
+			true, "mixed set operators"},
+		{"mismatched column counts rejected", "SELECT id, name FROM items UNION SELECT id FROM other",
+			true, "same number of columns"},
+		{"unknown entity on the right branch still rejected", "SELECT id FROM items UNION SELECT id FROM nonexistent_entity",
+			true, "does not exist"},
+		{"INTERSECT ALL rejected (not valid T-SQL, would need real multiset semantics)",
+			"SELECT id FROM items INTERSECT ALL SELECT id FROM other", true, "INTERSECT ALL is not supported"},
+		{"EXCEPT ALL rejected", "SELECT id FROM items EXCEPT ALL SELECT id FROM other", true, "EXCEPT ALL is not supported"},
+		{"SELECT * rejected on the left branch", "SELECT * FROM items UNION SELECT id FROM other",
+			true, "SELECT * is not supported"},
+		{"SELECT * rejected on the right branch", "SELECT id FROM items UNION SELECT * FROM other",
+			true, "SELECT * is not supported"},
 	}
-	for _, c := range cases {
-		program, _ := tsqlparser.Parse(c.query)
-		if len(program.Statements) != 1 {
-			t.Fatalf("parse %q: expected 1 statement, got %d", c.query, len(program.Statements))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			program, errs := tsqlparser.Parse(tt.query)
+			if len(errs) > 0 {
+				t.Fatalf("parse errors: %v", errs)
+			}
+			if len(program.Statements) != 1 {
+				t.Fatalf("expected 1 statement, got %d", len(program.Statements))
+			}
+			err := v.Validate(program.Statements[0])
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("%q: expected rejection, got nil", tt.query)
+				}
+				if tt.errSub != "" && !strings.Contains(err.Error(), tt.errSub) {
+					t.Errorf("%q: want error containing %q, got %q", tt.query, tt.errSub, err.Error())
+				}
+			} else if err != nil {
+				t.Errorf("%q: expected acceptance, got error: %v", tt.query, err)
+			}
+		})
+	}
+}
+
+func TestValidatorDerivedTable(t *testing.T) {
+	v := NewValidatorWithStore("/tmp/nonexistent", &mockEntityChecker{names: []string{"items", "other"}})
+
+	tests := []struct {
+		name    string
+		query   string
+		wantErr bool
+		errSub  string
+	}{
+		{"basic derived table accepted", "SELECT * FROM (SELECT id FROM items) AS x", false, ""},
+		{"derived table with WHERE inside accepted", "SELECT * FROM (SELECT id FROM items WHERE id = 1) AS x", false, ""},
+		{"derived table with WHERE outside accepted", "SELECT * FROM (SELECT id FROM items) AS x WHERE id = 1", false, ""},
+		{"nested derived table accepted", "SELECT * FROM (SELECT id FROM (SELECT id FROM items) AS inner1) AS outer1", false, ""},
+		{"derived table containing UNION accepted", "SELECT * FROM (SELECT id FROM items UNION SELECT id FROM other) AS x", false, ""},
+		{"missing alias rejected", "SELECT * FROM (SELECT id FROM items)", true, "requires an explicit alias"},
+		{"column alias list rejected", "SELECT * FROM (SELECT id FROM items) AS x(n)", true, "column alias list"},
+		{"unknown entity inside the subquery still rejected", "SELECT * FROM (SELECT id FROM nonexistent_entity) AS x", true, "does not exist"},
+		{"derived table on JOIN left side rejected", "SELECT a.id FROM (SELECT id FROM items) AS a INNER JOIN other AS b ON a.id = b.id",
+			true, "not a subquery or derived table"},
+		{"derived table on JOIN right side rejected", "SELECT a.id FROM items AS a INNER JOIN (SELECT id FROM other) AS b ON a.id = b.id",
+			true, "not a subquery or derived table"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			program, errs := tsqlparser.Parse(tt.query)
+			if len(errs) > 0 {
+				t.Fatalf("parse errors: %v", errs)
+			}
+			if len(program.Statements) != 1 {
+				t.Fatalf("expected 1 statement, got %d", len(program.Statements))
+			}
+			err := v.Validate(program.Statements[0])
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("%q: expected rejection, got nil", tt.query)
+				}
+				if tt.errSub != "" && !strings.Contains(err.Error(), tt.errSub) {
+					t.Errorf("%q: want error containing %q, got %q", tt.query, tt.errSub, err.Error())
+				}
+			} else if err != nil {
+				t.Errorf("%q: expected acceptance, got error: %v", tt.query, err)
+			}
+		})
+	}
+}
+
+func TestValidatorDerivedTableDepthCap(t *testing.T) {
+	v := NewValidatorWithStore("/tmp/nonexistent", &mockEntityChecker{names: []string{"items"}})
+
+	build := func(levels int) string {
+		q := "SELECT id FROM items"
+		for i := 0; i < levels; i++ {
+			q = fmt.Sprintf("SELECT id FROM (%s) AS lvl%d", q, i)
 		}
-		err := v.Validate(program.Statements[0])
-		if err == nil {
-			t.Errorf("%q: expected rejection, got nil", c.query)
-			continue
-		}
-		if err.Error() != c.want {
-			t.Errorf("%q: want %q, got %q", c.query, c.want, err.Error())
-		}
+		return q
+	}
+
+	// maxDerivedTableDepth is 10 -- exactly at the cap must pass,
+	// one more must fail. Testing the boundary precisely, not just
+	// "some large number fails".
+	atCap := build(10)
+	program, errs := tsqlparser.Parse(atCap)
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	if err := v.Validate(program.Statements[0]); err != nil {
+		t.Errorf("exactly %d levels (the cap): want acceptance, got %v", maxDerivedTableDepth, err)
+	}
+
+	overCap := build(11)
+	program, errs = tsqlparser.Parse(overCap)
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	err := v.Validate(program.Statements[0])
+	if err == nil {
+		t.Fatal("11 levels (one over the cap): want rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "nesting too deep") {
+		t.Errorf("want a nesting-depth error, got %q", err.Error())
 	}
 }

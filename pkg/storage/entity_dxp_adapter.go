@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -298,8 +299,51 @@ func (a *EntityAdapter) Execute(ctx context.Context, store dxp.ParticipantStore,
 
 	switch tp := op.(type) {
 	case EntityUpdateParams:
+		// Read-merge-write (XOT178, 2026-08-09, xoluman's own XM-4 root
+		// cause, found by direct reproduction, not assumed): this used to
+		// pass tp.Data -- the raw PARTIAL patch -- straight to saveInTx,
+		// which does not merge. patchInner (the regular PATCH endpoint's
+		// own path) reads the existing document, merges the patch over
+		// it, and only then writes the merged result -- correct, and the
+		// reason a plain PATCH never loses untouched fields. This path
+		// called saveInTx directly, entirely bypassing that merge: for a
+		// blob entity, saveInTx's own JSON write overwrote the whole
+		// document with the partial patch alone; for an adapted entity,
+		// adaptedUpdate's own generated UPDATE touches every column in
+		// the spec regardless of what's in the patch, so every column
+		// the patch didn't mention was overwritten with a zero value.
+		// Fixed by mirroring patchInner's own read-merge logic here,
+		// inside the same transaction the write itself uses.
+		var existing map[string]interface{}
+		if spec := a.store.adapted.Get(tp.Entity); spec != nil {
+			var err error
+			existing, _, err = adaptedGetInTx(ctx, s.Tx, spec, a.store.dialect, tp.ID)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			var jsonData string
+			err := s.Tx.QueryRowContext(ctx,
+				`SELECT data FROM `+a.store.nodesTable()+` WHERE entity_type = ? AND id = ?`,
+				tp.Entity, tp.ID).Scan(&jsonData)
+			if err == sql.ErrNoRows {
+				return nil, ErrNotFound
+			}
+			if err != nil {
+				return nil, fmt.Errorf("entity participant: failed to query entity: %w", err)
+			}
+			if err := json.Unmarshal([]byte(jsonData), &existing); err != nil {
+				return nil, fmt.Errorf("entity participant: failed to unmarshal data: %w", err)
+			}
+		}
+		for key, value := range tp.Data {
+			if key == "id" || key == "_version" {
+				continue
+			}
+			existing[key] = value
+		}
 		if _, err := a.store.saveInTx(ctx, s.Tx, CommitUpdate{
-			Entity: tp.Entity, ID: tp.ID, Version: tp.ExpectVersion, Data: tp.Data,
+			Entity: tp.Entity, ID: tp.ID, Version: tp.ExpectVersion, Data: existing,
 		}); err != nil {
 			return nil, err
 		}

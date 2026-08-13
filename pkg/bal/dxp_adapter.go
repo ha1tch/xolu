@@ -190,6 +190,7 @@ func (a *Adapter) Reserve(ctx context.Context, tenant string, op dxp.OpParams,
 	cl := dxp.Claim{
 		Txn: txn, Primitive: "bal", Tenant: tenant, ParticipantID: participantID,
 		Resource: dxpResource(tp.From), Weight: w, Amount: tp.Amount, Deadline: deadline,
+		WriteTargets: []string{dxpResource(tp.From), dxpResource(tp.To)},
 	}
 	if err := a.cache.Hold(cl); err != nil {
 		return dxp.Claim{}, err

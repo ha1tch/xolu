@@ -323,3 +323,75 @@ func TestBalCloseRequiresNonZeroTime(t *testing.T) {
 		t.Fatal("expected client-side validation error for zero at")
 	}
 }
+
+// ─── BalListAccounts ────────────────────────────────────────────────────────
+
+func TestBalListAccountsHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/bal/accounts" {
+			t.Errorf("expected /api/v2/bal/accounts, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"accounts":[
+			{"account_id":"cash:eur","unit":"EUR","scale":2,"floor":"-50.00","ceiling":"100.00",
+			 "postable":true,"policy":"","value":"12.50","minor":1250,"version":3},
+			{"account_id":"widget","unit":"widget","scale":0,"floor":"0","postable":true,
+			 "policy":"","value":"-1","minor":-1,"version":1}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.BalListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Accounts) != 2 {
+		t.Fatalf("want 2 accounts, got %d: %+v", len(res.Accounts), res.Accounts)
+	}
+	eur := res.Accounts[0]
+	if eur.AccountID != "cash:eur" || eur.Value != "12.50" || eur.Minor != 1250 || eur.Ceiling != "100.00" {
+		t.Errorf("unexpected cash:eur: %+v", eur)
+	}
+	widget := res.Accounts[1]
+	if widget.Ceiling != "" {
+		t.Errorf("widget defined with no ceiling, want empty, got %q", widget.Ceiling)
+	}
+}
+
+func TestBalListAccountsEmptyResultNotNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"accounts":[]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.BalListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Accounts == nil {
+		t.Error("expected non-nil empty slice, got nil")
+	}
+}
+
+func TestBalListAccountsStorageError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"code":"XOLU-ST099","message":"storage failure","status":500}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.BalListAccounts(context.Background())
+	ce, ok := err.(*Error)
+	if !ok || ce.HTTPStatus != 500 {
+		t.Fatalf("expected a structured 500 *client.Error, got %T: %v", err, err)
+	}
+}

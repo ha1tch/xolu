@@ -96,6 +96,43 @@ type Claim struct {
 	// outright ("no pending transfer for txn ..."), confirmed by
 	// direct reproduction, not theorised.
 	ParticipantID string
+
+	// WriteTargets names every identifier this participant's Execute
+	// will actually write to -- distinct from Resource, which exists
+	// for pessimistic reservation-conflict detection during Reserve
+	// and, for a shape like bal's transfer, only ever names one side
+	// (the source account). A transfer genuinely writes to two
+	// accounts; two participants sharing either side -- both debiting
+	// the same source, or one's source matching another's destination
+	// -- must be serialized against each other during Execute, not
+	// just during Reserve's own conflict check.
+	//
+	// Added 2026-08-05 (a real bug, found by direct reproduction on
+	// real multi-core hardware, never on a single-core sandbox):
+	// dispatchPhased runs every participant's Execute in its own
+	// goroutine, each opening an independent transaction. bal's own
+	// append_only accounts refuse a write whose timestamp predates
+	// the latest journal entry already on that account -- but the
+	// timestamp for a participant's write is generated independently
+	// per goroutine, before that goroutine's own transaction actually
+	// acquires the database's write lock. Under genuine parallelism,
+	// timestamp-generation order and actual commit order are two
+	// different orderings with nothing keeping them consistent: a
+	// goroutine whose transaction commits second can carry an earlier
+	// timestamp than the one that committed first, and gets refused
+	// as "backdated" even though it's an entirely ordinary concurrent
+	// write. dispatchPhased now serializes participants that share a
+	// WriteTarget (falling back to Resource when a participant leaves
+	// this unset) with a per-target lock held from immediately before
+	// Execute through Commit/Abort -- established before any commit
+	// happens, not a retry after the fact.
+	//
+	// Left empty by every adapter except bal's own Reserve as of this
+	// writing -- the other primitives (cal, fsm, entity, ts) do not
+	// carry an append_only-style monotonic-time constraint, so the
+	// Resource-only fallback already gives them the same protection
+	// this field exists to add for bal specifically.
+	WriteTargets []string
 }
 
 // Cache is the substrate-level reservation facility. One per xolu

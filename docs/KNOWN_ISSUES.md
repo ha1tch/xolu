@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.28.0
-Last reviewed: 2026-08-04
+Version: 0.30.23
+Last reviewed: 2026-08-10
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
@@ -565,7 +565,67 @@ correctness envelope over parser/validator input space.
   entry, but noted as further evidence the fix introduced no
   regression to the adjacent admission-CAS path.
 
-### bal: as-of is wrong after a backdated transfer (T-51)
+### G-18. dxp/bal WriteTargets serialization (T-168) — not trusted to go test's own -count harness
+
+- **What it guards:** the same class of bug as G-17, a different
+  mechanism. `TestDxpTxnAPI_Scale_FiveBalLegs_AllCommit` (five
+  independent `bal` transfer participants sharing a source account,
+  dispatched one goroutine per participant by both `dispatchPhased`
+  and `dispatchCollapsed`) failed at a stable ~33-43% rate under
+  `go test -count=500` on real M1 hardware — an `append_only` account's
+  own monotonic-timestamp guard (`XOLU-BAL006`) rejecting a
+  perfectly ordinary concurrent write as "backdated." Root cause:
+  `bal.Adapter.Execute`'s own `executionInstant()` call, made
+  independently per goroutine with no ordering guarantee against
+  other participants writing the same account. Fixed with
+  `dxp.Claim.WriteTargets` (both sides of a transfer, not just
+  `Resource`'s own source-only value) and a per-write-target
+  `sync.Mutex` in both dispatch functions, held from immediately
+  before `Execute` through `Commit`/`Abort`.
+- **The harness finding, the actual reason this guard exists in this
+  particular shape:** the fix was correct well before this was
+  confirmed, but `go test -count=500` kept failing at the same ~33%
+  rate even after it landed. Five hypotheses were checked directly and
+  ruled out in turn — a Go-level data race (`-race` clean, 100/100), a
+  broken lock (a sequence-numbered trace showed clean, non-overlapping
+  acquire/release pairs on real multi-core hardware), lost
+  `WriteTargets` (same trace confirmed correct population),
+  a `modernc.org/sqlite` driver comparison bug (a direct, isolated
+  probe of the exact `at > ?` pattern worked correctly), and wall-clock
+  non-monotonicity (a direct 2,000,000-iteration probe of
+  `time.Now().UTC()` — the exact call `xolutime.Now()` makes — found
+  zero backward jumps on the same M1). Horacio's own hypothesis, that
+  `go test`'s own repeated-invocation harness was the actual source of
+  the failures rather than the application code, was the one that
+  resolved it: the identical scenario, same fix, same hardware, driven
+  by `cmd/critrepro`'s own bare `func main()` loop instead of
+  `go test -count=500`, ran 500/500 clean. Not investigated further —
+  "totally looks like a Go bug" in Horacio's own words, and this
+  project does not have the budget to dig into the toolchain itself;
+  production traffic never goes through `go test` regardless, so the
+  fix's own correctness (now confirmed) is what actually matters.
+- **Gate:** ordinary build, no tag — like G-17, the dormant part is the
+  hardware (true multi-core parallelism) combined with a verification
+  instrument (`cmd/critrepro`, not `go test -count=N`) that this
+  finding specifically requires. `go test`'s own single-run coverage
+  of this scenario continues unaffected, every ordinary test run.
+  Canonical invocation: `go run ./cmd/critrepro -scenario five-bal-legs -n 500`
+  Pass condition: 500/500, zero `XOLU-BAL006` rejections.
+- **Environment contract:** WAL + busy_timeout (house defaults) only.
+- **Last exercised:** 2026-08-07 env:m1 (real Apple M1 silicon,
+  Horacio's own run) — `go run ./cmd/critrepro -n 500` (default,
+  all registered scenarios) — **PASS, 500/500, zero failures.** Against
+  the pre-fix `go test -count=500` log's ~170-215 failures on the
+  identical hardware. Both the harness hypothesis and the underlying
+  fix confirmed in the same run — this guard's own pass condition is
+  now met by construction, not by a probe pending further evidence.
+  `scripts/release.py`'s own `critrepro` step (200 iterations) and
+  `.github/workflows/ci.yml`'s own `critrepro` step (100 iterations)
+  both re-exercise this scenario going forward, every release and every
+  push — this guard's own record updates whenever either reports a
+  failure, not only on a dedicated 500-run pass like this one.
+
+
 
 **Status: open defect, present since 0.16.17.** `BalanceAsOf` reads
 `nearest checkpoint + intervening buckets`. A transfer dated at or

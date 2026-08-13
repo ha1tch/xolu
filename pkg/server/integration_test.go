@@ -1482,7 +1482,10 @@ func TestPatch_AdditionalPropertiesFalse_UndeclaredTargetRefField_Succeeds(t *te
 	// The exact original report shape, kept as its own test even
 	// though the root cause turned out to be broader: a
 	// "format":"ref" property with no "target" key at all -- the
-	// precise pattern examples/crm's own seed script uses.
+	// precise pattern xoluman's own CRM example seed script uses
+	// (formerly examples/crm in this repository; moved to xoluman
+	// to avoid maintaining two parallel copies of the same example,
+	// v0.30.0).
 	env := newIntegrationEnv(t)
 	defer env.cleanup()
 

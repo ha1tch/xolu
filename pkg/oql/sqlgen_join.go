@@ -26,6 +26,20 @@ type JoinSQL struct {
 	SQL     string
 	Args    []interface{}
 	Aliases []string // Result column aliases in SELECT order
+	// DecimalColumns is alias -> scale for every adapted-side decimal
+	// column selected. XM-7b (xoluman's own report, 2026-08-12): this
+	// field, and the tracking that populates it, didn't exist at all
+	// before this fix -- generateJoinSelectColumns already called
+	// store.AdaptedColumnInfo (which returns scale/isDecimal) but
+	// discarded both, so a decimal field through a JOIN returned its
+	// raw, scaled-integer stored form untransformed (e.g. "333000.65"
+	// stored/returned elsewhere as that exact decimal string came back
+	// as the bare integer 33300065 through a JOIN specifically -- an
+	// exact x100 scale factor, not a computation error, consistent
+	// with the missing denormalisation step this field and
+	// denormaliseAggregateDecimals (already used by the adapted and
+	// aggregate paths, reused here unmodified) now close.
+	DecimalColumns map[string]int
 }
 
 // GenerateJoinSQL translates a two-table OQL SELECT + JOIN into a single SQL
@@ -66,7 +80,7 @@ func GenerateJoinSQL(
 	}
 
 	// -- SELECT columns --
-	selectExprs, aliases, err := generateJoinSelectColumns(stmt, js, plan, store, dialect, addArg)
+	selectExprs, aliases, decimalCols, err := generateJoinSelectColumns(stmt, js, plan, store, dialect, addArg)
 	if err != nil {
 		return nil, err
 	}
@@ -102,19 +116,23 @@ func GenerateJoinSQL(
 			fmt.Sprintf("%s.entity_type = %s", js.RightAlias, addArg(js.RightEntity)))
 	}
 
-	// tenant scoping
+	// tenant scoping (T-168-adjacent fix, XOT173, 2026-08-10, xoluman's
+	// own XM-3a report: both branches here used to emit the identical
+	// "%s.tenant_id = ?" predicate regardless of plan.*Adapted -- a
+	// copy-paste bug, not a deliberate choice; the if/else read as if it
+	// distinguished the two cases but never actually did. Adapted tables
+	// carry no tenant_id column at all (confirmed directly against
+	// resolveJoinTableNames above: store.AdaptedTableName already
+	// returns the PER-TENANT table name, e.g. t0001_deals -- the table
+	// itself is the scoping, a tenant_id predicate on it is not just
+	// wrong, it's redundant). Blob rows share one table across all
+	// tenants and still need the explicit predicate.
 	if tenantID != "" {
 		if !plan.LeftAdapted {
 			whereParts = append(whereParts,
 				fmt.Sprintf("%s.tenant_id = %s", js.LeftAlias, addArg(tenantID)))
-		} else {
-			whereParts = append(whereParts,
-				fmt.Sprintf("%s.tenant_id = %s", js.LeftAlias, addArg(tenantID)))
 		}
 		if !plan.RightAdapted {
-			whereParts = append(whereParts,
-				fmt.Sprintf("%s.tenant_id = %s", js.RightAlias, addArg(tenantID)))
-		} else {
 			whereParts = append(whereParts,
 				fmt.Sprintf("%s.tenant_id = %s", js.RightAlias, addArg(tenantID)))
 		}
@@ -143,9 +161,10 @@ func GenerateJoinSQL(
 	)
 
 	return &JoinSQL{
-		SQL:     sql,
-		Args:    args,
-		Aliases: aliases,
+		SQL:            sql,
+		Args:           args,
+		Aliases:        aliases,
+		DecimalColumns: decimalCols,
 	}, nil
 }
 
@@ -195,7 +214,8 @@ func generateJoinSelectColumns(
 	store storage.AggregateQueryable,
 	dialect SQLDialect,
 	addArg func(interface{}) string,
-) (exprs []string, aliases []string, err error) {
+) (exprs []string, aliases []string, decimalCols map[string]int, err error) {
+	decimalCols = make(map[string]int)
 	for _, col := range stmt.Columns {
 		alias := joinColumnAlias(col)
 
@@ -206,17 +226,45 @@ func generateJoinSelectColumns(
 		// through the same allowlist the field references use; default aliases
 		// (field name or qualified field) satisfy it.
 		if err := validateFieldName(alias); err != nil {
-			return nil, nil, fmt.Errorf("SELECT column alias %q: %w", alias, err)
+			return nil, nil, nil, fmt.Errorf("SELECT column alias %q: %w", alias, err)
 		}
 
 		sqlExpr, genErr := generateJoinColumnExpr(col.Expression, js, plan, store, dialect, addArg)
 		if genErr != nil {
-			return nil, nil, fmt.Errorf("SELECT column %q: %w", alias, genErr)
+			return nil, nil, nil, fmt.Errorf("SELECT column %q: %w", alias, genErr)
 		}
 		exprs = append(exprs, sqlExpr+" AS "+alias)
 		aliases = append(aliases, alias)
+
+		// XM-7b (xoluman's own report, 2026-08-12): track decimal
+		// columns the same way sqlgen_adapted.go's own
+		// trackDecimalColumn does, so denormaliseAggregateDecimals
+		// (already shared by the adapted and aggregate paths) can be
+		// reused unmodified for JOIN too. JOIN doesn't support
+		// aggregate functions in its own SELECT list at all (XM-7a,
+		// confirmed architectural limit) -- only a plain qualified
+		// identifier needs checking here, not the FunctionCall case
+		// sqlgen_adapted.go's own tracker also handles.
+		if qi, ok := col.Expression.(*ast.QualifiedIdentifier); ok {
+			entity := ""
+			switch qualifiedTable(qi) {
+			case js.LeftAlias:
+				if plan.LeftAdapted {
+					entity = js.LeftEntity
+				}
+			case js.RightAlias:
+				if plan.RightAdapted {
+					entity = js.RightEntity
+				}
+			}
+			if entity != "" {
+				if _, scale, isDecimal, ok := store.AdaptedColumnInfo(entity, qualifiedField(qi)); ok && isDecimal {
+					decimalCols[alias] = scale
+				}
+			}
+		}
 	}
-	return exprs, aliases, nil
+	return exprs, aliases, decimalCols, nil
 }
 
 // joinColumnAlias returns the result-set alias for a SELECT column in a JOIN

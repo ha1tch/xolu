@@ -176,12 +176,40 @@ SELECT TOP 10 * FROM items ORDER BY value DESC
 SELECT DISTINCT status FROM items
 ```
 
-**Set operations are not supported.** `UNION`, `UNION ALL`, `INTERSECT`, and
-`EXCEPT` parse but are rejected at validation; a query using any of them fails
-with an error naming the operator (e.g. `INTERSECT is not supported`). To combine
-result sets, run separate queries and merge client-side. (Sulpher, the graph
-query language, does support `UNION` / `UNION ALL` — the two languages differ
-here.)
+**Set operations: `UNION`, `UNION ALL`, `INTERSECT`, and `EXCEPT`.**
+
+```sql
+-- Combine two entities' own rows, deduplicated
+SELECT name FROM deals UNION SELECT name FROM archived_deals
+
+-- Keep duplicates
+SELECT name FROM deals UNION ALL SELECT name FROM archived_deals
+
+-- Rows present on both sides only
+SELECT name FROM deals INTERSECT SELECT name FROM archived_deals
+
+-- Left side's own rows not present on the right
+SELECT name FROM deals EXCEPT SELECT name FROM archived_deals
+
+-- A trailing ORDER BY / TOP applies to the combined result as a
+-- whole, not just the last branch it's written against
+SELECT name FROM deals UNION SELECT name FROM archived_deals ORDER BY name ASC
+```
+
+Each branch executes independently through the same query path any other
+SELECT uses — full tenant scoping, decimal formatting, adapted/blob
+resolution — then the branches are combined in Go (not pushed down to
+SQLite as a single nested statement). Two restrictions, deliberate rather
+than incomplete support: every branch in a chain must use the identical
+operator (`A UNION B INTERSECT C` is rejected outright — SQL's own
+precedence rules for mixed set operators are easy to get subtly wrong, so
+this is rejected rather than guessed at); every branch must select the
+same number of columns. `INTERSECT ALL`/`EXCEPT ALL` are rejected too —
+not valid T-SQL syntax at all (SQL Server only supports `UNION ALL`), and
+correct multiset semantics for the other two are a separate, unimplemented
+piece of work, not a formality. (Sulpher, the graph query language, also
+supports `UNION`/`UNION ALL` — the two languages' own implementations are
+independent of each other.)
 
 ### INSERT
 
@@ -277,8 +305,10 @@ DELETE FROM items WHERE category_id = 5 AND last_value < '2024-01-01'
 ## JOIN Queries
 
 > **SQLite store only.** JOIN push-down requires `XOLU_STORAGE_TYPE=sqlite`.
-> Only two-table joins are supported; three-or-more-table joins and subquery
-> tables are rejected.
+> Only two-table joins are supported; three-or-more-table joins are rejected,
+> and neither side of a JOIN may be a subquery (a subquery is supported
+> elsewhere in a SELECT's own FROM clause -- see
+> [Subqueries](#subqueries-derived-tables) -- just not as one side of a JOIN).
 
 OQL supports two-table joins when the store backend is SQLite. All four standard
 join types are pushed to SQLite as a single SQL statement — no application-side
@@ -308,8 +338,9 @@ The `ON` condition must be a simple equality between two qualified field
 references (`alias.field = alias.field`). Compound ON conditions and
 non-equality comparisons are not supported.
 
-Both table references must be plain entity names. Subqueries and derived
-tables in the FROM clause are rejected by the validator.
+Both table references must be plain entity names -- a subquery cannot appear
+on either side of a JOIN (it can appear standalone in a SELECT's own FROM
+clause; see [Subqueries](#subqueries-derived-tables)).
 
 ### Entity classification
 
@@ -362,7 +393,9 @@ INNER JOIN authors AS b ON a.author_id = b.id
 ### Constraints and unsupported forms
 
 - **Two tables only.** Three-or-more-table joins are not supported.
-- **Plain table names only.** Subquery tables (`(SELECT ...) AS t`) are rejected.
+- **Plain table names only.** A subquery cannot appear as either side of a
+  JOIN (`(SELECT ...) AS t`) -- rejected. Supported standalone; see
+  [Subqueries](#subqueries-derived-tables).
 - **Simple ON condition.** The `ON` clause must be a single equality between
   two qualified identifiers. Compound conditions (`ON a.x = b.y AND a.z = b.w`)
   are not supported.
@@ -385,6 +418,77 @@ traversals, path finding, cycle detection, or multi-hop relationships.
 
 ---
 
+## Subqueries (Derived Tables)
+
+A SELECT's own FROM clause may be a subquery instead of a plain entity
+name: `SELECT ... FROM (SELECT ...) AS alias`. The inner subquery runs
+first, independently, through the identical query path any other SELECT
+uses -- full tenant scoping, decimal formatting, JOIN or blob/adapted
+resolution, even a nested UNION -- and the outer query then treats its
+result as a plain, in-memory table.
+
+### Syntax
+
+```sql
+SELECT <column list>
+FROM (<any valid SELECT>) AS <alias>
+[WHERE ...]
+[GROUP BY ...] [HAVING ...]
+[ORDER BY ...]
+[TOP N]
+```
+
+An explicit alias is required. The outer query's own column references
+resolve against the inner subquery's own result columns by name (a
+qualifier like `alias.column` is accepted and stripped -- the alias itself
+doesn't need to match anything inside the subquery).
+
+### Examples
+
+```sql
+-- Filter on a computed, aggregated value
+SELECT cat, avgval
+FROM (SELECT cat, AVG(val) AS avgval FROM readings GROUP BY cat) AS x
+WHERE cat = 'temperature'
+
+-- Nested subqueries
+SELECT name FROM (SELECT name FROM (SELECT name FROM items) AS inner1) AS outer1
+
+-- UNION inside a subquery
+SELECT name FROM (
+  SELECT name FROM active_items
+  UNION
+  SELECT name FROM archived_items
+) AS combined
+```
+
+### Constraints and unsupported forms
+
+- **An explicit alias is required.** `FROM (SELECT ...)` with no `AS alias`
+  is rejected.
+- **The subquery's own column alias list is not supported.**
+  `AS x(col1, col2)` -- renaming the subquery's own output columns
+  positionally -- is rejected. Alias individual columns inside the
+  subquery's own SELECT list instead.
+- **Nesting is capped at 10 levels.** A subquery containing a subquery
+  containing a subquery, and so on; the 11th level is rejected outright
+  rather than risking unbounded recursion.
+- **Not on either side of a JOIN.** See [JOIN Queries](#join-queries)'s own
+  constraints.
+- **No SQL-level push-down.** The outer query's own WHERE/GROUP BY/ORDER
+  BY/DISTINCT/TOP all run in Go over the subquery's already-materialised
+  result, not as a single nested SQL statement. A known, accepted
+  efficiency tradeoff for a subquery over a large inner result -- not a
+  correctness concern, but worth knowing for query planning.
+- **An outer SUM/AVG over a subquery's own decimal column** uses ordinary
+  floating-point arithmetic rather than xolu's own decimal-precise
+  aggregation path (there's no live schema to consult for a computed,
+  synthetic result set) -- a small, honest floating-point-precision
+  tradeoff specific to that one combination, not a correctness gap
+  elsewhere.
+
+---
+
 ## Limitations
 
 | Feature | Status |
@@ -400,10 +504,14 @@ traversals, path finding, cycle detection, or multi-hop relationships.
 | LEFT JOIN | ✓ Supported |
 | RIGHT JOIN | ✓ Supported |
 | FULL OUTER JOIN | ✓ Supported |
+| UNION, UNION ALL | ✓ Supported |
+| INTERSECT, EXCEPT | ✓ Supported |
+| Subqueries (`SELECT ... FROM (SELECT ...) AS alias`) | ✓ Supported |
 | CROSS JOIN | ✗ Not supported |
 | Three-or-more-table joins | ✗ Not supported |
-| JOIN with subquery table | ✗ Not supported |
-| Subqueries | ✗ Not supported |
+| JOIN with a subquery on either side | ✗ Not supported |
+| INTERSECT ALL, EXCEPT ALL | ✗ Not supported (not valid T-SQL; SQL Server only supports UNION ALL) |
+| Subquery's own column alias list (`AS x(col1, col2)`) | ✗ Not supported |
 | INSERT ... SELECT | ✗ Not supported |
 | UPDATE without WHERE | ✗ Rejected |
 | DELETE without WHERE | ✗ Rejected |

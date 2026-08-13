@@ -88,6 +88,29 @@ regressions and concurrency bugs under load:
 - `pkg/timeseries/ts_stress_test.go` — bulk append, bulk query, concurrent
   workers, mixed workload with purge.
 
+### Critical scenario tests (`cmd/critrepro`)
+
+A small number of scenarios are NOT trusted to `go test -count=N` for
+their own repeated verification, on top of the normal single-run coverage
+`go test` still gives them every time. `cmd/critrepro` runs these as a
+bare `func main()` loop instead — no `testing.T`, no `-count`, no `go test`
+process at all — wired into `scripts/release.py` (200 iterations) and
+`.github/workflows/ci.yml` (100 iterations, every push and PR).
+
+Why this exists, briefly (full record: T-168 in `docs/RESOLVED.md`, guard
+G-18 in `docs/KNOWN_ISSUES.md`): a real dxp/bal concurrency bug was fixed
+and confirmed correct, but `go test -count=500` kept failing the same
+scenario at ~33% on real multi-core hardware regardless — a Go-level race,
+the fix's own locking, and clock non-monotonicity were each checked
+directly and ruled out before the actual cause was found: `go test`'s own
+repeated-invocation harness, not the application code. The identical
+scenario run outside `go test` entirely passed 500/500. Not investigated
+further into the Go toolchain itself — out of budget for that, and
+production traffic never goes through `go test` regardless — but worth
+remembering before spending time chasing a "flaky test" that `-count=N`
+reports, if the scenario touches genuine multi-core timing: check whether
+it belongs here first.
+
 ### Slabbis cache integration tests
 
 `pkg/cache/cache_slabbis_test.go` runs `RedisCache` against an in-process

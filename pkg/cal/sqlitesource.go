@@ -450,7 +450,58 @@ func (s *SQLiteBookingSource) LiveBookingsOn(calendarID string, plane Plane) []B
 	return scanBookings(rows)
 }
 
-// --- Row scanning (the read side of the xolutime boundary) ---
+// BookingsInRange returns every live booking on calendarID whose own
+// span overlaps [from, to) -- the standard overlap predicate
+// (start < to AND end > from), not an exact-containment one, so a
+// booking that only partially falls inside the requested window is
+// still returned (an occupancy grid needs to render its own visible
+// portion, not silently drop it). Covers all three live states
+// (proposed, binding, honoured), matching LiveBookings' own state set
+// -- an occupancy grid needs everything currently occupying the
+// calendar, tentative or confirmed, not just one plane. Added for
+// CalListBookings (XM-2, XOT172): no query filtering by time range
+// existed anywhere in this package before this -- LiveBookingsOn is
+// the closest prior method, but takes a single Plane and no time
+// bound at all, returning every live booking on the calendar
+// regardless of when it falls.
+func (s *SQLiteBookingSource) BookingsInRange(calendarID string, from, to ot.Instant) []Booking {
+	rows, err := s.db.Query(
+		`SELECT calendar_id, booking_id, state, start_utc, end_utc, mode, bearer,
+		        buffer_after_utc, created_utc, updated_utc, detail_ref
+		 FROM cal_bookings
+		 WHERE tenant_id=? AND calendar_id=? AND state IN (?, ?, ?)
+		   AND start_utc < ? AND end_utc > ?`,
+		s.tenantID, calendarID, string(StateProposed), string(StateBinding), string(StateHonoured),
+		instantToNanos(to), instantToNanos(from))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	return scanBookings(rows)
+}
+
+// BookingsForBearer returns every live booking (proposed, binding, or
+// honoured) held by bearer across every calendar on the tenant --
+// the cross-calendar query named explicitly in XOT180's own filing
+// ("what bookings does bearer X hold across every calendar") as an
+// example of the gap CalListBookings's own per-calendar shape leaves
+// open. LiveBookings() already existed but has no bearer filter at
+// all -- returns every live booking on the tenant unconditionally,
+// which would be both wasteful and wrong for "what has this person
+// booked."
+func (s *SQLiteBookingSource) BookingsForBearer(bearer uint64) []Booking {
+	rows, err := s.db.Query(
+		`SELECT calendar_id, booking_id, state, start_utc, end_utc, mode, bearer,
+		        buffer_after_utc, created_utc, updated_utc, detail_ref
+		 FROM cal_bookings
+		 WHERE tenant_id=? AND bearer=? AND state IN (?, ?, ?)`,
+		s.tenantID, bearer, string(StateProposed), string(StateBinding), string(StateHonoured))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	return scanBookings(rows)
+}
 
 type rowScanner interface {
 	Scan(dest ...interface{}) error

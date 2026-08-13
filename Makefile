@@ -1,4 +1,4 @@
-.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration waves
+.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration waves critrepro
 
 # Binary name
 BINARY_NAME=xolu
@@ -100,6 +100,11 @@ test-v:
 # Run tests with race detector
 test-race:
 	@./run_tests.sh --race --quiet
+
+# Critical scenarios not trusted to go test's own -count harness (T-168) --
+# see docs/TESTING_STRATEGY.md's own "Critical scenario tests" section for why.
+critrepro:
+	@go run ./cmd/critrepro
 
 # Run tests with coverage
 coverage:
@@ -409,6 +414,7 @@ help:
 	@echo "  test            - Run all tests (excludes stress)"
 	@echo "  test-v          - Run all tests (verbose)"
 	@echo "  test-race       - Run tests with race detector"
+	@echo "  critrepro       - Critical scenarios not trusted to -count (T-168; see docs/TESTING_STRATEGY.md)"
 	@echo "  test-quick      - Quick test run (cached results)"
 	@echo "  test-full       - Full test suite (tests + stress + race)"
 	@echo "  coverage        - Run tests with coverage report"

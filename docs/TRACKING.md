@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.28.0
-Last reviewed: 2026-08-04
+Version: 0.30.23
+Last reviewed: 2026-08-10
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -44,7 +44,6 @@ item's Trigger line.
 | T-23 | `syncver.sh` / `release.sh` for tsqlparser | tooling | P4 | ☐ | Lands in the tsqlparser repo, not xolu. |
 | T-12 | Federation-consistent subjects and references | events | P5 | ☐ | After: 1.0 (naming settled; matching reshape is post-1.0). Companion: T-20 if new types… |
 | T-13 | Author-named transitions in `event_latch_source` | events | P5 | ☐ | — |
-| T-04 | OQL executor: UNION / INTERSECT / EXCEPT | query-engines | P5 | ☐ | After: a concrete need for set operations arises (explicitly deferred-until-need). |
 | T-06 | Schema modes (b) strict and (c) clone | storage-config | P5 | ☐ | No timeline committed; design in `SCHEMA_MODES_DESIGN.md`. |
 | T-33 | Partial `StoreConfig` in `loadTenantEntitiesFromStore` scoped store | storage-config | P5 | ☐ | Inert today (read-only path); fragile against future writes. |
 | T-16 | `cal` daypart rollup-prune performance validation | cal | P5 | ☐ | After: realistic occupancy distributions are available to measure against. |
@@ -470,51 +469,6 @@ different concern.
 **Related:** D-001. Retiring the malformed `NEWID()` generator in favour
 of `UUID_V4()` is part of the same FSM eval function-surface work and is
 best resolved alongside this refactor.
-
-### T-04. TD-002 — OQL executor support for UNION / INTERSECT / EXCEPT
-
-Theme: query-engines · Priority: P5 · Status: ☐
-Blocks/after: After: a concrete need for set operations arises (explicitly deferred-until-need).
-
-- Parser AST already models these (`ast.SelectStatement.Union`, `ast.UnionClause.Type`). Validator rejects before execution.
-- Error-message wording and documentation fixed in patch014. Executor implementation still absent.
-- Work required: run both arms, merge results, deduplicate for plain UNION vs UNION ALL, integrate with push-down and scan-limit machinery.
-- Current impact: low. Applications run two queries and merge client-side.
-- Deferred until a concrete need arises.
-
-#### Extended detail (from retired TD-002)
-
-**Package:** `pkg/oql`
-**Introduced:** pre-existing (predates the apiv2 patch series)
-**Deferred until:** when a concrete need for set operations arises
-
-The OQL executor rejects set operations. The underlying tsqlparser models
-them (`ast.SelectStatement.Union`, an `ast.UnionClause` whose `Type` is
-`UNION`, `INTERSECT`, or `EXCEPT`), so such a query *parses* — but
-`pkg/oql/validator.go` rejects any statement with a non-nil `Union` before
-execution. A query that needs "rows from A together with rows from B" cannot
-be expressed in a single OQL statement and must be run as two queries.
-
-Two secondary issues compounded this; both are now resolved (patch014):
-
-- ~~**The error message names the wrong operator.**~~ Fixed: the validator now
-  reads `ast.UnionClause.Type` and names the actual operator (e.g.
-  `INTERSECT is not supported`) rather than always saying `UNION`.
-- ~~**The limitation is undocumented.**~~ Fixed: `docs/OQL_API.md` now states
-  that set operations are unsupported under the SELECT syntax section, and notes
-  that Sulpher does support `UNION` / `UNION ALL` (the two languages diverge).
-
-The remaining debt is the executor implementation itself. Implementing UNION is
-not blocked by the parser (the AST is already present). The executor would need
-to run both arms, merge results, and — for plain `UNION` versus `UNION ALL` —
-deduplicate, which interacts with the push-down and scan-limit machinery. The
-work is deferred until a concrete need appears; the prequery feature (which
-forces `TOP 1` on a single SELECT) does not need it.
-
-**Current impact:** Low. Set operations are uncommon in the current query
-surface, and applications can run two queries and merge client-side. With the
-error message and documentation now corrected, the remaining gap is purely the
-unimplemented executor support, deferred until needed.
 
 ---
 
@@ -976,10 +930,12 @@ Theme: obj · Priority: P3 · Status: ☐ · Blocks/after: none directly
 
 Theme: server · Priority: P3 · Status: ☐
 
-- **Trigger:** found while running the CRM launcher/seed scripts against a real server without APIV2Enabled -- every single entity write logged `WRN event dispatch: subscription lookup failed error="SQL logic error: no such table: event_defs (1)"`.
+- **Trigger:** found while running the CRM launcher/seed scripts against a real server without APIV2Enabled -- every single entity write logged `WRN event dispatch: subscription lookup failed error="SQL logic error: no such table: event_defs (1)"`. (The CRM example itself has since moved to xoluman, v0.30.0 -- not in this repository's own `examples/` anymore, though the bug and its trigger described here are unaffected by where the example now lives.)
 - **Root cause:** `pkg/server/event_dispatch.go`'s `dispatchEvent` runs unconditionally from every v1 CRUD write path, regardless of whether v2 is enabled. Its own `eventStore()` gate checks only whether a store resolves for the tenant and implements `storage.WriterDBProvider` -- it never checks `s.config.APIV2Enabled`. `event_defs` (and the rest of the v2 schema: `entity_delivery_log`, `entity_meta`, `gen_definitions`, `sequences`, `fsm_*`) is only created by `initV2Schema`, which only runs when `XOLU_API_V2_ENABLED=true`. On any v1-only deployment, `event_defs` never exists, and `dispatchEvent` pays for a doomed query and logs a warning on every single write, forever -- not a one-time or rare occurrence.
 - **Not fixed this session:** worked around at the deployment-config level (the CRM launcher sets `XOLU_API_V2_ENABLED=true`, which makes `event_defs` genuinely exist), but the underlying gap in `eventStore()` is untouched. Any v1-only xolu deployment still hits this.
 - **Correct fix, not attempted here:** `eventStore()` should check `s.config.APIV2Enabled` and return `(nil, false)` immediately when it's false, short-circuiting `dispatchEvent` before it ever reaches `matchEventDefs`'s query -- avoiding both the wasted query and the log noise, for a deployment that has no events subsystem to dispatch to in the first place.
 
+
+## sulpher
 
 ---

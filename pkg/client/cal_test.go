@@ -256,6 +256,285 @@ func TestCalConfirmIllegalTransition(t *testing.T) {
 	}
 }
 
+// ─── CalCreateCalendar ──────────────────────────────────────────────────────
+
+func TestCalCreateCalendarHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/cal/calendars" {
+			t.Errorf("expected /api/v2/cal/calendars, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["calendar_id"] != "room-a" {
+			t.Errorf("calendar_id: got %v", body["calendar_id"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"calendar_id":"room-a","entity_ref":0,"default_state":"binding","match_policy":"binding"}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalCreateCalendar(context.Background(), CalCreateCalendarRequest{CalendarID: "room-a"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.CalendarID != "room-a" || res.DefaultState != "binding" {
+		t.Errorf("unexpected calendar: %+v", res)
+	}
+}
+
+func TestCalCreateCalendarAlreadyExists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":{"code":"XOLU-CAL008","message":"calendar already exists: room-a","status":409}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.CalCreateCalendar(context.Background(), CalCreateCalendarRequest{CalendarID: "room-a"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestCalCreateCalendarRequiresCalendarID(t *testing.T) {
+	c := New("http://unused")
+	if _, err := c.CalCreateCalendar(context.Background(), CalCreateCalendarRequest{}); err == nil {
+		t.Error("expected error for empty CalendarID")
+	}
+}
+
+// ─── CalListCalendars ───────────────────────────────────────────────────────
+
+func TestCalListCalendarsHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/cal/calendars" {
+			t.Errorf("expected /api/v2/cal/calendars, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"calendars":[
+			{"calendar_id":"room-a","entity_ref":1,"default_state":"binding","match_policy":"consider_binding"},
+			{"calendar_id":"room-b","entity_ref":2,"default_state":"proposed","match_policy":"binding+proposed"}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListCalendars(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Calendars) != 2 {
+		t.Fatalf("want 2 calendars, got %d: %+v", len(res.Calendars), res.Calendars)
+	}
+	if res.Calendars[0].CalendarID != "room-a" || res.Calendars[0].DefaultState != "binding" {
+		t.Errorf("unexpected room-a: %+v", res.Calendars[0])
+	}
+}
+
+func TestCalListCalendarsEmptyResultNotNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"calendars":[]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListCalendars(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Calendars == nil {
+		t.Error("expected non-nil empty slice, got nil")
+	}
+}
+
+func TestCalListCalendarsDisabledSubsystem(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		w.Write([]byte(`{"error":{"code":"XOLU-CAL099","message":"cal subsystem is not enabled","status":501}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.CalListCalendars(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// ─── CalListBookings ────────────────────────────────────────────────────────
+
+func TestCalListBookingsHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/cal/bookings" {
+			t.Errorf("expected /api/v2/cal/bookings, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		q := r.URL.Query()
+		if q.Get("calendar_id") != "room-a" {
+			t.Errorf("calendar_id: got %v", q.Get("calendar_id"))
+		}
+		if q.Get("from") == "" || q.Get("to") == "" {
+			t.Errorf("from/to: want both set, got from=%q to=%q", q.Get("from"), q.Get("to"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"bookings":[
+			{"booking_id":"b1","calendar_id":"room-a","state":"binding",
+			 "span":{"start":"2026-08-01T09:00:00Z","end":"2026-08-01T10:00:00Z"},
+			 "mode":"exclusive","bearer":1}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListBookings(context.Background(), "room-a", calT0, calT0.Add(8*time.Hour))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Bookings) != 1 || res.Bookings[0].BookingID != "b1" || res.Bookings[0].State != "binding" {
+		t.Errorf("unexpected bookings: %+v", res.Bookings)
+	}
+}
+
+func TestCalListBookingsEmptyResultNotNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"bookings":[]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListBookings(context.Background(), "room-a", calT0, calT0.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Bookings == nil {
+		t.Error("expected non-nil empty slice, got nil")
+	}
+}
+
+func TestCalListBookingsUnknownCalendar(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"XOLU-CAL002","message":"calendar not found: room-z"}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.CalListBookings(context.Background(), "room-z", calT0, calT0.Add(time.Hour))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestCalListBookingsClientSideValidation(t *testing.T) {
+	c := New("http://unused")
+	ctx := context.Background()
+
+	if _, err := c.CalListBookings(ctx, "", calT0, calT0.Add(time.Hour)); err == nil {
+		t.Error("expected error for empty calendarID")
+	}
+	if _, err := c.CalListBookings(ctx, "room-a", calT0, calT0); err == nil {
+		t.Error("expected error for from == to")
+	}
+	if _, err := c.CalListBookings(ctx, "room-a", calT0.Add(time.Hour), calT0); err == nil {
+		t.Error("expected error for from after to")
+	}
+}
+
+// ─── CalListBookingsForBearer ───────────────────────────────────────────────
+
+func TestCalListBookingsForBearerHappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/cal/bookings/by-bearer" {
+			t.Errorf("expected /api/v2/cal/bookings/by-bearer, got %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if got := r.URL.Query().Get("bearer"); got != "100" {
+			t.Errorf("bearer query param: got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"bookings":[
+			{"booking_id":"b1","calendar_id":"room-a","state":"binding",
+			 "span":{"start":"2026-08-01T09:00:00Z","end":"2026-08-01T10:00:00Z"},
+			 "mode":"exclusive","bearer":100},
+			{"booking_id":"b2","calendar_id":"room-b","state":"proposed",
+			 "span":{"start":"2026-08-02T09:00:00Z","end":"2026-08-02T10:00:00Z"},
+			 "mode":"exclusive","bearer":100}]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListBookingsForBearer(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Bookings) != 2 {
+		t.Fatalf("want 2 bookings, got %d: %+v", len(res.Bookings), res.Bookings)
+	}
+	if res.Bookings[0].CalendarID != "room-a" || res.Bookings[1].CalendarID != "room-b" {
+		t.Errorf("expected bookings from two different calendars, got %+v", res.Bookings)
+	}
+}
+
+func TestCalListBookingsForBearerEmptyResultNotNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"bookings":[]}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	res, err := c.CalListBookingsForBearer(context.Background(), 999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Bookings == nil {
+		t.Error("expected non-nil empty slice, got nil")
+	}
+}
+
+func TestCalListBookingsForBearerRequiresNonZero(t *testing.T) {
+	c := New("http://unused")
+	if _, err := c.CalListBookingsForBearer(context.Background(), 0); err == nil {
+		t.Error("expected client-side validation error for bearer=0")
+	}
+}
+
+func TestCalListBookingsForBearerServerRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"code":"XOLU-CAL002","message":"invalid bearer","status":400}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_, err := c.CalListBookingsForBearer(context.Background(), 42)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
 // ─── Openings → Check → Propose sequence ────────────────────────────────────
 
 // The molu tools will drive exactly this sequence. The scripted server

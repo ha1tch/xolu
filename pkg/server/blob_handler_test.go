@@ -927,3 +927,46 @@ func TestBlob_UnknownTenant_NoAutoRegister(t *testing.T) {
 	assertStatus(t, resp, http.StatusNotFound)
 	readBody(t, resp)
 }
+
+// TestBlobHandler_ListTenantIsolation is the XOT180 general-sweep
+// check (2026-08-12): a prior test at this same layer
+// (TestUsage_TenantIsolation, pkg/blob/store_test.go) was explicitly
+// removed with a comment claiming isolation "is tested in pkg/server"
+// -- checked directly, that claim did not hold: no test anywhere in
+// pkg/server exercised handleBlobList across two named tenants at
+// all. handleBlobList is architecturally different from the
+// SQL-tenant_id-predicate risk this sweep otherwise targets (isolation
+// here comes from s.blobStoreFor returning a genuinely separate Store
+// instance per tenant, not a predicate that could be forgotten), but
+// "structurally safer by design" is still an assumption until proven,
+// which is the whole point of this sweep.
+func TestBlobHandler_ListTenantIsolation(t *testing.T) {
+	ts := setupBlobTestServer(t)
+	defer ts.cleanup()
+
+	resp := ts.blobDo("POST", "/api/v1/tenant/tenanta/blob", []byte("tenant a content"),
+		map[string]string{"X-Blob-Key": "shared-key", "Content-Type": "text/plain"})
+	assertStatus(t, resp, http.StatusCreated)
+	readBody(t, resp)
+
+	resp = ts.blobDo("POST", "/api/v1/tenant/tenantb/blob", []byte("tenant b content"),
+		map[string]string{"X-Blob-Key": "shared-key", "Content-Type": "text/plain"})
+	assertStatus(t, resp, http.StatusCreated)
+	readBody(t, resp)
+
+	resp = ts.blobDo("GET", "/api/v1/tenant/tenanta/blob", nil, nil)
+	assertStatus(t, resp, http.StatusOK)
+	var listA map[string]interface{}
+	json.Unmarshal(readBody(t, resp), &listA)
+	blobsA, _ := listA["blobs"].([]interface{})
+	if len(blobsA) != 1 {
+		t.Fatalf("tenant isolation violated: tenanta's own blob list want exactly 1, got %d: %v", len(blobsA), blobsA)
+	}
+
+	resp = ts.blobDo("GET", "/api/v1/tenant/tenanta/blob/shared-key", nil, nil)
+	assertStatus(t, resp, http.StatusOK)
+	gotContent := readBody(t, resp)
+	if string(gotContent) != "tenant a content" {
+		t.Fatalf("tenant isolation violated: tenanta's own blob content shows tenantb's data: %q", gotContent)
+	}
+}

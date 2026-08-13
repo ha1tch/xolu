@@ -6,6 +6,7 @@ package oql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -199,6 +200,13 @@ func (e *Executor) ExecuteWithTenant(ctx context.Context, stmt ast.Statement, te
 }
 
 func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, tenantID string) (*Result, error) {
+	if s.Union != nil {
+		return e.executeUnion(ctx, s, tenantID)
+	}
+	if dt, ok := derivedTableFrom(s); ok {
+		return e.executeDerivedTable(ctx, s, dt, tenantID)
+	}
+
 	startTime := time.Now()
 
 	// Extract entity name
@@ -252,11 +260,13 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		adaptedSQL, genErr := GenerateAdaptedSQL(s, entity, sqlTID, aggStore, e.dialect)
 		if genErr != nil {
 			log.Debug().Err(genErr).Msg("Full adapted SQL generation failed, falling back")
+			plan.Push = []PushDecision{PushNone}
 			break
 		}
 		adaptedRecords, queryErr := aggStore.AggregateQuery(ctx, adaptedSQL.SQL, adaptedSQL.Args, adaptedSQL.Aliases)
 		if queryErr != nil {
 			log.Debug().Err(queryErr).Str("sql", adaptedSQL.SQL).Msg("Full adapted push-down query failed, falling back")
+			plan.Push = []PushDecision{PushNone}
 			break
 		}
 		denormaliseAggregateDecimals(adaptedRecords, adaptedSQL.DecimalColumns, adaptedSQL.Aliases, s.Columns)
@@ -271,11 +281,13 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		aggSQL, aggErr := GenerateAggregateSQL(s, entity, sqlTID, aggStore, e.dialect)
 		if aggErr != nil {
 			log.Debug().Err(aggErr).Msg("Aggregate SQL generation failed, falling back")
+			plan.Push = []PushDecision{PushNone}
 			break
 		}
 		aggRecords, queryErr := aggStore.AggregateQuery(ctx, aggSQL.SQL, aggSQL.Args, aggSQL.Aliases)
 		if queryErr != nil {
 			log.Debug().Err(queryErr).Str("sql", aggSQL.SQL).Msg("Aggregate push-down query failed, falling back")
+			plan.Push = []PushDecision{PushNone}
 			break
 		}
 		denormaliseAggregateDecimals(aggRecords, aggSQL.DecimalColumns, aggSQL.Aliases, s.Columns)
@@ -283,7 +295,7 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		scanned = plan.EstimatedN
 		// Apply HAVING in Go (SQLite HAVING would need further translation).
 		if s.Having != nil {
-			records = filterRecordsByExpr(records, s.Having)
+			records = filterRecordsByExpr(records, s.Having, s.Columns)
 		}
 		fetched = true
 
@@ -303,6 +315,16 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 			log.Debug().Err(queryErr).Str("sql", joinSQL.SQL).Msg("JOIN push-down query failed")
 			return nil, fmt.Errorf("JOIN query failed: %w", queryErr)
 		}
+		// XM-7b (xoluman's own report, 2026-08-12): JOIN's own decimal
+		// columns need the same denormalisation the adapted and
+		// aggregate paths already get below -- previously entirely
+		// absent for JOIN, so a decimal field came back as its raw,
+		// scaled-integer stored form (e.g. an exact x100 scale factor,
+		// decimal point gone). JOIN has no aggregate functions in its
+		// own SELECT list at all (XM-7a), so denormaliseAggregateDecimals's
+		// own aggFuncs lookup naturally falls through to its "plain
+		// decimal column" default case for every entry here.
+		denormaliseAggregateDecimals(joinRecords, joinSQL.DecimalColumns, joinSQL.Aliases, s.Columns)
 		// Guard against NULL blob rows from outer joins — treat as empty map.
 		for i, rec := range joinRecords {
 			if rec == nil {
@@ -384,7 +406,28 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		// WHERE clause has compilable terms, push predicates into the
 		// tokenisation loop. This avoids allocating maps for rejected rows.
 		var residualWhere ast.Expression
-		if fs, ok := e.store.(storage.FilterableStore); ok && !isSelectStar && s.Where != nil {
+		// B4 predicate pushdown is a blob-only optimisation:
+		// SQLiteStore.ListWithFieldsAndFilter's own adapted-table branch
+		// silently ignores its own preds argument entirely (returns
+		// adaptedList's plain, unfiltered rows), a genuine, severe,
+		// pre-existing bug found 2026-08-13 while testing an unrelated
+		// feature -- WHERE was dropped completely for any adapted entity
+		// small enough that the planner chose not to push down. Fixed
+		// here at the caller rather than inside ListWithFieldsAndFilter
+		// itself: jsonic.PredicateSet has no way to evaluate against an
+		// already-materialised map[string]interface{} at all (it's built
+		// for token-stream scanning specifically), so correctly
+		// implementing predicate application there would mean new
+		// machinery; skipping this optimisation path for adapted
+		// entities and falling through to the existing, already-correct
+		// "!fetched" fallback below (full list, full WHERE re-applied in
+		// Go) is the safe, minimal fix. TestRegression_AdaptedWhereFilter
+		// (pkg/server) proves this directly.
+		adaptedNoBenefit := false
+		if aggStore, ok := e.store.(storage.AggregateQueryable); ok {
+			adaptedNoBenefit = aggStore.IsAdaptedEntity(entity)
+		}
+		if fs, ok := e.store.(storage.FilterableStore); ok && !isSelectStar && s.Where != nil && !adaptedNoBenefit {
 			compiled := CompilePredicates(s.Where)
 			if compiled.Preds != nil && compiled.Preds.Len() > 0 {
 				records, err = fs.ListWithFieldsAndFilter(ctx, entity, queryFields, compiled.Preds)
@@ -457,6 +500,14 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		records = ApplyTop(records, s.Top)
 	}
 
+	// 6.5. OFFSET ... FETCH NEXT ... ROWS ONLY (XM-5, 2026-08-12).
+	// No push-down guard: neither clause is pushed to SQL anywhere in
+	// this codebase, so this always runs when either is present.
+	// ApplyOffsetFetch itself is a safe no-op when both are nil/absent.
+	if s.Offset != nil || s.Fetch != nil {
+		records = ApplyOffsetFetch(records, s.Offset, s.Fetch)
+	}
+
 	// 7. Enforce row limit
 	if e.limits.MaxRows > 0 && len(records) > e.limits.MaxRows {
 		return nil, fmt.Errorf("%w: %d rows (max %d)", ErrResultLimit, len(records), e.limits.MaxRows)
@@ -479,6 +530,292 @@ func (e *Executor) executeSelect(ctx context.Context, s *ast.SelectStatement, te
 		rows = e.projectColumns(records, s.Columns)
 	}
 
+	return NewSelectResult(rows, scanned, time.Since(startTime)), nil
+}
+
+// executeUnion runs a UNION/INTERSECT/EXCEPT chain (2026-08-12). The
+// validator has already confirmed the chain is homogeneous (every link
+// uses the identical operator, ALL is only ever set for plain UNION) and
+// that every branch selects the same number of columns -- this function
+// trusts both invariants rather than re-checking them.
+//
+// Each branch executes independently through the exact same executeSelect
+// path every other query uses -- full tenant scoping, decimal
+// denormalisation, adapted/blob resolution, everything -- via a shallow
+// copy of that branch's own AST node with its own Union field stripped,
+// so the recursive call executes just that one branch rather than
+// re-triggering union handling for the remainder of the chain. This is a
+// deliberate choice over generating one nested SQL statement: it adds
+// zero new surface area to any of the six existing SQL-generation
+// strategies, at the cost of not pushing the combine step itself down to
+// SQLite (each branch's own push-down still applies; only the union/
+// intersect/except combination happens in Go).
+//
+// A trailing ORDER BY/TOP on the chain's own last branch belongs to the
+// combined result, not to that branch alone -- confirmed directly against
+// the parser's own behaviour, not assumed: tsqlparser only ever attaches
+// a trailing ORDER BY to the last SelectStatement in the chain. Stripped
+// from that branch before it executes standalone, then applied to the
+// combined result afterward.
+func (e *Executor) executeUnion(ctx context.Context, s *ast.SelectStatement, tenantID string) (*Result, error) {
+	startTime := time.Now()
+
+	opType := s.Union.Type
+	if opType == "" {
+		opType = "UNION"
+	}
+	all := s.Union.All
+
+	var branchResults [][]map[string]interface{}
+	var wholeOrderBy []*ast.OrderByItem
+	var wholeTop *ast.TopClause
+	totalScanned := 0
+
+	cur := s
+	for {
+		branchCopy := *cur
+		isLast := cur.Union == nil
+		branchCopy.Union = nil
+		if isLast {
+			wholeOrderBy = branchCopy.OrderBy
+			wholeTop = branchCopy.Top
+			branchCopy.OrderBy = nil
+			branchCopy.Top = nil
+		}
+
+		res, err := e.executeSelect(ctx, &branchCopy, tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("%s branch: %w", opType, err)
+		}
+		branchResults = append(branchResults, res.Rows)
+		totalScanned += res.Stats.RowsScanned
+
+		if isLast {
+			break
+		}
+		cur = cur.Union.Right
+	}
+
+	combined := combineUnionBranches(opType, all, branchResults)
+
+	if len(wholeOrderBy) > 0 {
+		combined = OrderBy(combined, wholeOrderBy)
+	}
+	if wholeTop != nil {
+		combined = ApplyTop(combined, wholeTop)
+	}
+
+	// MaxRows enforcement (2026-08-13, found by direct adversarial
+	// testing, not inferred): executeSelect already enforces this per
+	// branch, since each branch runs through it independently -- but
+	// that alone doesn't bound the combined result at all. N branches,
+	// each individually under the cap, can combine into something far
+	// over it; a real way to bypass the configured row-limit safeguard
+	// using UNION specifically, confirmed directly (6 rows combined
+	// from two 3-row branches against a cap of 5 returned 200 before
+	// this check existed). Mirrors executeSelect's own identical check.
+	if e.limits.MaxRows > 0 && len(combined) > e.limits.MaxRows {
+		return nil, fmt.Errorf("%w: %d rows (max %d)", ErrResultLimit, len(combined), e.limits.MaxRows)
+	}
+
+	return NewSelectResult(combined, totalScanned, time.Since(startTime)), nil
+}
+
+// rowSignature returns a deterministic, canonical string representation
+// of a single row, used as its identity for deduplication (UNION) and
+// set-membership comparison (INTERSECT/EXCEPT). encoding/json sorts
+// map[string]interface{} keys alphabetically before marshalling --
+// a documented stdlib guarantee, not an assumption -- so this is stable
+// across independently-produced rows with the same key/value content
+// regardless of the order those keys were populated in.
+func rowSignature(row map[string]interface{}) string {
+	b, err := json.Marshal(row)
+	if err != nil {
+		// Extremely unlikely for query-result values (already came from
+		// SQLite or a blob's own successfully-decoded JSON) -- fall back
+		// to a Go-native representation rather than panicking or
+		// silently treating every row as identical.
+		return fmt.Sprintf("%#v", row)
+	}
+	return string(b)
+}
+
+// combineUnionBranches applies the set operation across every branch's
+// own already-executed row set, in chain order. branches has at least
+// one element (executeUnion always appends at least the first branch's
+// own result before this is called).
+func combineUnionBranches(opType string, all bool, branches [][]map[string]interface{}) []map[string]interface{} {
+	switch opType {
+	case "UNION":
+		var out []map[string]interface{}
+		for _, b := range branches {
+			out = append(out, b...)
+		}
+		if all {
+			return out
+		}
+		return dedupeRows(out)
+
+	case "INTERSECT":
+		result := dedupeRows(branches[0])
+		for _, next := range branches[1:] {
+			nextSigs := make(map[string]bool, len(next))
+			for _, row := range next {
+				nextSigs[rowSignature(row)] = true
+			}
+			var kept []map[string]interface{}
+			for _, row := range result {
+				if nextSigs[rowSignature(row)] {
+					kept = append(kept, row)
+				}
+			}
+			result = kept
+		}
+		return result
+
+	case "EXCEPT":
+		result := dedupeRows(branches[0])
+		for _, next := range branches[1:] {
+			nextSigs := make(map[string]bool, len(next))
+			for _, row := range next {
+				nextSigs[rowSignature(row)] = true
+			}
+			var kept []map[string]interface{}
+			for _, row := range result {
+				if !nextSigs[rowSignature(row)] {
+					kept = append(kept, row)
+				}
+			}
+			result = kept
+		}
+		return result
+
+	default:
+		// The validator guarantees opType is one of the three above;
+		// this is unreachable in practice, kept as an explicit,
+		// honest fallback rather than a silent empty result.
+		var out []map[string]interface{}
+		for _, b := range branches {
+			out = append(out, b...)
+		}
+		return out
+	}
+}
+
+// dedupeRows removes duplicate rows by rowSignature, preserving the
+// first occurrence's own position (stable, matching the order a human
+// reading the chain top-to-bottom would expect).
+func dedupeRows(rows []map[string]interface{}) []map[string]interface{} {
+	seen := make(map[string]bool, len(rows))
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		sig := rowSignature(row)
+		if seen[sig] {
+			continue
+		}
+		seen[sig] = true
+		out = append(out, row)
+	}
+	return out
+}
+
+// derivedTableFrom returns the *ast.DerivedTable in a SELECT's own FROM
+// clause, if that's what it is -- s.From.Tables always has exactly one
+// entry by this point (the validator's own "OQL supports single table
+// queries only" check for anything that isn't a JOIN already ran).
+func derivedTableFrom(s *ast.SelectStatement) (*ast.DerivedTable, bool) {
+	if s.From == nil || len(s.From.Tables) != 1 {
+		return nil, false
+	}
+	dt, ok := s.From.Tables[0].(*ast.DerivedTable)
+	return dt, ok
+}
+
+// executeDerivedTable runs SELECT ... FROM (SELECT ...) AS alias
+// (2026-08-13). The validator has already confirmed dt has an alias,
+// no column-alias list, and the inner subquery itself is valid --
+// this function trusts those invariants rather than re-checking them.
+//
+// The inner subquery executes through the exact same executeSelect
+// path every other query uses, via plain, direct recursion -- full
+// tenant scoping, decimal denormalisation, adapted/blob resolution,
+// even a nested UNION or another derived table inside it, are all
+// inherited for free, not reimplemented. This is a deliberate choice
+// over generating one nested SQL statement (matching the same
+// tradeoff already made for UNION): it adds zero new surface area to
+// any of the six existing SQL-generation strategies, treating the
+// inner result as a plain, generic in-memory table and applying the
+// outer query's own WHERE/GROUP BY/ORDER BY/DISTINCT/TOP entirely in
+// Go, reusing the exact same generic helpers (filterRecords,
+// aggregator.Aggregate, OrderBy, distinctRecords, ApplyTop,
+// projectColumns) the ordinary Go-path fallback already uses --
+// column resolution against the inner result's own plain keys already
+// works via getFieldValue's own existing fallback (strips a table-
+// qualifier prefix like "x." when the exact qualified key isn't
+// found), confirmed directly, not assumed. The cost, same as UNION's
+// own: no SQL-level push-down for the outer query at all, a known,
+// documented efficiency gap for a derived table over a large inner
+// result, not solved here.
+//
+// One deliberate, honest limitation specific to this path: an outer
+// aggregate (SUM/AVG) over the inner result's own decimal-typed
+// column uses the generic, string-parsing numeric path (toFloat's own
+// strconv.ParseFloat fallback) rather than the raw-scaled-integer
+// decimal-precise aggregation the adapted/aggregate paths use --
+// there's no live AdaptedRegistry entry to configure
+// configureDecimalAggregation against for a synthetic, computed
+// result set, and the inner query has already denormalised any
+// decimal columns to plain strings by this point regardless. A real,
+// small floating-point-precision gap for SUM/AVG specifically over a
+// derived table's own decimal column, not a correctness gap for
+// anything else.
+func (e *Executor) executeDerivedTable(ctx context.Context, s *ast.SelectStatement, dt *ast.DerivedTable, tenantID string) (*Result, error) {
+	startTime := time.Now()
+
+	inner, err := e.executeSelect(ctx, dt.Subquery, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("derived table subquery: %w", err)
+	}
+	records := inner.Rows
+	scanned := inner.Stats.RowsScanned
+
+	if s.Where != nil {
+		if err := isGoPathSupported(s.Where); err != nil {
+			return nil, err
+		}
+		records = e.filterRecords(records, s.Where)
+	}
+
+	records = e.materializeScalars(records, s.Columns, s.GroupBy)
+
+	if len(s.GroupBy) > 0 || hasAggregates(s.Columns) {
+		e.aggregator.SetDecimalFields(nil)
+		records = e.aggregator.Aggregate(records, s.Columns, s.GroupBy, s.Having)
+	}
+
+	if len(s.OrderBy) > 0 {
+		records = OrderBy(records, s.OrderBy)
+	}
+
+	if s.Distinct {
+		records = e.distinctRecords(records, s.Columns)
+	}
+
+	if s.Top != nil {
+		records = ApplyTop(records, s.Top)
+	}
+	if s.Offset != nil || s.Fetch != nil {
+		records = ApplyOffsetFetch(records, s.Offset, s.Fetch)
+	}
+
+	if e.limits.MaxRows > 0 && len(records) > e.limits.MaxRows {
+		return nil, fmt.Errorf("%w: %d rows (max %d)", ErrResultLimit, len(records), e.limits.MaxRows)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("query cancelled: %w", err)
+	}
+
+	rows := e.projectColumns(records, s.Columns)
 	return NewSelectResult(rows, scanned, time.Since(startTime)), nil
 }
 

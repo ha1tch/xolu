@@ -289,6 +289,62 @@ func TestSeq_TenantIsolation(t *testing.T) {
 	}
 }
 
+// TestSeq_ListTenantIsolation is the XOT180 general-sweep check
+// (2026-08-12): handleSeqList's own SQL looks correctly tenant-scoped
+// by inspection ("WHERE tenant_id=?"), but "looks correct in the
+// code" is exactly the standard that let XOT173 ship. Proven directly
+// here instead: two tenants, each with their own sequence of the same
+// name, confirm neither tenant's own GET /gen/seq list result
+// reflects the other's.
+func TestSeq_ListTenantIsolation(t *testing.T) {
+	env := newV2Server(t)
+	doJSONRequest(t, "POST",
+		fmt.Sprintf("%s/api/v2/tenant/t1/gen/seq", env.ts.URL),
+		map[string]interface{}{"name": "shared_name", "start": 1})
+	doJSONRequest(t, "POST",
+		fmt.Sprintf("%s/api/v2/tenant/t2/gen/seq", env.ts.URL),
+		map[string]interface{}{"name": "shared_name", "start": 1000})
+
+	status, listT1 := doJSONRequest(t, "GET", fmt.Sprintf("%s/api/v2/tenant/t1/gen/seq", env.ts.URL), nil)
+	if status != http.StatusOK {
+		t.Fatalf("t1 seq list: want 200, got %d %v", status, listT1)
+	}
+	seqs, _ := listT1["sequences"].([]interface{})
+	if len(seqs) != 1 {
+		t.Fatalf("tenant isolation violated: t1's own sequence list want exactly 1, got %d: %v", len(seqs), seqs)
+	}
+}
+
+// TestGenList_TenantIsolation covers the generic named-generator list
+// endpoint (handleGenList, GET /gen/{type}) specifically -- a
+// genuinely different handler than TestSeq_ListTenantIsolation above
+// exercises (sequences are routed separately, /gen/seq is a static
+// route hitting handleSeqList, not the {type} pattern at all --
+// confirmed directly against the route table, not assumed). Uses
+// "token" as a valid generic type, since "seq"/"sequence" are
+// explicitly rejected by genTypeFromURL for this endpoint.
+func TestGenList_TenantIsolation(t *testing.T) {
+	env := newV2Server(t)
+	body := map[string]interface{}{"name": "shared_name", "config": map[string]interface{}{"length": 16}}
+	status, defT1 := doJSONRequest(t, "POST", fmt.Sprintf("%s/api/v2/tenant/t1/gen/token", env.ts.URL), body)
+	if status != http.StatusCreated {
+		t.Fatalf("t1 gen/token define: want 201, got %d %v", status, defT1)
+	}
+	status, defT2 := doJSONRequest(t, "POST", fmt.Sprintf("%s/api/v2/tenant/t2/gen/token", env.ts.URL), body)
+	if status != http.StatusCreated {
+		t.Fatalf("t2 gen/token define: want 201, got %d %v", status, defT2)
+	}
+
+	status, listT1 := doJSONRequest(t, "GET", fmt.Sprintf("%s/api/v2/tenant/t1/gen/token", env.ts.URL), nil)
+	if status != http.StatusOK {
+		t.Fatalf("t1 gen/token list: want 200, got %d %v", status, listT1)
+	}
+	gens, _ := listT1["generators"].([]interface{})
+	if len(gens) != 1 {
+		t.Fatalf("tenant isolation violated: t1's own generator list want exactly 1, got %d: %v", len(gens), gens)
+	}
+}
+
 // ─── OQL: NEXT VALUE FOR ──────────────────────────────────────────────────────
 
 func TestSeq_OQLNextValueFor(t *testing.T) {

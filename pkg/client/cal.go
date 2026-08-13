@@ -16,6 +16,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -78,6 +80,104 @@ func (c *Client) CalOpenings(ctx context.Context, calendarID string, from, to ti
 	}
 	if res.Openings == nil {
 		res.Openings = []CalOpening{}
+	}
+	return &res, nil
+}
+
+// CalCreateCalendar creates a new calendar on the tenant -- XM-8,
+// xoluman's own report: no route anywhere created a calendar at all
+// before this, despite the underlying capability
+// (Manager.CreateCalendar) already existing and working correctly.
+// The actual root blocker behind their own XM-2 report:
+// CalListCalendars/CalListBookings both worked correctly, but had
+// nothing to list, since nothing could be created through the public
+// API to list in the first place.
+//
+// Hits POST /api/v2/.../cal/calendars. Returns *client.Error on
+// non-2xx — notably XOLU-CAL008 (ErrCalCalendarExists) if
+// req.CalendarID is already taken.
+func (c *Client) CalCreateCalendar(ctx context.Context, req CalCreateCalendarRequest) (*CalendarSummary, error) {
+	if req.CalendarID == "" {
+		return nil, fmt.Errorf("CalendarID is required")
+	}
+	var res CalendarSummary
+	if err := c.doURL(ctx, http.MethodPost, c.buildURLv2("/cal/calendars"), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// CalListCalendars returns every calendar defined on the tenant.
+// Confirmed missing during the XOT180 audit (2026-08-11) -- the
+// underlying storage capability already existed but was never
+// reachable via HTTP; any UI building an occupancy grid needs to know
+// which calendars exist before it can ask what's booked on any one.
+//
+// Hits GET /api/v2/.../cal/calendars. Returns *client.Error on non-2xx.
+func (c *Client) CalListCalendars(ctx context.Context) (*CalListCalendarsResult, error) {
+	var res CalListCalendarsResult
+	if err := c.doURL(ctx, http.MethodGet, c.buildURLv2("/cal/calendars"), nil, &res); err != nil {
+		return nil, err
+	}
+	if res.Calendars == nil {
+		res.Calendars = []CalendarSummary{}
+	}
+	return &res, nil
+}
+
+// CalListBookings returns every live (proposed, binding, or honoured)
+// booking on calendarID whose own span overlaps [from, to) -- the
+// inverse of CalOpenings: what's already booked, not what's free.
+// Requested by xoluman (XM-2) for an occupancy grid, where
+// CalOpenings alone can't show what's actually on the calendar.
+//
+// Hits GET /api/v2/.../cal/bookings. Returns *client.Error on non-2xx
+// — notably XOLU-CAL002 (ErrCalCalendarNotFound) for an unknown
+// calendar.
+func (c *Client) CalListBookings(ctx context.Context, calendarID string, from, to time.Time) (*CalListBookingsResult, error) {
+	if calendarID == "" {
+		return nil, fmt.Errorf("calendarID is required")
+	}
+	if !from.Before(to) {
+		return nil, fmt.Errorf("from must be strictly before to")
+	}
+	q := url.Values{}
+	q.Set("calendar_id", calendarID)
+	q.Set("from", from.UTC().Format(time.RFC3339Nano))
+	q.Set("to", to.UTC().Format(time.RFC3339Nano))
+	u := c.buildURLv2("/cal/bookings") + "?" + q.Encode()
+	var res CalListBookingsResult
+	if err := c.doURL(ctx, http.MethodGet, u, nil, &res); err != nil {
+		return nil, err
+	}
+	if res.Bookings == nil {
+		res.Bookings = []CalBooking{}
+	}
+	return &res, nil
+}
+
+// CalListBookingsForBearer returns every live (proposed, binding, or
+// honoured) booking held by bearer across every calendar on the
+// tenant -- the cross-calendar complement to CalListBookings, which
+// is scoped to one calendar at a time. Requested by xoluman (XM-2)
+// as an example of a gap the per-calendar shape leaves open: "what
+// bookings does bearer X hold across every calendar."
+//
+// Hits GET /api/v2/.../cal/bookings/by-bearer. Returns *client.Error
+// on non-2xx.
+func (c *Client) CalListBookingsForBearer(ctx context.Context, bearer uint64) (*CalListBookingsResult, error) {
+	if bearer == 0 {
+		return nil, fmt.Errorf("bearer must be non-zero")
+	}
+	q := url.Values{}
+	q.Set("bearer", strconv.FormatUint(bearer, 10))
+	u := c.buildURLv2("/cal/bookings/by-bearer") + "?" + q.Encode()
+	var res CalListBookingsResult
+	if err := c.doURL(ctx, http.MethodGet, u, nil, &res); err != nil {
+		return nil, err
+	}
+	if res.Bookings == nil {
+		res.Bookings = []CalBooking{}
 	}
 	return &res, nil
 }

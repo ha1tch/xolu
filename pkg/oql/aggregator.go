@@ -96,6 +96,23 @@ type Aggregator struct {
 	// decimal-precise aggregation instead of float64. Set via
 	// SetDecimalFields before calling Aggregate.
 	decimalFields map[string]bool
+
+	// exprAliases maps an aggregate expression's own stringified form
+	// (e.g. "SUM(val)") to its declared SELECT-list alias (e.g.
+	// "total"). Set via SetExprAliases before evaluating a HAVING
+	// condition. XOT186 follow-up (2026-08-13): evalExpr's own
+	// FunctionCall case previously only ever looked up a row by the
+	// expression's raw stringified form or by a "row key contains the
+	// function name" heuristic -- both fail whenever the SELECT list
+	// gives an aggregate a different alias than its own function name
+	// pattern (e.g. "SUM(val) AS total": the SQL push-down path's own
+	// result rows only ever carry the key "total", never also
+	// "SUM(val)", unlike the Go-path Aggregate's own output which
+	// happens to carry both). The lookup silently returned nil, and
+	// every row failed the HAVING comparison as a result -- a filter
+	// that looks like it works (no error, a result comes back) but
+	// discards every row regardless of whether it should pass.
+	exprAliases map[string]string
 }
 
 // NewAggregator creates a new aggregator
@@ -108,6 +125,23 @@ func NewAggregator() *Aggregator {
 // indicates decimal columns.
 func (a *Aggregator) SetDecimalFields(fields map[string]bool) {
 	a.decimalFields = fields
+}
+
+// SetExprAliases configures the aggregate-expression-to-alias mapping
+// used by evalExpr's own FunctionCall case when evaluating a HAVING
+// condition against already-aggregated rows (e.g. rows produced by
+// the SQL aggregate push-down path, whose own result columns carry
+// only their declared alias, never also the raw expression string).
+// Call this before EvalCondition/evalCondition with the SELECT list's
+// own columns.
+func (a *Aggregator) SetExprAliases(columns []ast.SelectColumn) {
+	aliases := make(map[string]string, len(columns))
+	for _, col := range columns {
+		if isAggregate(col.Expression) {
+			aliases[exprToString(col.Expression)] = columnAlias(col)
+		}
+	}
+	a.exprAliases = aliases
 }
 
 // isDecimalField checks if a field name should use decimal aggregation.
@@ -331,6 +365,17 @@ func (a *Aggregator) evalExpr(row map[string]interface{}, expr ast.Expression) i
 		if val, ok := row[alias]; ok {
 			return val
 		}
+		// SetExprAliases's own mapping (e.g. "SUM(val)" -> "total"):
+		// the SQL aggregate push-down path's own result rows only ever
+		// carry the declared alias as a key, never also the raw
+		// expression string -- checked before the looser "contains"
+		// heuristic below, since it's an exact, unambiguous match when
+		// available rather than a guess.
+		if mappedAlias, ok := a.exprAliases[alias]; ok {
+			if val, ok := row[mappedAlias]; ok {
+				return val
+			}
+		}
 		// Also check common variations (COUNT(*) might be stored differently)
 		funcName := strings.ToUpper(exprToString(e.Function))
 		for key, val := range row {
@@ -462,6 +507,48 @@ func ApplyTop(records []map[string]interface{}, top *ast.TopClause) []map[string
 
 	if limit > 0 && len(records) > limit {
 		return records[:limit]
+	}
+	return records
+}
+
+// ApplyOffsetFetch applies T-SQL's own OFFSET N ROWS FETCH NEXT M ROWS
+// ONLY pagination clause in Go (XM-5, xoluman's own report, 2026-08-12).
+// Root cause of the original bug: stmt.Offset/stmt.Fetch were parsed
+// correctly into the AST -- confirmed directly, tsqlparser's own
+// grammar handles both -- but nothing anywhere in this package ever
+// read either field. Not a rejection, not a silent misinterpretation:
+// a genuine no-op, the clause simply vanished after parsing. Applied
+// unconditionally here, with no "already pushed to SQL" guard the way
+// ApplyTop has one, since neither clause is pushed to SQL anywhere in
+// this codebase yet -- a real efficiency gap for a large offset
+// against a large table (the full result set is still fetched before
+// slicing), left as a known limitation rather than solved here;
+// correctness first. offset/fetch are each nil when the clause was
+// omitted, matching stmt.Offset/stmt.Fetch's own zero value; a
+// non-integer-literal expression (a bound parameter, say) is treated
+// as absent rather than erroring, matching ApplyTop's own established
+// behaviour for a non-integer TOP count.
+func ApplyOffsetFetch(records []map[string]interface{}, offset, fetch ast.Expression) []map[string]interface{} {
+	offsetN := 0
+	if intLit, ok := offset.(*ast.IntegerLiteral); ok && intLit.Value > 0 {
+		offsetN = int(intLit.Value)
+	}
+	if offsetN > 0 {
+		if offsetN >= len(records) {
+			return []map[string]interface{}{}
+		}
+		records = records[offsetN:]
+	}
+
+	if fetch == nil {
+		return records
+	}
+	fetchN := 0
+	if intLit, ok := fetch.(*ast.IntegerLiteral); ok && intLit.Value > 0 {
+		fetchN = int(intLit.Value)
+	}
+	if fetchN > 0 && len(records) > fetchN {
+		records = records[:fetchN]
 	}
 	return records
 }

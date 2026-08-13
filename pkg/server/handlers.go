@@ -1353,16 +1353,16 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 	// Register adapted table if the store supports it.
 	// This creates or updates the optimised column-per-field table
 	// for this entity, enabling direct SQL queries instead of JSON
-	// blob extraction.
-	if sqlStore, ok := s.storage.(*storage.SQLiteStore); ok {
-		if err := sqlStore.RegisterAdaptedEntity(r.Context(), entity, schema); err != nil {
-			s.logger.Error().Err(err).Str("entity", entity).Msg("Failed to register adapted table")
-			s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
-				"Schema loaded but adapted table registration failed")
-			return
-		}
-		s.logger.Info().Str("entity", entity).Msg("Registered adapted table")
+	// blob extraction. Propagates to every tenant store that already
+	// exists, not just the default one -- see registerAdaptedEverywhere's
+	// own doc comment (XOT178) for why this matters.
+	if err := s.registerAdaptedEverywhere(r.Context(), entity, schema); err != nil {
+		s.logger.Error().Err(err).Str("entity", entity).Msg("Failed to register adapted table")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
+			"Schema loaded but adapted table registration failed")
+		return
 	}
+	s.logger.Info().Str("entity", entity).Msg("Registered adapted table")
 
 	s.logger.Info().Str("entity", entity).Msg("Created/updated schema")
 

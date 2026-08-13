@@ -153,6 +153,105 @@ func bootServer(t *testing.T) *integrationEnv {
 	return &integrationEnv{srv: srv, ts: ts, c: client.New(ts.URL)}
 }
 
+// bootServerWithTS mirrors bootServer exactly, with TimeseriesEnabled
+// added -- kept as its own dedicated helper (matching the existing
+// bootServerWithAPIKeyAuth precedent) rather than folding into the
+// shared bootServer, so enabling timeseries here can never affect any
+// other test's own boot config.
+func bootServerWithTS(t *testing.T) *integrationEnv {
+	t.Helper()
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	cfg.AuthType = "none"
+	cfg.APIV2Enabled = true
+	cfg.CalEnabled = true
+	cfg.BalEnabled = true
+	cfg.BlobEnabled = true
+	cfg.FullTextEnabled = true
+	cfg.TimeseriesEnabled = true
+	cfg.TenantMode = "path"
+	cfg.TenantAutoRegister = true
+
+	dbPath := sl.SharedStorePath(cfg.BaseDir)
+	if cfg.SQLitePerFileTenants {
+		dbPath = sl.TenantStorePath(cfg.BaseDir, 0)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store, err := storage.NewStore("sqlite", map[string]interface{}{
+		"db_path":           dbPath,
+		"full_text_enabled": true,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	memCache := cache.NewMemoryCache(1000, 300*time.Second)
+	g := graph.NewFlatGraph()
+	validator := validation.NewJSONSchemaValidator(filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas"))
+	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
+
+	srv := server.New(cfg, store, memCache, g, validator, logger)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Stop()
+		store.Close()
+	})
+	return &integrationEnv{srv: srv, ts: ts, c: client.New(ts.URL, client.WithTenant("default"))}
+}
+
+// bootServerMultiTenant mirrors bootServer exactly, with TenantAutoRegister
+// added -- its own dedicated helper (matching bootServerWithTS's own
+// precedent) since named-tenant auto-registration is off by default
+// and no existing helper turns it on. Added directly off the back of
+// finding CalListBookings itself had no tenant-isolation test, despite
+// the JOIN fix earlier in this same session (XOT173) getting exactly
+// this kind of check and CalListBookings not -- the returned
+// integrationEnv's own client has no fixed tenant; callers construct
+// their own per-tenant clients against env.ts.URL as needed.
+func bootServerMultiTenant(t *testing.T) *integrationEnv {
+	t.Helper()
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	cfg.AuthType = "none"
+	cfg.APIV2Enabled = true
+	cfg.CalEnabled = true
+	cfg.BalEnabled = true
+	cfg.BlobEnabled = true
+	cfg.FullTextEnabled = true
+	cfg.TenantMode = "path"
+	cfg.TenantAutoRegister = true
+
+	dbPath := sl.SharedStorePath(cfg.BaseDir)
+	if cfg.SQLitePerFileTenants {
+		dbPath = sl.TenantStorePath(cfg.BaseDir, 0)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store, err := storage.NewStore("sqlite", map[string]interface{}{
+		"db_path":           dbPath,
+		"full_text_enabled": true,
+	})
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	memCache := cache.NewMemoryCache(1000, 300*time.Second)
+	g := graph.NewFlatGraph()
+	validator := validation.NewJSONSchemaValidator(filepath.Join(cfg.BaseDir, cfg.Schema, "_schemas"))
+	logger := zerolog.New(os.Stdout).Level(zerolog.Disabled)
+
+	srv := server.New(cfg, store, memCache, g, validator, logger)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Stop()
+		store.Close()
+	})
+	return &integrationEnv{srv: srv, ts: ts, c: client.New(ts.URL)}
+}
+
 // TestIntegration_APIKeyAuth_CorrectAndWrongCredential is the direct
 // end-to-end proof for T-160 (the client's own apikey auth header
 // format was wrong -- "Bearer", never accepted by the server's own
@@ -590,6 +689,611 @@ func TestIntegration_CalFullFlow(t *testing.T) {
 	}
 }
 
+// ─── ts ──────────────────────────────────────────────────────────────────
+
+// TestIntegration_TSReadSlice exercises xoluman's own "minimum slice"
+// (XM-2, XOT172) against a real server: provision the tenant, define a
+// timeline, append two events, define a rollup -- all seeded via raw
+// HTTP since write-side ts methods are a separate, later follow-up,
+// not in this slice -- then exercise all 5 client methods
+// (TSListTimelines, TSGetTimeline, TSQueryRange, TSRollupList,
+// TSRollupGet) against that seeded state.
+func TestIntegration_TSReadSlice(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	seedJSON(t, env, "/api/v1/tenant/default/ts/provision", nil)
+
+	tlResp := seedJSON(t, env, "/api/v1/tenant/default/ts/tl/def", map[string]interface{}{
+		"id": 1, "name": "cpu_usage", "dims": 1, "retention_days": 30,
+	})
+	if tlResp["id"] == nil {
+		t.Fatalf("seed timeline: unexpected response %v", tlResp)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	seedJSON(t, env, "/api/v1/tenant/default/ts/events", map[string]interface{}{
+		"timeline": 1, "dims": []int{7}, "time": now.Add(-time.Hour).Format(time.RFC3339), "nums": []float64{1.5},
+	})
+	seedJSON(t, env, "/api/v1/tenant/default/ts/events", map[string]interface{}{
+		"timeline": 1, "dims": []int{7}, "time": now.Format(time.RFC3339), "nums": []float64{2.5},
+	})
+
+	seedJSON(t, env, "/api/v1/tenant/default/ts/tl/def", map[string]interface{}{
+		"id": 2, "name": "cpu_usage_hourly", "dims": 1,
+	})
+
+	rollupResp := seedJSON(t, env, "/api/v1/tenant/default/ts/tl/1/rollup/def", map[string]interface{}{
+		"dest_tid": 2, "bucket_duration": "1h",
+	})
+	rollupID, _ := rollupResp["id"].(string)
+	if rollupID == "" {
+		t.Fatalf("seed rollup: unexpected response %v", rollupResp)
+	}
+
+	// TSListTimelines
+	tls, err := env.c.TSListTimelines(ctx)
+	if err != nil {
+		t.Fatalf("TSListTimelines: %v", err)
+	}
+	if len(tls) == 0 {
+		t.Fatal("TSListTimelines: expected at least the seeded timeline, got none")
+	}
+	found := false
+	for _, tl := range tls {
+		if tl.ID == 1 && tl.Name == "cpu_usage" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("TSListTimelines: seeded timeline (id=1, name=cpu_usage) not found in %+v", tls)
+	}
+
+	// TSGetTimeline
+	tl, err := env.c.TSGetTimeline(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSGetTimeline: %v", err)
+	}
+	if tl.Name != "cpu_usage" || tl.Dims != 1 {
+		t.Errorf("TSGetTimeline: unexpected timeline %+v", tl)
+	}
+
+	// TSQueryRange
+	qr, err := env.c.TSQueryRange(ctx, client.TSQueryRangeRequest{
+		Timeline: 1, Dims: []uint64{7},
+		From: now.Add(-2 * time.Hour), To: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("TSQueryRange: %v", err)
+	}
+	if qr.Count != 2 || len(qr.Events) != 2 {
+		t.Fatalf("TSQueryRange: want 2 events, got count=%d len=%d: %+v", qr.Count, len(qr.Events), qr.Events)
+	}
+
+	// TSRollupList
+	rollups, err := env.c.TSRollupList(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSRollupList: %v", err)
+	}
+	if len(rollups) != 1 || rollups[0].ID != rollupID {
+		t.Fatalf("TSRollupList: want 1 rollup with id %q, got %+v", rollupID, rollups)
+	}
+	if rollups[0].SourceTID != 1 || rollups[0].DestTID != 2 {
+		t.Errorf("TSRollupList: want source_tid=1 dest_tid=2, got %+v", rollups[0])
+	}
+
+	// TSRollupGet
+	rollup, err := env.c.TSRollupGet(ctx, 1, rollupID)
+	if err != nil {
+		t.Fatalf("TSRollupGet: %v", err)
+	}
+	if rollup.ID != rollupID || rollup.BucketDuration == "" {
+		t.Errorf("TSRollupGet: unexpected rollup %+v", rollup)
+	}
+}
+
+// TestIntegration_CalCreateCalendar_ClosesTheLoop is XM-8, end to
+// end: xoluman's own report was specifically that CalListCalendars
+// and CalListBookings both worked correctly but had nothing to list,
+// since no route anywhere could create a calendar through the public
+// API at all. This test uses no test-only facade whatsoever --
+// CalManagerForTest() does not appear here -- every step, including
+// calendar creation itself, goes through real HTTP, proving the loop
+// XM-8 identified as broken is now actually closed: create a
+// calendar, propose and confirm a real booking on it, then confirm
+// both CalListCalendars and CalListBookings see it.
+func TestIntegration_CalCreateCalendar_ClosesTheLoop(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	created, err := env.c.CalCreateCalendar(ctx, client.CalCreateCalendarRequest{CalendarID: "room-a"})
+	if err != nil {
+		t.Fatalf("CalCreateCalendar: %v", err)
+	}
+	if created.CalendarID != "room-a" || created.DefaultState != "binding" || created.MatchPolicy != "binding" {
+		t.Errorf("unexpected created calendar: %+v", created)
+	}
+
+	cals, err := env.c.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("CalListCalendars: %v", err)
+	}
+	if len(cals.Calendars) != 1 || cals.Calendars[0].CalendarID != "room-a" {
+		t.Fatalf("CalListCalendars: want exactly the created calendar, got %+v", cals.Calendars)
+	}
+
+	base := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)
+	b, err := env.c.CalPropose(ctx, client.CalProposeRequest{
+		BookingID: "b1", CalendarID: "room-a",
+		Span:   client.CalSpan{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)},
+		Bearer: 1,
+	})
+	if err != nil {
+		t.Fatalf("CalPropose against a real, HTTP-created calendar: %v", err)
+	}
+	if _, err := env.c.CalConfirm(ctx, "room-a", b.BookingID); err != nil {
+		t.Fatalf("CalConfirm: %v", err)
+	}
+
+	bookings, err := env.c.CalListBookings(ctx, "room-a", base, base.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("CalListBookings: %v", err)
+	}
+	if len(bookings.Bookings) != 1 || bookings.Bookings[0].BookingID != "b1" {
+		t.Fatalf("CalListBookings: want exactly the confirmed booking, got %+v", bookings.Bookings)
+	}
+}
+
+func TestIntegration_CalCreateCalendar_AlreadyExists(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	if _, err := env.c.CalCreateCalendar(ctx, client.CalCreateCalendarRequest{CalendarID: "room-a"}); err != nil {
+		t.Fatalf("first CalCreateCalendar: %v", err)
+	}
+	_, err := env.c.CalCreateCalendar(ctx, client.CalCreateCalendarRequest{CalendarID: "room-a"})
+	if err == nil {
+		t.Fatal("expected error creating a calendar_id that already exists, got nil")
+	}
+	ce, ok := err.(*client.Error)
+	if !ok || ce.HTTPStatus != http.StatusConflict {
+		t.Fatalf("expected a structured 409 *client.Error, got %T: %v", err, err)
+	}
+}
+
+// TestIntegration_CalCreateCalendar_TenantIsolation: same
+// calendar_id on two tenants, confirm each can independently create
+// it (no false conflict across tenants) and neither tenant's own
+// CalListCalendars result reflects the other's.
+func TestIntegration_CalCreateCalendar_TenantIsolation(t *testing.T) {
+	env := bootServerMultiTenant(t)
+	ctx := context.Background()
+
+	clientA := client.New(env.ts.URL, client.WithTenant("tenanta"))
+	clientB := client.New(env.ts.URL, client.WithTenant("tenantb"))
+
+	if _, err := clientA.CalCreateCalendar(ctx, client.CalCreateCalendarRequest{CalendarID: "room"}); err != nil {
+		t.Fatalf("tenanta CalCreateCalendar: %v", err)
+	}
+	if _, err := clientB.CalCreateCalendar(ctx, client.CalCreateCalendarRequest{CalendarID: "room"}); err != nil {
+		t.Fatalf("tenantb CalCreateCalendar (same calendar_id, different tenant -- must not conflict): %v", err)
+	}
+
+	resA, err := clientA.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("tenanta CalListCalendars: %v", err)
+	}
+	if len(resA.Calendars) != 1 {
+		t.Fatalf("tenant isolation violated: tenanta wants exactly its own calendar, got %+v", resA.Calendars)
+	}
+
+	resB, err := clientB.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("tenantb CalListCalendars: %v", err)
+	}
+	if len(resB.Calendars) != 1 {
+		t.Fatalf("tenant isolation violated: tenantb wants exactly its own calendar, got %+v", resB.Calendars)
+	}
+}
+
+// TestIntegration_CalListCalendars proves CalListCalendars against a
+// real server -- the storage capability (Calendars()) already
+// existed and was already tenant-scoped, but was confirmed
+// unreachable via any HTTP route or client method during the XOT180
+// audit (2026-08-11), not just undocumented.
+func TestIntegration_CalListCalendars(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	mgr := env.srv.CalManagerForTest()
+	if _, err := mgr.CreateCalendar(0, cal.Calendar{
+		CalendarID: "room-a", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed room-a: %v", err)
+	}
+	if _, err := mgr.CreateCalendar(0, cal.Calendar{
+		CalendarID: "room-b", DefaultState: cal.StateProposed, MatchPolicy: cal.ConsiderBindingProposed,
+	}); err != nil {
+		t.Fatalf("seed room-b: %v", err)
+	}
+
+	res, err := env.c.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("CalListCalendars: %v", err)
+	}
+	if len(res.Calendars) != 2 {
+		t.Fatalf("want 2 calendars, got %d: %+v", len(res.Calendars), res.Calendars)
+	}
+	byID := make(map[string]client.CalendarSummary, len(res.Calendars))
+	for _, c := range res.Calendars {
+		byID[c.CalendarID] = c
+	}
+	if roomA, ok := byID["room-a"]; !ok || roomA.DefaultState != "binding" {
+		t.Errorf("room-a: want default_state=binding, got %+v", byID["room-a"])
+	}
+	if roomB, ok := byID["room-b"]; !ok || roomB.DefaultState != "proposed" {
+		t.Errorf("room-b: want default_state=proposed, got %+v", byID["room-b"])
+	}
+}
+
+// TestIntegration_CalListCalendars_TenantIsolation: two tenants, each
+// with a calendar of a different name, confirm neither tenant's own
+// CalListCalendars result reflects the other's. Included from the
+// start rather than added after the fact, matching XOT180's own
+// finding that this exact check was initially missing for
+// CalListBookings.
+func TestIntegration_CalListCalendars_TenantIsolation(t *testing.T) {
+	env := bootServerMultiTenant(t)
+	ctx := context.Background()
+
+	clientA := client.New(env.ts.URL, client.WithTenant("tenanta"))
+	clientB := client.New(env.ts.URL, client.WithTenant("tenantb"))
+
+	// Trigger tenant auto-registration via a request that's allowed to
+	// fail (no calendars seeded yet), matching the established pattern.
+	if _, err := clientA.CalListCalendars(ctx); err != nil {
+		t.Fatalf("tenanta CalListCalendars (pre-seed): %v", err)
+	}
+	if _, err := clientB.CalListCalendars(ctx); err != nil {
+		t.Fatalf("tenantb CalListCalendars (pre-seed): %v", err)
+	}
+	tidA, ok := env.srv.TenantIDForTest("tenanta")
+	if !ok {
+		t.Fatal("tenanta not found in registry after a request against it")
+	}
+	tidB, ok := env.srv.TenantIDForTest("tenantb")
+	if !ok {
+		t.Fatal("tenantb not found in registry after a request against it")
+	}
+
+	mgr := env.srv.CalManagerForTest()
+	if _, err := mgr.CreateCalendar(tidA, cal.Calendar{
+		CalendarID: "tenanta-room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenanta's own calendar: %v", err)
+	}
+	if _, err := mgr.CreateCalendar(tidB, cal.Calendar{
+		CalendarID: "tenantb-room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenantb's own calendar: %v", err)
+	}
+
+	resA, err := clientA.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("tenanta CalListCalendars: %v", err)
+	}
+	if len(resA.Calendars) != 1 || resA.Calendars[0].CalendarID != "tenanta-room" {
+		t.Fatalf("tenant isolation violated: tenanta wants exactly its own calendar, got %+v", resA.Calendars)
+	}
+
+	resB, err := clientB.CalListCalendars(ctx)
+	if err != nil {
+		t.Fatalf("tenantb CalListCalendars: %v", err)
+	}
+	if len(resB.Calendars) != 1 || resB.Calendars[0].CalendarID != "tenantb-room" {
+		t.Fatalf("tenant isolation violated: tenantb wants exactly its own calendar, got %+v", resB.Calendars)
+	}
+}
+
+// TestIntegration_CalListBookings proves CalListBookings against a
+// real server: seed two live bookings (one wholly inside the query
+// window, one straddling its own start) and one on a different
+// calendar, confirm the range query returns exactly the two on the
+// right calendar and none of the other.
+func TestIntegration_CalListBookings(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	mgr := env.srv.CalManagerForTest()
+	for _, id := range []string{"room-a", "room-b"} {
+		if _, err := mgr.CreateCalendar(0, cal.Calendar{
+			CalendarID:   id,
+			DefaultState: cal.StateBinding,
+			MatchPolicy:  cal.ConsiderBinding,
+		}); err != nil {
+			t.Fatalf("seed calendar %s: %v", id, err)
+		}
+	}
+
+	base := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)
+	seedBooking := func(id, calendarID string, startOffset, endOffset time.Duration) {
+		t.Helper()
+		_, err := env.c.CalPropose(ctx, client.CalProposeRequest{
+			BookingID:  id,
+			CalendarID: calendarID,
+			Span:       client.CalSpan{Start: base.Add(startOffset), End: base.Add(endOffset)},
+			Bearer:     1,
+		})
+		if err != nil {
+			t.Fatalf("seed booking %s: %v", id, err)
+		}
+		if _, err := env.c.CalConfirm(ctx, calendarID, id); err != nil {
+			t.Fatalf("confirm booking %s: %v", id, err)
+		}
+	}
+
+	// Query window: [base+2h, base+6h).
+	seedBooking("inside", "room-a", 3*time.Hour, 4*time.Hour)
+	seedBooking("straddles-start", "room-a", 1*time.Hour, 3*time.Hour)
+	seedBooking("before-window", "room-a", -3*time.Hour, -2*time.Hour)
+	seedBooking("other-calendar", "room-b", 3*time.Hour, 4*time.Hour)
+
+	res, err := env.c.CalListBookings(ctx, "room-a", base.Add(2*time.Hour), base.Add(6*time.Hour))
+	if err != nil {
+		t.Fatalf("CalListBookings: %v", err)
+	}
+	got := make(map[string]bool, len(res.Bookings))
+	for _, b := range res.Bookings {
+		got[b.BookingID] = true
+		if b.State != "binding" {
+			t.Errorf("booking %s: want state=binding, got %s", b.BookingID, b.State)
+		}
+	}
+	for _, id := range []string{"inside", "straddles-start"} {
+		if !got[id] {
+			t.Errorf("expected %q in result, got %v", id, got)
+		}
+	}
+	for _, id := range []string{"before-window", "other-calendar"} {
+		if got[id] {
+			t.Errorf("did not expect %q in result, got %v", id, got)
+		}
+	}
+	if len(res.Bookings) != 2 {
+		t.Errorf("want exactly 2 bookings, got %d: %v", len(res.Bookings), got)
+	}
+}
+
+// TestIntegration_CalListBookingsForBearer proves the cross-calendar
+// bearer query (XOT180, 2026-08-11) against a real server: bearer 100
+// holds bookings on two different calendars, confirm both come back
+// in one call and a second bearer's own booking does not.
+func TestIntegration_CalListBookingsForBearer(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	mgr := env.srv.CalManagerForTest()
+	for _, id := range []string{"room-a", "room-b"} {
+		if _, err := mgr.CreateCalendar(0, cal.Calendar{
+			CalendarID: id, DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+		}); err != nil {
+			t.Fatalf("seed calendar %s: %v", id, err)
+		}
+	}
+
+	base := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)
+	seedBooking := func(bookingID, calendarID string, bearer uint64) {
+		t.Helper()
+		b, err := env.c.CalPropose(ctx, client.CalProposeRequest{
+			BookingID: bookingID, CalendarID: calendarID,
+			Span:   client.CalSpan{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)},
+			Bearer: bearer,
+		})
+		if err != nil {
+			t.Fatalf("seed booking %s: %v", bookingID, err)
+		}
+		if _, err := env.c.CalConfirm(ctx, calendarID, b.BookingID); err != nil {
+			t.Fatalf("confirm booking %s: %v", bookingID, err)
+		}
+	}
+	seedBooking("bearer100-a", "room-a", 100)
+	seedBooking("bearer100-b", "room-b", 100)
+	seedBooking("bearer200-a", "room-a", 200)
+
+	res, err := env.c.CalListBookingsForBearer(ctx, 100)
+	if err != nil {
+		t.Fatalf("CalListBookingsForBearer: %v", err)
+	}
+	got := make(map[string]bool, len(res.Bookings))
+	for _, b := range res.Bookings {
+		got[b.BookingID] = true
+	}
+	for _, id := range []string{"bearer100-a", "bearer100-b"} {
+		if !got[id] {
+			t.Errorf("expected %q in bearer 100's own result, got %v", id, got)
+		}
+	}
+	if got["bearer200-a"] {
+		t.Errorf("did not expect bearer 200's own booking in bearer 100's own result, got %v", got)
+	}
+	if len(res.Bookings) != 2 {
+		t.Errorf("want exactly 2 bookings, got %d: %v", len(res.Bookings), got)
+	}
+}
+
+// TestIntegration_CalListBookingsForBearer_TenantIsolation: same
+// bearer id on two tenants, confirm neither tenant's own result
+// reflects the other's booking. Included from the start, matching
+// XOT180's own general discipline.
+func TestIntegration_CalListBookingsForBearer_TenantIsolation(t *testing.T) {
+	env := bootServerMultiTenant(t)
+	ctx := context.Background()
+
+	clientA := client.New(env.ts.URL, client.WithTenant("tenanta"))
+	clientB := client.New(env.ts.URL, client.WithTenant("tenantb"))
+
+	// Trigger tenant auto-registration (middleware-level, independent
+	// of the handler's own response) -- unlike CalListBookings, this
+	// endpoint has no single calendarID to validate, so an empty
+	// result is a genuine 200, not an error to expect.
+	if _, err := clientA.CalListBookingsForBearer(ctx, 100); err != nil {
+		t.Fatalf("tenanta CalListBookingsForBearer (pre-seed): %v", err)
+	}
+	if _, err := clientB.CalListBookingsForBearer(ctx, 100); err != nil {
+		t.Fatalf("tenantb CalListBookingsForBearer (pre-seed): %v", err)
+	}
+	tidA, ok := env.srv.TenantIDForTest("tenanta")
+	if !ok {
+		t.Fatal("tenanta not found in registry after a request against it")
+	}
+	tidB, ok := env.srv.TenantIDForTest("tenantb")
+	if !ok {
+		t.Fatal("tenantb not found in registry after a request against it")
+	}
+
+	mgr := env.srv.CalManagerForTest()
+	if _, err := mgr.CreateCalendar(tidA, cal.Calendar{
+		CalendarID: "room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenanta's own room: %v", err)
+	}
+	if _, err := mgr.CreateCalendar(tidB, cal.Calendar{
+		CalendarID: "room", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenantb's own room: %v", err)
+	}
+
+	base := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)
+	seed := func(c *client.Client, bookingID string) {
+		t.Helper()
+		b, err := c.CalPropose(ctx, client.CalProposeRequest{
+			BookingID: bookingID, CalendarID: "room",
+			Span:   client.CalSpan{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)},
+			Bearer: 100,
+		})
+		if err != nil {
+			t.Fatalf("seed booking %s: %v", bookingID, err)
+		}
+		if _, err := c.CalConfirm(ctx, "room", b.BookingID); err != nil {
+			t.Fatalf("confirm booking %s: %v", bookingID, err)
+		}
+	}
+	seed(clientA, "a-booking")
+	seed(clientB, "b-booking")
+
+	resA, err := clientA.CalListBookingsForBearer(ctx, 100)
+	if err != nil {
+		t.Fatalf("tenanta CalListBookingsForBearer: %v", err)
+	}
+	if len(resA.Bookings) != 1 || resA.Bookings[0].BookingID != "a-booking" {
+		t.Fatalf("tenant isolation violated: tenanta wants exactly its own booking, got %+v", resA.Bookings)
+	}
+
+	resB, err := clientB.CalListBookingsForBearer(ctx, 100)
+	if err != nil {
+		t.Fatalf("tenantb CalListBookingsForBearer: %v", err)
+	}
+	if len(resB.Bookings) != 1 || resB.Bookings[0].BookingID != "b-booking" {
+		t.Fatalf("tenant isolation violated: tenantb wants exactly its own booking, got %+v", resB.Bookings)
+	}
+}
+
+// TestIntegration_CalListBookings_TenantIsolation is the check
+// CalListBookings itself was missing until this test was added --
+// found directly while explaining why XOT173/XM-4/XM-2 slipped past
+// this project's own existing test suite in the first place: the
+// JOIN fix earlier in this session (XOT173) got exactly this class
+// of test (TestXM3a_JoinQuery_TenantIsolation), CalListBookings did
+// not, despite being new storage-layer code with tenant_id in its own
+// WHERE clause -- the same shape of risk, checked for one feature and
+// not the other in the same sitting. Two tenants, same calendar name,
+// distinct bookings, confirm neither tenant's own CalListBookings
+// result contains the other's.
+func TestIntegration_CalListBookings_TenantIsolation(t *testing.T) {
+	env := bootServerMultiTenant(t)
+	ctx := context.Background()
+
+	clientA := client.New(env.ts.URL, client.WithTenant("tenanta"))
+	clientB := client.New(env.ts.URL, client.WithTenant("tenantb"))
+
+	// Calendar creation is deliberately not on the wire (see this
+	// file's own header comment) -- seed via the same test facade
+	// TestIntegration_CalFullFlow uses. Tenant auto-registration is
+	// lazy (first HTTP request naming that tenant), so trigger it with
+	// a request that's allowed to fail (calendar doesn't exist yet)
+	// before looking the numeric ID up.
+	if _, err := clientA.CalListBookings(ctx, "room-a", time.Now(), time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("expected error (calendar not yet seeded) triggering tenanta's own registration")
+	}
+	if _, err := clientB.CalListBookings(ctx, "room-a", time.Now(), time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("expected error (calendar not yet seeded) triggering tenantb's own registration")
+	}
+	tidA, ok := env.srv.TenantIDForTest("tenanta")
+	if !ok {
+		t.Fatal("tenanta not found in registry after a request against it")
+	}
+	tidB, ok := env.srv.TenantIDForTest("tenantb")
+	if !ok {
+		t.Fatal("tenantb not found in registry after a request against it")
+	}
+
+	mgr := env.srv.CalManagerForTest()
+	if _, err := mgr.CreateCalendar(tidA, cal.Calendar{
+		CalendarID: "room-a", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenanta's own room-a: %v", err)
+	}
+	if _, err := mgr.CreateCalendar(tidB, cal.Calendar{
+		CalendarID: "room-a", DefaultState: cal.StateBinding, MatchPolicy: cal.ConsiderBinding,
+	}); err != nil {
+		t.Fatalf("seed tenantb's own room-a: %v", err)
+	}
+
+	base := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)
+	seedBooking := func(c *client.Client, bookingID string) {
+		t.Helper()
+		b, err := c.CalPropose(ctx, client.CalProposeRequest{
+			BookingID: bookingID, CalendarID: "room-a",
+			Span:   client.CalSpan{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)},
+			Bearer: 1,
+		})
+		if err != nil {
+			t.Fatalf("seed booking %s: %v", bookingID, err)
+		}
+		if _, err := c.CalConfirm(ctx, "room-a", b.BookingID); err != nil {
+			t.Fatalf("confirm booking %s: %v", bookingID, err)
+		}
+	}
+	seedBooking(clientA, "a-booking")
+	seedBooking(clientB, "b-booking")
+
+	resA, err := clientA.CalListBookings(ctx, "room-a", base, base.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("tenanta CalListBookings: %v", err)
+	}
+	for _, b := range resA.Bookings {
+		if b.BookingID == "b-booking" {
+			t.Fatalf("tenant isolation violated: tenanta's CalListBookings result contains tenantb's booking: %+v", b)
+		}
+	}
+	if len(resA.Bookings) != 1 || resA.Bookings[0].BookingID != "a-booking" {
+		t.Fatalf("tenanta: want exactly its own booking, got %+v", resA.Bookings)
+	}
+
+	resB, err := clientB.CalListBookings(ctx, "room-a", base, base.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("tenantb CalListBookings: %v", err)
+	}
+	for _, b := range resB.Bookings {
+		if b.BookingID == "a-booking" {
+			t.Fatalf("tenant isolation violated: tenantb's CalListBookings result contains tenanta's booking: %+v", b)
+		}
+	}
+	if len(resB.Bookings) != 1 || resB.Bookings[0].BookingID != "b-booking" {
+		t.Fatalf("tenantb: want exactly its own booking, got %+v", resB.Bookings)
+	}
+}
+
 // ─── bal ─────────────────────────────────────────────────────────────────
 
 // TestIntegration_BalFullFlow exercises the whole client surface
@@ -676,6 +1380,154 @@ func TestIntegration_BalFullFlow(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestIntegration_BalListAccounts exercises BalListAccounts (XM-2,
+// XOT172) against a real server: define three accounts with distinct
+// definitions (postable/non-postable, with/without a ceiling), move a
+// real transfer between two of them, confirm the listing reflects
+// both the correct definitions and the post-transfer balances.
+func TestIntegration_BalListAccounts(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	ceiling := "1000"
+	if _, err := env.c.BalDefine(ctx, client.BalDefineRequest{
+		AccountID: "~in", Unit: "u", Scale: 0, Floor: strPtr("-1000000"),
+	}); err != nil {
+		t.Fatalf("BalDefine ~in: %v", err)
+	}
+	if _, err := env.c.BalDefine(ctx, client.BalDefineRequest{
+		AccountID: "acct", Unit: "u", Scale: 0, Ceiling: &ceiling,
+	}); err != nil {
+		t.Fatalf("BalDefine acct: %v", err)
+	}
+	notPostable := false
+	if _, err := env.c.BalDefine(ctx, client.BalDefineRequest{
+		AccountID: "summary", Unit: "u", Scale: 0, Postable: &notPostable,
+	}); err != nil {
+		t.Fatalf("BalDefine summary: %v", err)
+	}
+
+	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if _, err := env.c.BalTransfer(ctx, client.BalTransferRequest{
+		From: "~in", To: "acct", Amount: "150", Scale: 0, At: at.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("BalTransfer: %v", err)
+	}
+
+	res, err := env.c.BalListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("BalListAccounts: %v", err)
+	}
+	if len(res.Accounts) != 3 {
+		t.Fatalf("want 3 accounts, got %d: %+v", len(res.Accounts), res.Accounts)
+	}
+
+	byID := make(map[string]client.BalAccountSummary, len(res.Accounts))
+	for _, a := range res.Accounts {
+		byID[a.AccountID] = a
+	}
+
+	acct, ok := byID["acct"]
+	if !ok {
+		t.Fatal("acct missing from listing")
+	}
+	if acct.Value != "150" || acct.Minor != 150 {
+		t.Errorf("acct balance after receiving 150: want 150, got %+v", acct)
+	}
+	if acct.Ceiling != "1000" {
+		t.Errorf("acct ceiling: want 1000, got %q", acct.Ceiling)
+	}
+	if !acct.Postable {
+		t.Error("acct defined postable, listing reports it not postable")
+	}
+
+	in, ok := byID["~in"]
+	if !ok {
+		t.Fatal("~in missing from listing")
+	}
+	if in.Value != "-150" {
+		t.Errorf("~in balance after sending 150: want -150, got %+v", in)
+	}
+
+	summary, ok := byID["summary"]
+	if !ok {
+		t.Fatal("summary missing from listing")
+	}
+	if summary.Postable {
+		t.Error("summary defined non-postable, listing reports it postable")
+	}
+}
+
+// TestIntegration_BalListAccounts_TenantIsolation is the same check
+// XOT180 flagged as missing on the cal side, applied here from the
+// start rather than added after the fact: two tenants, an account
+// with the identical id in both, distinct balances, confirm neither
+// tenant's own BalListAccounts result reflects the other's data. Bal
+// isolates by table-name prefixing (tenant.TenantID.TablePrefix()),
+// a structurally different mechanism from cal's shared-table-plus-
+// tenant_id-column approach -- proven directly here rather than
+// inferred from the storage-layer unit test alone
+// (TestListAccounts_TenantIsolation in pkg/bal), since that test
+// exercises the *Store type directly and this one proves the same
+// property holds through the real HTTP + tenant-resolution path a
+// caller actually uses.
+func TestIntegration_BalListAccounts_TenantIsolation(t *testing.T) {
+	env := bootServerMultiTenant(t)
+	ctx := context.Background()
+
+	clientA := client.New(env.ts.URL, client.WithTenant("tenanta"))
+	clientB := client.New(env.ts.URL, client.WithTenant("tenantb"))
+
+	if _, err := clientA.BalDefine(ctx, client.BalDefineRequest{AccountID: "shared-id", Unit: "EUR", Scale: 2}); err != nil {
+		t.Fatalf("tenanta BalDefine: %v", err)
+	}
+	if _, err := clientA.BalDefine(ctx, client.BalDefineRequest{AccountID: "~in-a", Unit: "EUR", Scale: 2, Floor: strPtr("-100000")}); err != nil {
+		t.Fatalf("tenanta BalDefine ~in-a: %v", err)
+	}
+	if _, err := clientB.BalDefine(ctx, client.BalDefineRequest{AccountID: "shared-id", Unit: "USD", Scale: 2}); err != nil {
+		t.Fatalf("tenantb BalDefine: %v", err)
+	}
+
+	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if _, err := clientA.BalTransfer(ctx, client.BalTransferRequest{
+		From: "~in-a", To: "shared-id", Amount: "500", Scale: 2, At: at.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("tenanta BalTransfer: %v", err)
+	}
+
+	resA, err := clientA.BalListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("tenanta BalListAccounts: %v", err)
+	}
+	if len(resA.Accounts) != 2 {
+		t.Fatalf("tenant isolation violated: tenanta wants exactly its own 2 accounts, got %d: %+v", len(resA.Accounts), resA.Accounts)
+	}
+	for _, a := range resA.Accounts {
+		if a.AccountID == "shared-id" {
+			if a.Unit != "EUR" {
+				t.Fatalf("tenant isolation violated: tenanta's own shared-id shows tenantb's currency: %+v", a)
+			}
+			if a.Value != "500.00" {
+				t.Errorf("tenanta's own shared-id balance: want 500.00, got %+v", a)
+			}
+		}
+	}
+
+	resB, err := clientB.BalListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("tenantb BalListAccounts: %v", err)
+	}
+	if len(resB.Accounts) != 1 {
+		t.Fatalf("tenant isolation violated: tenantb wants exactly its own 1 account, got %d: %+v", len(resB.Accounts), resB.Accounts)
+	}
+	if resB.Accounts[0].Unit != "USD" {
+		t.Errorf("tenantb's own shared-id shows tenanta's currency: %+v", resB.Accounts[0])
+	}
+	if resB.Accounts[0].Value != "0.00" {
+		t.Errorf("tenant isolation violated: tenantb's own shared-id balance should be untouched by tenanta's transfer, got %+v", resB.Accounts[0])
+	}
+}
 
 // TestIntegration_DxpFullFlow exercises the whole dxp client surface
 // (item 23) against a real server: register a def (a single bal

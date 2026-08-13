@@ -94,6 +94,24 @@ func (c *Client) BalBalance(ctx context.Context, accountID string) (*BalBalanceR
 	return &res, nil
 }
 
+// BalListAccounts returns every account defined on the tenant, each
+// with its own definition and current balance -- no way existed to
+// enumerate a tenant's own accounts at all before this (XM-2,
+// XOT172); every other bal method requires already knowing an
+// account's own id.
+//
+// Hits GET /api/v2/.../bal/accounts. Returns *client.Error on non-2xx.
+func (c *Client) BalListAccounts(ctx context.Context) (*BalListAccountsResult, error) {
+	var res BalListAccountsResult
+	if err := c.doURL(ctx, http.MethodGet, c.buildURLv2("/bal/accounts"), nil, &res); err != nil {
+		return nil, err
+	}
+	if res.Accounts == nil {
+		res.Accounts = []BalAccountSummary{}
+	}
+	return &res, nil
+}
+
 // BalEntries returns accountID's most recent journal entries (the
 // server currently caps this at 100; see BalEntriesResult's doc).
 //

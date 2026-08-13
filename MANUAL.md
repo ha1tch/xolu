@@ -858,9 +858,11 @@ Content-Type: application/json
 - `WHERE` with operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`
 - `ORDER BY` with `ASC`/`DESC`
 - `LIMIT` and `OFFSET`
-- `GROUP BY` with aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+- `GROUP BY` with aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `HAVING`
 - `DISTINCT`
 - `INNER`, `LEFT`, `RIGHT`, and `FULL OUTER JOIN` (two tables, SQLite store)
+- `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`
+- Subqueries in `FROM`: `SELECT ... FROM (SELECT ...) AS alias`
 - `INSERT`, `UPDATE`, `DELETE`
 
 #### Examples
@@ -885,13 +887,21 @@ SELECT a.amount, b.name AS customer
 FROM orders AS a
 INNER JOIN customers AS b ON a.customer_id = b.id
 WHERE a.status = 'pending'
+
+-- UNION: combine two entities' own rows, deduplicated
+SELECT name FROM active_users UNION SELECT name FROM archived_users
+
+-- Subquery: filter on a computed, aggregated value
+SELECT department, avg_salary
+FROM (SELECT department, AVG(salary) AS avg_salary FROM employees GROUP BY department) AS x
+WHERE avg_salary > 75000
 ```
 
 #### Not supported
 
-CROSS JOIN, three-or-more-table joins, subqueries, CTEs, window functions.
-JOINs require the SQLite store. See `docs/OQL_API.md` for the full feature
-matrix.
+CROSS JOIN, three-or-more-table joins, a subquery on either side of a JOIN,
+CTEs, window functions. JOINs require the SQLite store. See `docs/OQL_API.md`
+for the full feature matrix.
 
 #### Async Queries
 
@@ -1887,7 +1897,7 @@ curl http://localhost:8080/api/v1/users
 
 xolu follows semantic versioning: `MAJOR.MINOR.PATCH`. During the `0.x`
 series, minor versions may include breaking changes to the database format
-or API. The current version is `0.28.0`.
+or API. The current version is `0.30.23`.
 
 ### Database Format Stability
 

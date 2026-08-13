@@ -214,6 +214,78 @@ func tenantDBPath(baseDir string, tenantID tenant.TenantID) string {
 	return sl.TenantStorePath(baseDir, tenantID)
 }
 
+// replayAdaptedSchemas registers every currently-loaded JSON Schema as an
+// adapted table on the given store. Called once, right after a new
+// per-tenant store is created in storeForTenant's own slow path — see
+// registerAdaptedEverywhere's own doc comment for why this exists (T-168-
+// adjacent finding, XOT178, 2026-08-09: schema registration and per-tenant
+// store creation were two independent code paths with no coordination
+// between them at all).
+func (s *Server) replayAdaptedSchemas(ctx context.Context, store storage.Store) {
+	sqlStore, ok := store.(*storage.SQLiteStore)
+	if !ok {
+		return
+	}
+	for _, entity := range s.validator.LoadedEntities() {
+		schema, err := s.validator.GetSchema(entity)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("entity", entity).
+				Msg("replayAdaptedSchemas: GetSchema failed, skipping")
+			continue
+		}
+		if err := sqlStore.RegisterAdaptedEntity(ctx, entity, schema); err != nil {
+			s.logger.Error().Err(err).Str("entity", entity).
+				Msg("replayAdaptedSchemas: RegisterAdaptedEntity failed")
+		}
+	}
+}
+
+// registerAdaptedEverywhere is handleCreateSchema's own actual write path,
+// replacing a single sqlStore.RegisterAdaptedEntity(s.storage, ...) call
+// that only ever touched the default (tenantID 0) store instance.
+//
+// Real bug found and fixed here (XOT178, 2026-08-09, found while
+// investigating xoluman's own XM-4 report -- XOT175): storeForTenant
+// creates a SEPARATE *storage.SQLiteStore instance, with its own
+// independent AdaptedRegistry, for any non-zero tenant -- even in shared-
+// database mode, pointing at the identical underlying file. Schema
+// registration had no awareness of this at all: it always registered on
+// s.storage alone. Confirmed directly, not assumed: a server's "default"
+// tenant name auto-registers to numeric tenant ID 1, not 0 -- meaning
+// EVERY entity with a schema was silently blob, never adapted, for any
+// named-tenant deployment's own actual data operations, regardless of
+// whether a schema had ever been defined for it. This function closes
+// that gap from both directions: registers on every store that already
+// exists right now (s.storage plus every currently-cached tenant store),
+// and replayAdaptedSchemas above closes the other direction -- any tenant
+// store created AFTER this schema was registered gets it applied too, the
+// moment that store is created, before any caller ever sees it.
+func (s *Server) registerAdaptedEverywhere(ctx context.Context, entity string, schema map[string]interface{}) error {
+	if sqlStore, ok := s.storage.(*storage.SQLiteStore); ok {
+		if err := sqlStore.RegisterAdaptedEntity(ctx, entity, schema); err != nil {
+			return fmt.Errorf("registerAdaptedEverywhere: default store: %w", err)
+		}
+	}
+
+	var firstErr error
+	s.tenantStores.Range(func(key, value interface{}) bool {
+		store, ok := value.(storage.Store)
+		if !ok {
+			return true
+		}
+		sqlStore, ok := store.(*storage.SQLiteStore)
+		if !ok {
+			return true
+		}
+		if err := sqlStore.RegisterAdaptedEntity(ctx, entity, schema); err != nil && firstErr == nil {
+			tid, _ := key.(tenant.TenantID)
+			firstErr = fmt.Errorf("registerAdaptedEverywhere: tenant %d: %w", tid, err)
+		}
+		return true
+	})
+	return firstErr
+}
+
 func (s *Server) storeForTenant(tenantID tenant.TenantID) (storage.Store, error) {
 	if tenantID == 0 {
 		return s.storage, nil
@@ -277,6 +349,7 @@ func (s *Server) storeForTenant(tenantID tenant.TenantID) (storage.Store, error)
 		_ = store.Close()
 		return actual.(storage.Store), nil
 	}
+	s.replayAdaptedSchemas(context.Background(), store)
 	return store, nil
 }
 

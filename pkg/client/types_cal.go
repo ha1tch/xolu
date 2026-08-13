@@ -64,6 +64,38 @@ type CalOpeningsResult struct {
 	Openings  []CalOpening `json:"openings"`
 }
 
+// CalListBookingsResult is the response of CalListBookings, reusing
+// the existing CalBooking type (also returned by CalPropose/
+// CalConfirm) since the server's own handler shares the same
+// bookingFromCal wire-conversion helper for all three.
+type CalListBookingsResult struct {
+	Bookings []CalBooking `json:"bookings"`
+}
+
+// CalCreateCalendarRequest is the request body of CalCreateCalendar.
+// CalendarID is required; DefaultState/MatchPolicy default sensibly
+// server-side (StateBinding/ConsiderBinding) when left empty.
+type CalCreateCalendarRequest struct {
+	CalendarID   string `json:"calendar_id"`
+	EntityRef    uint64 `json:"entity_ref,omitempty"`
+	DefaultState string `json:"default_state,omitempty"`
+	MatchPolicy  string `json:"match_policy,omitempty"`
+}
+
+// CalendarSummary is one row of CalListCalendars, and the response of
+// CalCreateCalendar.
+type CalendarSummary struct {
+	CalendarID   string `json:"calendar_id"`
+	EntityRef    uint64 `json:"entity_ref"`
+	DefaultState string `json:"default_state"`
+	MatchPolicy  string `json:"match_policy"`
+}
+
+// CalListCalendarsResult is the response of CalListCalendars.
+type CalListCalendarsResult struct {
+	Calendars []CalendarSummary `json:"calendars"`
+}
+
 // CalProposeRequest creates a booking in the proposed state. BookingID is
 // client-generated identity (e.g. a ULID) and required; Mode defaults to
 // "exclusive", the only mode the occupancy engine honours.

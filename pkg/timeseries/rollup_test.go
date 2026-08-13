@@ -1181,3 +1181,121 @@ func TestDeleteTimeline_DeletingMarker(t *testing.T) {
 		}
 	})
 }
+
+// TestLatest_DeletingMarker_ConcurrentReader is the same fix, same
+// reasoning, as TestDeleteTimeline_DeletingMarker's own concurrent-
+// reader case above, applied to Latest specifically (2026-08-13).
+// Latest shares QueryRange's own exact shape (an initial s.reg.get()
+// only proves the timeline was defined when the call started, then an
+// unguarded scan follows) and so shared the exact same gap -- found
+// and fixed alongside QueryRange's own fix, but had no test coverage
+// of any kind for this until now; this is genuinely new coverage, not
+// a copy proving an already-tested path.
+func TestLatest_DeletingMarker_ConcurrentReader(t *testing.T) {
+	s := rollupStore(t, true)
+	defineTimelines(t, s, 1)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 50; i++ {
+		if err := s.Append(context.Background(), Event{
+			Timeline: 1, Dims: []uint64{0},
+			Time: base.Add(time.Duration(i) * time.Second), Nums: []float64{float64(i)},
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var sawEmptyDefined int32
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg, ok := s.reg.get(1)
+			if !ok {
+				continue
+			}
+			_ = cfg
+			res, err := s.Latest(context.Background(), LatestQuery{Timeline: 1, Dims: []uint64{0}, N: 100})
+			if err == nil && len(res) == 0 {
+				atomic.StoreInt32(&sawEmptyDefined, 1)
+				return
+			}
+		}
+	}()
+
+	time.Sleep(2 * time.Millisecond)
+	if err := s.DeleteTimeline(context.Background(), 1); err != nil {
+		t.Fatalf("DeleteTimeline: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+
+	if atomic.LoadInt32(&sawEmptyDefined) == 1 {
+		t.Error("Latest: reader observed a defined-but-empty timeline during delete — marker did not fence the read")
+	}
+}
+
+// TestAggregate_DeletingMarker_ConcurrentReader is the same fix, same
+// reasoning, applied to Aggregate specifically (2026-08-13). Same
+// history as TestLatest_DeletingMarker_ConcurrentReader above -- found
+// and fixed alongside QueryRange's own fix, no prior test coverage at
+// all for this combination.
+func TestAggregate_DeletingMarker_ConcurrentReader(t *testing.T) {
+	s := rollupStore(t, true)
+	defineTimelines(t, s, 1)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 50; i++ {
+		if err := s.Append(context.Background(), Event{
+			Timeline: 1, Dims: []uint64{0},
+			Time: base.Add(time.Duration(i) * time.Second), Nums: []float64{float64(i)},
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var sawEmptyDefined int32
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg, ok := s.reg.get(1)
+			if !ok {
+				continue
+			}
+			_ = cfg
+			res, err := s.Aggregate(context.Background(), AggregateQuery{
+				Timeline: 1, Dims: []uint64{0},
+				From: base.Add(-time.Hour), To: base.Add(time.Hour),
+				Function: "count",
+			})
+			if err == nil && len(res) == 0 {
+				atomic.StoreInt32(&sawEmptyDefined, 1)
+				return
+			}
+		}
+	}()
+
+	time.Sleep(2 * time.Millisecond)
+	if err := s.DeleteTimeline(context.Background(), 1); err != nil {
+		t.Fatalf("DeleteTimeline: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+
+	if atomic.LoadInt32(&sawEmptyDefined) == 1 {
+		t.Error("Aggregate: reader observed a defined-but-empty timeline during delete — marker did not fence the read")
+	}
+}

@@ -143,6 +143,29 @@ _ID_ALT = r"(?:T-|XOT)\d+"
 ROW_T_RE = re.compile(r"^\|\s*(" + _ID_ALT + r")\s*\|[^|]*\|\s*([a-z0-9-]+)\s*\|", re.M)
 
 
+# Found 2026-08-09 (v0.30.2 release): _ID_ALT above already matched
+# both id formats correctly, but blockers_by_wave's own sort key
+# (t.split("-")[1]) still assumed every id has a hyphen -- true for
+# "T-136", false for "XOT176" (no hyphen at all), so .split("-")
+# returns a single-element list and [1] raises IndexError the moment
+# any XOT-prefixed id appears in a wave's own blocker set. This is
+# register.py's own _id_num, duplicated here for the same reason
+# _ID_ALT is duplicated rather than imported: this is a standalone
+# script like every other tool in this directory.
+def _id_num(tid: str) -> int:
+    """The numeric portion of an id, old ("T-NNN") or new ("XOTNNN")
+    format -- the two prefixes differ in length (2 chars vs. 3, and
+    only one carries a hyphen), so a fixed-offset slice like the old
+    t[2:] is wrong for one of them. Raises ValueError on anything
+    matching neither shape, rather than silently returning a wrong
+    number."""
+    if tid.startswith("T-"):
+        return int(tid[2:])
+    if tid.startswith("XOT"):
+        return int(tid[3:])
+    raise ValueError(f"unrecognized id format: {tid!r}")
+
+
 def debt_by_wave(full_text: str) -> dict[str, list[str]]:
     """Open register items (docs/TRACKING.md's own status table),
     grouped by wave via WAVE_THEMES, excluding anything that's already
@@ -248,7 +271,7 @@ def blockers_by_wave(full_text: str, waves: list[dict]) -> dict[str, list[tuple[
     for w in waves:
         wave_scope = set(w["item_tnums"]) | set(debt.get(w["id"], []))
         by_blocker: dict[str, list[str]] = {}
-        for item in sorted(wave_scope, key=lambda t: int(t.split("-")[1])):
+        for item in sorted(wave_scope, key=_id_num):
             blocker = after_field.get(item)
             if blocker:
                 by_blocker.setdefault(blocker, []).append(item)

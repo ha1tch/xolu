@@ -2,6 +2,27 @@
 # golangci-lint must be built with a Go toolchain >= the go.mod target, so
 # bump the go directive, the linter pin below, and the Dockerfile base image
 # together.
+#
+# -short on the test step (2026-08-07): without it, this step silently ran
+# the FULL suite -- every stress test, every "_Benchmark"-named test that
+# also gates on testing.Short() -- on every single push and PR, despite this
+# file's own header calling itself "quick tier, unit tests." Neither
+# release.yml nor cross-build.yml run any tests at all, so this was the only
+# place `go test` ran anywhere in CI, and the -short gap meant there was no
+# actual quick/full split in practice. Stress tests stay where this
+# project's own testing discipline already puts them: release verification
+# and local runs (`make test --full`, scripts/release.py's own test step),
+# not every PR.
+#
+# critrepro split into its own job, same day: it isn't a correctness check
+# like go test -- it exists specifically because go test's own -count
+# harness turned out to be an unreliable instrument for a real class of bug
+# (T-168). Keeping it as a distinct job gives it its own visible pass/fail
+# in the PR checks instead of being buried as the last step of a "test" job
+# log, and lets it be re-run on its own without re-running build+vet+
+# c04dcheck+test to get back to it. needs: test preserves the original
+# "don't bother if the base suite already failed" behaviour, now expressed
+# as a job dependency instead of step order.
 
 name: ci
 
@@ -25,7 +46,18 @@ jobs:
         run: |
           cd tools/c04dcheck && go test ./... -count=1 && go build -o /tmp/c04dcheck . && cd ../..
           /tmp/c04dcheck ./...
-      - run: go test ./... -count=1
+      - run: go test ./... -short -count=1
+
+  critrepro:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: critrepro (T-168) -- critical scenarios not trusted to go test's own -count harness
+        run: go run ./cmd/critrepro -n 100
 
   lint:
     runs-on: ubuntu-latest

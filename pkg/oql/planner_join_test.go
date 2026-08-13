@@ -21,8 +21,16 @@ type mockJoinStore struct {
 	adaptedEntities map[string]bool // entity → is adapted
 	tableNames      map[string]string
 	columnInfos     map[string]map[string]string // entity → field → colName
-	queryResults    []map[string]interface{}
-	queryErr        error
+	// decimalCols is entity → field → scale, for AdaptedColumnInfo's
+	// own isDecimal/scale return values. XM-7b (2026-08-12): this mock
+	// always hardcoded isDecimal=false before this field existed --
+	// structurally, no test using it could ever have exercised decimal
+	// handling in the JOIN generator at all, the same shape of gap
+	// that let the bug ship. nil/absent is the pre-existing behaviour
+	// (not decimal), matching every test that doesn't opt in.
+	decimalCols  map[string]map[string]int
+	queryResults []map[string]interface{}
+	queryErr     error
 }
 
 func (m *mockJoinStore) Capabilities() storage.QueryCapabilities {
@@ -49,6 +57,11 @@ func (m *mockJoinStore) AdaptedTableName(entity string) (string, bool) {
 func (m *mockJoinStore) AdaptedColumnInfo(entity, field string) (colName string, scale int, isDecimal bool, ok bool) {
 	if cols, exists := m.columnInfos[entity]; exists {
 		if col, found := cols[field]; found {
+			if entityScales, ok2 := m.decimalCols[entity]; ok2 {
+				if s, ok3 := entityScales[field]; ok3 {
+					return col, s, true, true
+				}
+			}
 			return col, 0, false, true
 		}
 	}

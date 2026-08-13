@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -335,6 +336,29 @@ func dispatchCollapsed(ctx context.Context, db *sql.DB, cache *dxp.MemCache,
 	var wg sync.WaitGroup
 	var ownerStore *dxp.SQLStore // the one store whose Commit touches the real Tx — i==0, captured for the barrier below
 
+	// Per-write-target locks (T-168, corrected 2026-08-05 after the
+	// first attempt fixed dispatchPhased only -- this test's own def
+	// (5 bal legs, single tenant, all-SQL) is CollapseEligible &&
+	// EngineHomogeneous, so it never went through dispatchPhased at
+	// all; confirmed directly by tracing the actual routing condition
+	// in dispatchDxpTxnCore before writing this, not assumed from the
+	// def's own "pattern" field, which does not determine collapse
+	// eligibility). All five participants here share ONE *sql.Tx, not
+	// five independent ones -- but the same race applies: each
+	// goroutine still calls Execute (and therefore bal's own
+	// executionInstant) independently, and *sql.Tx's own concurrency
+	// safety guarantees nothing about the ORDER concurrent statements
+	// against the same transaction are actually processed in. See
+	// dxp.Claim.WriteTargets's own doc comment for the full mechanism.
+	targetLocks := map[string]*sync.Mutex{}
+	for _, d := range reserved {
+		for _, target := range writeTargets(d.Claim) {
+			if _, ok := targetLocks[target]; !ok {
+				targetLocks[target] = &sync.Mutex{}
+			}
+		}
+	}
+
 	// Writing to results[i] here needs no mutex: each goroutine
 	// touches only its own index, and wg.Wait() below establishes
 	// happens-before for every read of results and ownerStore that
@@ -343,6 +367,19 @@ func dispatchCollapsed(ctx context.Context, db *sql.DB, cache *dxp.MemCache,
 		wg.Add(1)
 		go func(i int, d dxpReservedParticipant) {
 			defer wg.Done()
+
+			// Locked from immediately before Execute (where a
+			// participant's own write-ordering-sensitive timestamp
+			// gets generated) through Execute's own return -- not
+			// through a per-goroutine commit, since this path has
+			// none; the one real commit happens once, later, after
+			// every goroutine here has already finished. Sorted for
+			// the same deadlock-avoidance reason as dispatchPhased.
+			targets := sortedUniqueTargets(writeTargets(d.Claim))
+			for _, t := range targets {
+				targetLocks[t].Lock()
+			}
+
 			var store *dxp.SQLStore
 			if i == 0 {
 				store = dxp.NewSQLStore(sharedTx)
@@ -352,6 +389,10 @@ func dispatchCollapsed(ctx context.Context, db *sql.DB, cache *dxp.MemCache,
 			}
 			if _, execErr := d.P.Execute(ctx, store, d.Claim); execErr != nil {
 				results[i] = executed{spec: d.Spec, err: execErr}
+			}
+
+			for _, t := range targets {
+				targetLocks[t].Unlock()
 			}
 		}(i, d)
 	}
@@ -495,10 +536,44 @@ func dispatchPhased(ctx context.Context, db *sql.DB, pebbleDB *pebble.DB, locDB 
 	results := make([]executed, len(reserved))
 	var wg sync.WaitGroup
 
+	// Per-write-target locks (T-168): two participants that write to
+	// the same underlying account/resource must be serialized against
+	// each other, not merely reserved-conflict-checked. Built
+	// single-threaded, entirely before any goroutine is spawned below
+	// -- no map-protecting mutex needed, since nothing else touches
+	// targetLocks until every entry already exists.
+	targetLocks := map[string]*sync.Mutex{}
+	for _, d := range reserved {
+		for _, target := range writeTargets(d.Claim) {
+			if _, ok := targetLocks[target]; !ok {
+				targetLocks[target] = &sync.Mutex{}
+			}
+		}
+	}
+
 	for i, d := range reserved {
 		wg.Add(1)
 		go func(i int, d dxpReservedParticipant) {
 			defer wg.Done()
+
+			// Locked from here -- immediately before Execute, where a
+			// participant's own write-ordering-sensitive timestamp (if
+			// it has one; bal's own executionInstant is the case this
+			// exists for) gets generated -- through Commit/Abort below.
+			// Sorted so two participants whose target sets overlap but
+			// aren't identical (e.g. A writes {x,y}, B writes {y,z})
+			// always acquire in the same global order, never a
+			// circular wait. Established before any commit happens,
+			// not a retry after a rejected one.
+			targets := sortedUniqueTargets(writeTargets(d.Claim))
+			for _, t := range targets {
+				targetLocks[t].Lock()
+			}
+			defer func() {
+				for _, t := range targets {
+					targetLocks[t].Unlock()
+				}
+			}()
 
 			var store dxp.ParticipantStore
 			switch dxpEngineOf[d.Spec.Primitive] {
@@ -603,4 +678,34 @@ func dispatchPhased(ctx context.Context, db *sql.DB, pebbleDB *pebble.DB, locDB 
 	postCommitAll(ctx, reserved, logger)
 
 	return dxpDispatchResult{Status: "committed", CommittedThrough: committedThrough}, nil
+}
+
+// writeTargets returns the set of identifiers a participant's Execute
+// will actually write to -- c.WriteTargets if the adapter populated
+// it, falling back to []string{c.Resource} otherwise. See
+// dxp.Claim.WriteTargets's own doc comment for the full story (T-168).
+func writeTargets(c dxp.Claim) []string {
+	if len(c.WriteTargets) > 0 {
+		return c.WriteTargets
+	}
+	return []string{c.Resource}
+}
+
+// sortedUniqueTargets sorts and deduplicates targets -- sorted so every
+// goroutine locking an overlapping-but-not-identical target set always
+// acquires in the same global order (never a circular wait); deduped
+// so a participant whose own WriteTargets happens to repeat an entry
+// never double-locks (and later double-unlocks) the same mutex.
+func sortedUniqueTargets(targets []string) []string {
+	sorted := append([]string(nil), targets...)
+	sort.Strings(sorted)
+	out := sorted[:0]
+	var prev string
+	for i, t := range sorted {
+		if i == 0 || t != prev {
+			out = append(out, t)
+			prev = t
+		}
+	}
+	return out
 }

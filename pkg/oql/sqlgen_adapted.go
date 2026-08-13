@@ -96,9 +96,19 @@ func GenerateAdaptedSQL(
 	// -- WHERE --
 	var whereParts []string
 
-	if tenantID != "" {
-		whereParts = append(whereParts, fmt.Sprintf("tenant_id = %s", addArg(tenantID)))
-	}
+	// XOT186 (2026-08-13): adapted tables are isolated by their own
+	// per-tenant table name (t<XXXX>_ndata_<entity> -- confirmed
+	// directly against SQLiteStorageDialect.CreateTableSQL's own
+	// comment, "no tenant_id column needed"), never by a tenant_id
+	// column at all. This function's own tenantID parameter used to
+	// emit a "tenant_id = ?" predicate here regardless -- always wrong
+	// for this function's entire use case (adapted tables only), and
+	// silently corrupted every GROUP BY/aggregate query on a small
+	// adapted entity: the failed SQL made execution fall through, but
+	// the Go-path aggregate fallback stayed incorrectly gated off by
+	// the plan still claiming this push-down had already handled it.
+	// No predicate needed here at all; the caller's own per-tenant
+	// table name is the isolation boundary already.
 
 	if stmt.Where != nil {
 		whereSQL, err := translateAdaptedWhere(stmt.Where, entity, store, &args, &argIdx, dialect)

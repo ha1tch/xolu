@@ -239,12 +239,12 @@ func TestParseAmount_ExactAndRefusals(t *testing.T) {
 	ok("0.000000000000000001", 18, 1)
 	ok("9223372036854775807", 0, 1<<63-1)
 
-	bad("12.345", 2)       // finer than scale
-	bad("1e3", 0)          // float notation smuggling
-	bad("0x10", 0)         // hex smuggling
-	bad("NaN", 2)          // float vocabulary
-	bad("1.0.0", 2)        // malformed
-	bad("", 2)             // empty
+	bad("12.345", 2)              // finer than scale
+	bad("1e3", 0)                 // float notation smuggling
+	bad("0x10", 0)                // hex smuggling
+	bad("NaN", 2)                 // float vocabulary
+	bad("1.0.0", 2)               // malformed
+	bad("", 2)                    // empty
 	bad("9223372036854775808", 0) // overflow
 
 	// Round trip through the canonical renderer.
@@ -270,5 +270,126 @@ func TestAccountKey_CodecFullRange(t *testing.T) {
 	}
 	if uint64(MaxAccountKey) != 0xFFFFFFFF {
 		t.Fatal("ceiling does not fit uint32 exactly")
+	}
+}
+
+// ─── ListAccounts (XM-2, XOT172) ────────────────────────────────────────────
+
+func TestListAccounts_HappyPathAndOrdering(t *testing.T) {
+	s := testStore(t)
+	ceiling := int64(10000)
+	mustDefine(t, s, AccountDef{ID: "widget", Unit: "widget", Scale: 0, Postable: true})
+	mustDefine(t, s, AccountDef{ID: "cash:eur", Unit: "EUR", Scale: 2, Floor: -5000, Ceiling: &ceiling, Postable: true})
+	mustDefine(t, s, AccountDef{ID: "cash:usd", Unit: "USD", Scale: 2, Postable: false})
+
+	if err := s.Transfer(context.Background(), "t1", "cash:eur", "widget", 100, "", time.Now()); err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+
+	accts, err := s.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if len(accts) != 3 {
+		t.Fatalf("want 3 accounts, got %d: %+v", len(accts), accts)
+	}
+	// Ordered by account_id: "cash:eur" < "cash:usd" < "widget".
+	wantOrder := []string{"cash:eur", "cash:usd", "widget"}
+	for i, id := range wantOrder {
+		if accts[i].AccountID != id {
+			t.Errorf("position %d: want %q, got %q (order: %+v)", i, id, accts[i].AccountID, accts)
+		}
+	}
+
+	eur := accts[0]
+	if eur.Unit != "EUR" || eur.Scale != 2 || eur.Floor != -5000 {
+		t.Errorf("cash:eur definition: unexpected %+v", eur)
+	}
+	if eur.Ceiling == nil || *eur.Ceiling != 10000 {
+		t.Errorf("cash:eur ceiling: want 10000, got %v", eur.Ceiling)
+	}
+	if eur.Value != -100 {
+		t.Errorf("cash:eur balance after transferring out 100: want -100, got %d", eur.Value)
+	}
+
+	widget := accts[2]
+	if widget.Value != 100 {
+		t.Errorf("widget balance after receiving 100: want 100, got %d", widget.Value)
+	}
+
+	usd := accts[1]
+	if usd.Postable {
+		t.Error("cash:usd was defined non-postable, ListAccounts reports it postable")
+	}
+	if usd.Ceiling != nil {
+		t.Errorf("cash:usd defined with no ceiling, got %v", usd.Ceiling)
+	}
+}
+
+func TestListAccounts_EmptyTenantReturnsEmptyNotError(t *testing.T) {
+	s := testStore(t)
+	accts, err := s.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts on empty tenant: %v", err)
+	}
+	if len(accts) != 0 {
+		t.Errorf("want empty, got %+v", accts)
+	}
+}
+
+// TestListAccounts_TenantIsolation proves isolation directly at the
+// storage layer for bal's own mechanism (per-tenant table-name
+// prefixing, via tenant.TenantID.TablePrefix() -- structurally
+// different from cal's shared-table-plus-tenant_id-column approach,
+// and from oql's own per-tenant adapted table naming). Written
+// directly off XOT180's own finding: the presence of a
+// tenant-isolating mechanism in code is not evidence a test proves it
+// actually isolates -- prefix-based isolation looks safer by
+// construction than a predicate that could be forgotten, but "looks
+// safer" is still an assumption until checked.
+func TestListAccounts_TenantIsolation(t *testing.T) {
+	tmp, err := os.MkdirTemp("", "bal-multi-tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	db, err := sql.Open("sqlite", tmp+"/bal.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	sA := NewStore(db, 1)
+	sB := NewStore(db, 2)
+	if err := sA.Init(context.Background()); err != nil {
+		t.Fatalf("tenant 1 Init: %v", err)
+	}
+	if err := sB.Init(context.Background()); err != nil {
+		t.Fatalf("tenant 2 Init: %v", err)
+	}
+
+	mustDefine(t, sA, AccountDef{ID: "shared-name", Unit: "EUR", Scale: 2})
+	mustDefine(t, sB, AccountDef{ID: "shared-name", Unit: "USD", Scale: 2})
+	mustDefine(t, sB, AccountDef{ID: "tenant-b-only", Unit: "USD", Scale: 2})
+
+	acctsA, err := sA.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("tenant 1 ListAccounts: %v", err)
+	}
+	if len(acctsA) != 1 || acctsA[0].AccountID != "shared-name" || acctsA[0].Unit != "EUR" {
+		t.Fatalf("tenant isolation violated: tenant 1 wants exactly its own EUR account, got %+v", acctsA)
+	}
+
+	acctsB, err := sB.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("tenant 2 ListAccounts: %v", err)
+	}
+	if len(acctsB) != 2 {
+		t.Fatalf("tenant isolation violated: tenant 2 wants exactly its own 2 accounts, got %+v", acctsB)
+	}
+	for _, a := range acctsB {
+		if a.AccountID == "shared-name" && a.Unit != "USD" {
+			t.Fatalf("tenant isolation violated: tenant 2's own shared-name account shows tenant 1's currency: %+v", a)
+		}
 	}
 }

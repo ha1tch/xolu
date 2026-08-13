@@ -470,7 +470,36 @@ func PartitionData(spec *AdaptedTableSpec, data map[string]interface{}) (columnV
 				columnValues[i] = int(ref.ID)
 			}
 		} else {
-			columnValues[i] = data[col.JSONField]
+			// XM-6 (2026-08-12): array/object-typed columns (not REF --
+			// REF's own object shape is handled by the branch above)
+			// must be JSON-encoded before storage. ReassembleData, this
+			// function's own documented inverse, already expects and
+			// json.Unmarshal's exactly this shape on the read side (see
+			// its own "Deserialise JSON-stored columns" branch) -- this
+			// write side simply never encoded to match, a bug dormant
+			// until XOT178 made adaptation actually apply to named
+			// tenants for the first time; blob storage's own plain-JSON
+			// writes never needed this at all, which is almost
+			// certainly why it went uncaught this long. A raw Go
+			// map[string]interface{}/[]interface{} handed directly to
+			// the SQL driver as a bind parameter is rejected outright
+			// ("unsupported type map[string]interface {}"), not
+			// silently mishandled -- confirmed directly against
+			// xoluman's own reported error text.
+			v := data[col.JSONField]
+			if v != nil && (col.Type == "array" || (col.Type == "object" && col.Format != models.SchemaFormatREF)) {
+				encoded, err := json.Marshal(v)
+				if err != nil {
+					// Leave the raw value in place on encode failure --
+					// the SQL driver's own rejection is a clearer signal
+					// than silently storing a partial/wrong encoding.
+					columnValues[i] = v
+				} else {
+					columnValues[i] = string(encoded)
+				}
+			} else {
+				columnValues[i] = v
+			}
 		}
 	}
 

@@ -110,10 +110,23 @@ func GenerateAggregateSQL(
 	// FROM + WHERE
 	var whereParts []string
 
-	// Tenant filter (only when tenantID is non-empty, matching existing push-down behaviour)
-	if tenantID != "" {
-		whereParts = append(whereParts, fmt.Sprintf("tenant_id = %s", addArg(tenantID)))
-	}
+	// XOT186 (2026-08-13): adapted tables are isolated by their own
+	// per-tenant table name (t<XXXX>_ndata_<entity> -- confirmed
+	// directly against SQLiteStorageDialect.CreateTableSQL's own
+	// comment, "no tenant_id column needed"), never by a tenant_id
+	// column at all. This function's own tenantID parameter used to
+	// emit a "tenant_id = ?" predicate here regardless -- always wrong
+	// for this function's entire use case (adapted tables only, per
+	// GenerateAggregateSQL's own doc comment), and the actual root
+	// cause of the entire bug filed as XOT186: the generated SQL
+	// failed outright ("no such column: tenant_id"), execution fell
+	// through, and the Go-path aggregate fallback stayed incorrectly
+	// gated off by the plan still claiming this push-down had already
+	// handled it -- every GROUP BY/aggregate query against a small
+	// adapted entity silently returned raw, ungrouped rows with the
+	// aggregate column null. No predicate needed here at all; the
+	// caller's own per-tenant table name is the isolation boundary
+	// already.
 
 	if stmt.Where != nil {
 		whereSQL, err := translateAdaptedWhere(stmt.Where, entity, store, &args, &argIdx, dialect)
@@ -497,9 +510,15 @@ var pow10Table = [19]int64{
 }
 
 // filterRecordsByExpr applies a WHERE/HAVING expression to already-aggregated
-// records using the Aggregator's evalCondition (which handles aggregate aliases).
-func filterRecordsByExpr(records []map[string]interface{}, expr ast.Expression) []map[string]interface{} {
+// records using the Aggregator's evalCondition (which handles aggregate
+// aliases). columns is the SELECT list the records were produced from --
+// used to resolve a HAVING expression like "SUM(val) > 50" against a row
+// whose only key for that value is its own declared alias ("total"), not
+// the raw expression string (see Aggregator.SetExprAliases's own doc
+// comment for why this distinction matters).
+func filterRecordsByExpr(records []map[string]interface{}, expr ast.Expression, columns []ast.SelectColumn) []map[string]interface{} {
 	agg := NewAggregator()
+	agg.SetExprAliases(columns)
 	var result []map[string]interface{}
 	for _, rec := range records {
 		if agg.EvalCondition(rec, expr) {

@@ -528,6 +528,67 @@ func TestDxpTxnAPI_Adversarial_CrossTenantIsolation(t *testing.T) {
 	}
 }
 
+// TestDxpTxnAPI_Adversarial_ListEndpointsTenantIsolation is the XOT180
+// general-sweep check (2026-08-12): the existing
+// CrossTenantIsolation test above proves txn instantiation can't
+// reference another tenant's def, but never touches handleDxpDefList
+// or handleDxpTxnList at all -- the actual list (GET) endpoints.
+// Both queries look correctly tenant-scoped by inspection
+// ("WHERE tenant_id = ?"), but "looks correct in the code" is exactly
+// the standard that let XOT173 ship. Proven directly here instead:
+// two tenants, each with its own def and txn, confirm neither
+// tenant's own list result contains the other's.
+func TestDxpTxnAPI_Adversarial_ListEndpointsTenantIsolation(t *testing.T) {
+	env := newMetaServer(t)
+	defaultURL := dxpURL(env, "/def")
+	otherURL := fmt.Sprintf("%s/api/v2/tenant/other-tenant/dxp", env.ts.URL)
+
+	_, defRespDefault := doJSONRequest(t, "POST", defaultURL, simplePaymentDef())
+	defIDDefault := defRespDefault["id"]
+	_, defRespOther := doJSONRequest(t, "POST", otherURL+"/def", simplePaymentDef())
+	defIDOther := defRespOther["id"]
+
+	txn := map[string]interface{}{"bindings": map[string]interface{}{"amount": "50"}}
+	txnDefault := map[string]interface{}{"def_id": defIDDefault, "bindings": txn["bindings"]}
+	txnOther := map[string]interface{}{"def_id": defIDOther, "bindings": txn["bindings"]}
+	status, txnRespDefault := doJSONRequest(t, "POST", dxpURL(env, "/txn"), txnDefault)
+	if status != http.StatusCreated {
+		t.Fatalf("default tenant txn: want 201, got %d %v", status, txnRespDefault)
+	}
+	status, txnRespOther := doJSONRequest(t, "POST", otherURL+"/txn", txnOther)
+	if status != http.StatusCreated {
+		t.Fatalf("other-tenant txn: want 201, got %d %v", status, txnRespOther)
+	}
+
+	// GET /dxp/def (list) -- compare by count, not id or name: each
+	// tenant has its own independent id sequence (both defs here are
+	// genuinely id=1, name="simple_payment" in their own tenant --
+	// exactly why referencing another tenant's numeric id must be
+	// rejected, per the CrossTenantIsolation test above). If isolation
+	// were broken, this list would show 2 entries, not 1.
+	status, defListDefault := doJSONRequest(t, "GET", defaultURL, nil)
+	if status != http.StatusOK {
+		t.Fatalf("default tenant def list: want 200, got %d %v", status, defListDefault)
+	}
+	defs, _ := defListDefault["definitions"].([]interface{})
+	if len(defs) != 1 {
+		t.Fatalf("tenant isolation violated: default tenant's own def list want exactly 1, got %d: %v", len(defs), defs)
+	}
+	if defs[0].(map[string]interface{})["id"] != defIDDefault {
+		t.Errorf("default tenant's own def list: want its own def's id %v, got %v", defIDDefault, defs[0])
+	}
+
+	// GET /dxp/txn (list) -- same reasoning: compare by count.
+	status, txnListDefault := doJSONRequest(t, "GET", dxpURL(env, "/txn"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("default tenant txn list: want 200, got %d %v", status, txnListDefault)
+	}
+	instances, _ := txnListDefault["instances"].([]interface{})
+	if len(instances) != 1 {
+		t.Fatalf("tenant isolation violated: default tenant's own txn list want exactly 1, got %d: %v", len(instances), instances)
+	}
+}
+
 // TestDxpTxnAPI_Adversarial_NestedAndArrayJsonplatePaths exercises path
 // shapes never touched by the earlier flat "$ref": "amount" tests —
 // nested object access and array indexing, both explicitly documented
@@ -540,8 +601,8 @@ func TestDxpTxnAPI_Adversarial_NestedAndArrayJsonplatePaths(t *testing.T) {
 		"participants": []map[string]interface{}{
 			{"id": "payment", "primitive": "bal", "op": "transfer",
 				"params": map[string]interface{}{
-					"from": map[string]interface{}{"$ref": "order.customer_acct"},
-					"to":   "~received",
+					"from":   map[string]interface{}{"$ref": "order.customer_acct"},
+					"to":     "~received",
 					"amount": map[string]interface{}{"$ref": "order.items[0].price"},
 				}},
 		},

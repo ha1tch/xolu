@@ -32,8 +32,10 @@ package server
 //     with XOLU-CAL007.
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -101,6 +103,10 @@ func (s *Server) setupV2CalRoutes(r chi.Router) {
 	r.Post("/cal/openings", s.handleCalOpenings)
 	r.Post("/cal/propose", s.handleCalPropose)
 	r.Post("/cal/confirm", s.handleCalConfirm)
+	r.Get("/cal/bookings", s.handleCalListBookings)
+	r.Get("/cal/bookings/by-bearer", s.handleCalListBookingsForBearer)
+	r.Post("/cal/calendars", s.handleCalCreateCalendar)
+	r.Get("/cal/calendars", s.handleCalListCalendars)
 }
 
 // classifyCalError maps a cal-layer error to an HTTP status and an xolu
@@ -126,7 +132,7 @@ func classifyCalError(err error) (status int, code xoluerr.Code, matched bool) {
 	case errors.Is(err, cal.ErrModeNotSupported):
 		return http.StatusBadRequest, xoluerr.ErrCalModeNotSupported, true
 	case errors.Is(err, cal.ErrCalendarExists):
-		return http.StatusConflict, xoluerr.ErrCalCalendarNotFound, true
+		return http.StatusConflict, xoluerr.ErrCalCalendarExists, true
 	}
 	return 0, "", false
 }
@@ -207,6 +213,203 @@ func (s *Server) handleCalCheck(w http.ResponseWriter, r *http.Request) {
 		"feasible":         res.Feasible,
 		"nearest_openings": openings,
 	})
+}
+
+// handleCalCreateCalendar creates a new calendar on the tenant --
+// XM-8, xoluman's own report: no route anywhere in pkg/server created
+// a calendar at all, despite Manager.CreateCalendar already existing
+// and working correctly (confirmed directly -- this session's own
+// integration tests use it constantly, via a test-only facade never
+// exposed on the wire). This was the actual root blocker behind
+// XM-2's own cal piece: CalListCalendars/CalListBookings both work
+// correctly, but had nothing to list, since nothing could be created
+// through the public API to list in the first place.
+//
+// CalendarID is required; DefaultState/MatchPolicy default sensibly
+// (StateBinding/ConsiderBinding) when omitted, matching
+// SQLiteBookingSource.CreateCalendar's own established defaults.
+//
+//	POST /api/v2/.../cal/calendars
+func (s *Server) handleCalCreateCalendar(w http.ResponseWriter, r *http.Request) {
+	lc := s.calGuard(w, r)
+	if lc == nil {
+		return
+	}
+
+	var req struct {
+		CalendarID   string `json:"calendar_id"`
+		EntityRef    uint64 `json:"entity_ref,omitempty"`
+		DefaultState string `json:"default_state,omitempty"`
+		MatchPolicy  string `json:"match_policy,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"invalid request body: "+err.Error())
+		return
+	}
+	if req.CalendarID == "" {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"calendar_id is required")
+		return
+	}
+
+	tenantID := getTenantIDNumeric(r.Context())
+	created, err := s.calMgr.CreateCalendar(tenantID, cal.Calendar{
+		CalendarID:   req.CalendarID,
+		EntityRef:    req.EntityRef,
+		DefaultState: cal.State(req.DefaultState),
+		MatchPolicy:  cal.MatchConsiders(req.MatchPolicy),
+	})
+	if err != nil {
+		if status, code, matched := classifyCalError(err); matched {
+			s.writeError(w, status, code, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
+		return
+	}
+
+	s.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"calendar_id":   created.CalendarID,
+		"entity_ref":    created.EntityRef,
+		"default_state": string(created.DefaultState),
+		"match_policy":  string(created.MatchPolicy),
+	})
+}
+
+// handleCalListCalendars returns every calendar defined on the tenant
+// -- confirmed missing during the XOT180 audit (2026-08-11), not
+// hypothetical: xoluman's own original XM-2 report flagged, as a
+// secondary and explicitly unconfirmed observation, that no
+// calendarID provisioning step was visible from the client side.
+// Checked directly here: the storage layer's own Calendars() method
+// already existed and was already tenant-scoped, but was never called
+// from anywhere in pkg/server -- genuinely unreachable, not merely
+// undocumented. Any UI building an occupancy grid needs to know which
+// calendars exist before it can ask what's booked on any one of them.
+//
+//	GET /api/v2/.../cal/calendars
+func (s *Server) handleCalListCalendars(w http.ResponseWriter, r *http.Request) {
+	lc := s.calGuard(w, r)
+	if lc == nil {
+		return
+	}
+	tenantID := getTenantIDNumeric(r.Context())
+	src := s.calMgr.SourceFor(tenantID)
+
+	cals := src.Calendars()
+	type calendarWire struct {
+		CalendarID   string `json:"calendar_id"`
+		EntityRef    uint64 `json:"entity_ref"`
+		DefaultState string `json:"default_state"`
+		MatchPolicy  string `json:"match_policy"`
+	}
+	out := make([]calendarWire, 0, len(cals))
+	for _, c := range cals {
+		out = append(out, calendarWire{
+			CalendarID:   c.CalendarID,
+			EntityRef:    c.EntityRef,
+			DefaultState: string(c.DefaultState),
+			MatchPolicy:  string(c.MatchPolicy),
+		})
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"calendars": out})
+}
+
+// handleCalListBookingsForBearer returns every live (proposed,
+// binding, or honoured) booking held by bearer across every calendar
+// on the tenant -- the cross-calendar query named explicitly in
+// XOT180's own filing ("what bookings does bearer X hold across
+// every calendar") as an example of the gap CalListBookings's own
+// per-calendar shape leaves open.
+//
+//	GET /api/v2/.../cal/bookings/by-bearer?bearer={uint64}
+func (s *Server) handleCalListBookingsForBearer(w http.ResponseWriter, r *http.Request) {
+	lc := s.calGuard(w, r)
+	if lc == nil {
+		return
+	}
+
+	bearerStr := r.URL.Query().Get("bearer")
+	if bearerStr == "" {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"bearer is required")
+		return
+	}
+	bearer, err := strconv.ParseUint(bearerStr, 10, 64)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"invalid bearer: "+err.Error())
+		return
+	}
+
+	tenantID := getTenantIDNumeric(r.Context())
+	src := s.calMgr.SourceFor(tenantID)
+
+	bookings := src.BookingsForBearer(bearer)
+	out := make([]bookingWire, 0, len(bookings))
+	for _, b := range bookings {
+		out = append(out, bookingFromCal(b))
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"bookings": out})
+}
+
+// ─── GET /cal/bookings ──────────────────────────────────────────────────────
+
+// handleCalListBookings returns every live booking (proposed, binding,
+// or honoured) on a calendar whose own span overlaps the requested
+// [from, to) window -- xoluman's own XM-2 report: CalOpenings returns
+// free slots, the inverse of what an occupancy grid needs; this is
+// the missing "what's already booked" read. GET, matching xoluman's
+// own proposed shape (a read-only query, unlike the POST-only
+// surface every other cal handler uses).
+//
+//	GET /api/v2/.../cal/bookings?calendar_id={id}&from={RFC3339}&to={RFC3339}
+func (s *Server) handleCalListBookings(w http.ResponseWriter, r *http.Request) {
+	lc := s.calGuard(w, r)
+	if lc == nil {
+		return
+	}
+
+	q := r.URL.Query()
+	calendarID := q.Get("calendar_id")
+	if calendarID == "" {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalCalendarNotFound,
+			"calendar_id is required")
+		return
+	}
+	from, err := ot.Parse(q.Get("from"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"invalid from: "+err.Error())
+		return
+	}
+	to, err := ot.Parse(q.Get("to"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"invalid to: "+err.Error())
+		return
+	}
+	if !from.Before(to) {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCalInvalidSpan,
+			"from must be strictly before to")
+		return
+	}
+
+	tenantID := getTenantIDNumeric(r.Context())
+	src := s.calMgr.SourceFor(tenantID)
+	if _, ok := src.Calendar(calendarID); !ok {
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrCalCalendarNotFound,
+			"calendar not found: "+calendarID)
+		return
+	}
+
+	bookings := src.BookingsInRange(calendarID, from, to)
+	out := make([]bookingWire, 0, len(bookings))
+	for _, b := range bookings {
+		out = append(out, bookingFromCal(b))
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"bookings": out})
 }
 
 // ─── POST /cal/openings ────────────────────────────────────────────────────

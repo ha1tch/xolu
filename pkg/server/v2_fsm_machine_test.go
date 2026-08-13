@@ -184,6 +184,50 @@ func TestFSMMachine_ListWithFilters(t *testing.T) {
 	}
 }
 
+// TestFSMMachine_ListTenantIsolation is the XOT180 general-sweep
+// check (2026-08-12): handleFSMMachineList's own SQL looks correctly
+// tenant-scoped by inspection ("WHERE tenant_id = ?"), but "looks
+// correct in the code" is exactly the standard that let XOT173 ship.
+// Proven directly here instead: two tenants, each with their own
+// definition and machine, confirm neither tenant's own list result
+// reflects the other's -- compared by count, not by id or ref, since
+// each tenant has its own independent id sequence and both machines
+// here are deliberately given the same ref.
+func TestFSMMachine_ListTenantIsolation(t *testing.T) {
+	env := newV2Server(t)
+	otherURL := fmt.Sprintf("%s/api/v2/tenant/other-tenant/fsm", env.ts.URL)
+
+	defIDDefault := createAssetDef(t, env)
+	status, defRespOther := doJSONRequest(t, "POST", otherURL+"/def", assetLifecycleSpec())
+	if status != http.StatusCreated {
+		t.Fatalf("other-tenant def: want 201, got %d %v", status, defRespOther)
+	}
+	defIDOther := int64(defRespOther["id"].(float64))
+
+	status, machResp := doJSONRequest(t, "POST", fsmMachineURL(env, ""),
+		map[string]interface{}{"definition": defIDDefault, "ref": "asset:shared"})
+	if status != http.StatusCreated {
+		t.Fatalf("default tenant machine: want 201, got %d %v", status, machResp)
+	}
+	status, machRespOther := doJSONRequest(t, "POST", otherURL+"/machine",
+		map[string]interface{}{"definition": defIDOther, "ref": "asset:shared"})
+	if status != http.StatusCreated {
+		t.Fatalf("other-tenant machine: want 201, got %d %v", status, machRespOther)
+	}
+
+	status, listDefault := doJSONRequest(t, "GET", fsmMachineURL(env, ""), nil)
+	if status != http.StatusOK {
+		t.Fatalf("default tenant machine list: want 200, got %d %v", status, listDefault)
+	}
+	machines, _ := listDefault["machines"].([]interface{})
+	if len(machines) != 1 {
+		t.Fatalf("tenant isolation violated: default tenant's own machine list want exactly 1, got %d: %v", len(machines), machines)
+	}
+	if machines[0].(map[string]interface{})["id"] != float64(machResp["id"].(float64)) {
+		t.Errorf("default tenant's own machine list: want its own machine's id, got %v", machines[0])
+	}
+}
+
 // ─── State / vars / transitions / history ─────────────────────────────────────
 
 func TestFSMMachine_State(t *testing.T) {

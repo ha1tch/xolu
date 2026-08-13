@@ -73,6 +73,31 @@ type BalBalanceResult struct {
 	Version   int64  `json:"version"`
 }
 
+// BalAccountSummary is one row of BalListAccounts -- an account's own
+// definition joined with its current balance. Floor/Ceiling/Value are
+// decimal strings at the account's own Scale (@B04); Minor carries
+// the same balance as a raw int64 minor-unit value for exact
+// arithmetic without re-parsing the decimal string, matching
+// BalBalanceResult's own established shape. Ceiling is empty when the
+// account was defined with no ceiling.
+type BalAccountSummary struct {
+	AccountID string `json:"account_id"`
+	Unit      string `json:"unit"`
+	Scale     uint8  `json:"scale"`
+	Floor     string `json:"floor"`
+	Ceiling   string `json:"ceiling,omitempty"`
+	Postable  bool   `json:"postable"`
+	Policy    string `json:"policy"`
+	Value     string `json:"value"`
+	Minor     int64  `json:"minor"`
+	Version   int64  `json:"version"`
+}
+
+// BalListAccountsResult is the response of BalListAccounts.
+type BalListAccountsResult struct {
+	Accounts []BalAccountSummary `json:"accounts"`
+}
+
 // BalEntry is one journal entry as BalEntries returns it.
 type BalEntry struct {
 	EntryID         int64     `json:"entry_id"`
