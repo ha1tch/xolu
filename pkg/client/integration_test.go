@@ -792,6 +792,496 @@ func TestIntegration_TSReadSlice(t *testing.T) {
 	}
 }
 
+// TestIntegration_TSWriteFlow exercises TSAppend and TSBatchAppend
+// (XOT212, wave 15) against a real server -- the write-side gap
+// types_ts.go's own original header named explicitly as a follow-up.
+// Timeline provisioning and definition remain out of this item's own
+// scope, still done via raw seedJSON calls exactly as
+// TestIntegration_TSReadSlice already does; only the event writes
+// themselves go through the new typed methods.
+func TestIntegration_TSWriteFlow(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	seedJSON(t, env, "/api/v1/tenant/default/ts/provision", nil)
+	seedJSON(t, env, "/api/v1/tenant/default/ts/tl/def", map[string]interface{}{
+		"id": 1, "name": "cpu_usage", "dims": 1, "retention_days": 30,
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := env.c.TSAppend(ctx, client.TSEvent{
+		Timeline: 1, Dims: []uint64{7}, Time: now.Add(-time.Hour), Nums: []float64{1.5},
+	}); err != nil {
+		t.Fatalf("TSAppend: %v", err)
+	}
+
+	batch := []client.TSEvent{
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-30 * time.Minute), Nums: []float64{2.0}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now, Nums: []float64{2.5}},
+	}
+	batchRes, err := env.c.TSBatchAppend(ctx, batch)
+	if err != nil {
+		t.Fatalf("TSBatchAppend: %v", err)
+	}
+	if batchRes.Total != 2 || batchRes.Accepted != 2 || batchRes.Failed != 0 {
+		t.Fatalf("TSBatchAppend: want total=2 accepted=2 failed=0, got %+v", batchRes)
+	}
+
+	// All three events (one single-append, two batch) should now be
+	// readable through the ALREADY-verified read path -- proving the
+	// new write methods and the existing read methods agree on the
+	// same real data, not just that each returned 2xx in isolation.
+	sliced, err := env.c.TSQueryRange(ctx, client.TSQueryRangeRequest{
+		Timeline: 1, Dims: []uint64{7},
+		From: now.Add(-2 * time.Hour), To: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TSQueryRange: %v", err)
+	}
+	if len(sliced.Events) != 3 {
+		t.Fatalf("TSQueryRange after TSAppend+TSBatchAppend: want 3 events, got %d: %+v",
+			len(sliced.Events), sliced.Events)
+	}
+
+	// A malformed batch (dims count mismatch against the timeline's own
+	// definition) should refuse with a structured error, not a partial
+	// accept -- confirmed directly against pkg/timeseries's own
+	// AppendBatch before writing TSBatchAppendResult's own doc comment;
+	// this is that confirmation exercised for real.
+	_, err = env.c.TSBatchAppend(ctx, []client.TSEvent{
+		{Timeline: 1, Dims: []uint64{7, 8}, Time: now, Nums: []float64{9}},
+	})
+	if err == nil {
+		t.Errorf("TSBatchAppend with a dims mismatch: want a refusal, got success")
+	}
+}
+
+// TestIntegration_TSLifecycleAndSync exercises timeline lifecycle and
+// sync (XOT217, wave 16 Stage 3) against a real server -- provision,
+// define, sync toggle both directions, update (verified through the
+// already-covered TSGetTimeline as an independent read path, not just
+// trusting the write call's own response, and specifically confirming
+// Dims is truly unaffected by update, matching what
+// TSUpdateTimelineRequest's own doc comment claims), and delete.
+// Uses the real typed methods for setup throughout, not raw seedJSON
+// the way TestIntegration_TSWriteFlow still does (that test predates
+// this stage's own coverage).
+func TestIntegration_TSLifecycleAndSync(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	provisioned, err := env.c.TSProvision(ctx)
+	if err != nil {
+		t.Fatalf("TSProvision: %v", err)
+	}
+	if provisioned.Timeseries != "enabled" {
+		t.Fatalf("TSProvision: want timeseries=enabled, got %+v", provisioned)
+	}
+
+	tl, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 1, Name: "cpu_usage", Dims: 1, RetentionDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("TSDefineTimeline: %v", err)
+	}
+	if tl.ID != 1 || tl.Name != "cpu_usage" || tl.Dims != 1 {
+		t.Fatalf("TSDefineTimeline: got %+v", tl)
+	}
+
+	// Sync defaults to on (NoSync=false) -- confirmed directly, not
+	// assumed.
+	syncStatus, err := env.c.TSSyncGet(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSSyncGet: %v", err)
+	}
+	if syncStatus.NoSync {
+		t.Fatalf("TSSyncGet: want NoSync=false by default, got true: %+v", syncStatus)
+	}
+
+	off, err := env.c.TSSyncOff(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSSyncOff: %v", err)
+	}
+	if !off.NoSync {
+		t.Fatalf("TSSyncOff: want NoSync=true, got false: %+v", off)
+	}
+	on, err := env.c.TSSyncOn(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSSyncOn: %v", err)
+	}
+	if on.NoSync {
+		t.Fatalf("TSSyncOn: want NoSync=false, got true: %+v", on)
+	}
+
+	if _, err := env.c.TSUpdateTimeline(ctx, 1, client.TSUpdateTimelineRequest{
+		Name: "cpu_usage_renamed", RetentionDays: 60,
+	}); err != nil {
+		t.Fatalf("TSUpdateTimeline: %v", err)
+	}
+	afterUpdate, err := env.c.TSGetTimeline(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSGetTimeline (after update): %v", err)
+	}
+	if afterUpdate.Name != "cpu_usage_renamed" || afterUpdate.RetentionDays != 60 {
+		t.Fatalf("TSUpdateTimeline: want name/retention updated, got %+v", afterUpdate)
+	}
+	if afterUpdate.Dims != 1 {
+		t.Fatalf("TSUpdateTimeline: want Dims unaffected (immutable), got %d", afterUpdate.Dims)
+	}
+
+	if err := env.c.TSDeleteTimeline(ctx, 1); err != nil {
+		t.Fatalf("TSDeleteTimeline: %v", err)
+	}
+	if _, err := env.c.TSGetTimeline(ctx, 1); err == nil {
+		t.Errorf("TSGetTimeline after delete: want an error, got a live record")
+	}
+}
+
+// TestIntegration_TSQueryCompleteness exercises TSQueryRangeGet and
+// TSLatest (XOT218, wave 16 Stage 4) against a real server -- the
+// GET-based query-string alternative to the already-covered
+// TSQueryRange, and the most-recent-events read. Confirms the GET
+// variant and the already-verified POST variant (TSQueryRange) agree
+// on the same real data, not just that each independently returns
+// 2xx -- exactly the kind of cross-check this session's own
+// integration suite header explains mocks cannot provide.
+func TestIntegration_TSQueryCompleteness(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	if _, err := env.c.TSProvision(ctx); err != nil {
+		t.Fatalf("TSProvision: %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 1, Name: "cpu_usage", Dims: 1, RetentionDays: 30,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	batch := []client.TSEvent{
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-2 * time.Hour), Nums: []float64{1.0}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-1 * time.Hour), Nums: []float64{2.0}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now, Nums: []float64{3.0}},
+	}
+	if _, err := env.c.TSBatchAppend(ctx, batch); err != nil {
+		t.Fatalf("TSBatchAppend: %v", err)
+	}
+
+	viaPost, err := env.c.TSQueryRange(ctx, client.TSQueryRangeRequest{
+		Timeline: 1, Dims: []uint64{7}, From: now.Add(-3 * time.Hour), To: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TSQueryRange (POST): %v", err)
+	}
+	viaGet, err := env.c.TSQueryRangeGet(ctx, client.TSQueryRangeRequest{
+		Timeline: 1, Dims: []uint64{7}, From: now.Add(-3 * time.Hour), To: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TSQueryRangeGet: %v", err)
+	}
+	if len(viaGet.Events) != len(viaPost.Events) || len(viaGet.Events) != 3 {
+		t.Fatalf("TSQueryRangeGet vs TSQueryRange: want both to agree on 3 events, got GET=%d POST=%d",
+			len(viaGet.Events), len(viaPost.Events))
+	}
+
+	latest, err := env.c.TSLatest(ctx, client.TSLatestRequest{Timeline: 1, Dims: []uint64{7}, N: 2})
+	if err != nil {
+		t.Fatalf("TSLatest: %v", err)
+	}
+	if len(latest.Events) != 2 {
+		t.Fatalf("TSLatest: want the 2 most recent events, got %d: %+v", len(latest.Events), latest.Events)
+	}
+	if latest.Events[0].Time.Before(latest.Events[len(latest.Events)-1].Time) {
+		t.Errorf("TSLatest: want newest-relevant events among the returned set, got %+v", latest.Events)
+	}
+}
+
+// TestIntegration_TSRollupCompleteness exercises the rollup lifecycle
+// (XOT219, wave 16 Stage 5) against a real server -- define,
+// parent, run, status, tree, and delete -- building on the
+// already-covered TSRollupList/TSRollupGet.
+func TestIntegration_TSRollupCompleteness(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	if _, err := env.c.TSProvision(ctx); err != nil {
+		t.Fatalf("TSProvision: %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 1, Name: "cpu_raw", Dims: 1,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline (source): %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 2, Name: "cpu_5m", Dims: 1,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline (dest): %v", err)
+	}
+
+	rollup, err := env.c.TSRollupDefine(ctx, 1, client.TSRollupDefineRequest{
+		DestTID: 2, BucketDuration: "5m",
+	})
+	if err != nil {
+		t.Fatalf("TSRollupDefine: %v", err)
+	}
+	if rollup.SourceTID != 1 || rollup.DestTID != 2 || rollup.BucketDuration != "5m0s" {
+		t.Fatalf("TSRollupDefine: got %+v", rollup)
+	}
+
+	parent, err := env.c.TSRollupParent(ctx, 2)
+	if err != nil {
+		t.Fatalf("TSRollupParent: %v", err)
+	}
+	if parent.ID != rollup.ID {
+		t.Fatalf("TSRollupParent: want the rollup just defined (id=%s), got %+v", rollup.ID, parent)
+	}
+
+	now := time.Now().UTC()
+	if err := env.c.TSAppend(ctx, client.TSEvent{
+		Timeline: 1, Dims: []uint64{7}, Time: now.Add(-10 * time.Minute), Nums: []float64{42},
+	}); err != nil {
+		t.Fatalf("TSAppend (source data for the rollup to consume): %v", err)
+	}
+
+	if err := env.c.TSRollupRun(ctx, 1, rollup.ID, client.TSRollupRunRequest{
+		From: now.Add(-1 * time.Hour), To: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("TSRollupRun: %v", err)
+	}
+
+	status, err := env.c.TSRollupStatus(ctx, 1, rollup.ID)
+	if err != nil {
+		t.Fatalf("TSRollupStatus: %v", err)
+	}
+	if status.ID != rollup.ID || status.SourceTID != 1 || status.DestTID != 2 {
+		t.Fatalf("TSRollupStatus: got %+v", status)
+	}
+
+	tree, err := env.c.TSRollupTree(ctx)
+	if err != nil {
+		t.Fatalf("TSRollupTree: %v", err)
+	}
+	if tree == nil {
+		t.Fatalf("TSRollupTree: want a non-nil tree -- timelines and a rollup are defined, got nil")
+	}
+
+	if err := env.c.TSRollupDelete(ctx, 1, rollup.ID); err != nil {
+		t.Fatalf("TSRollupDelete: %v", err)
+	}
+	if _, err := env.c.TSRollupGet(ctx, 1, rollup.ID); err == nil {
+		t.Errorf("TSRollupGet after delete: want an error, got a live record")
+	}
+}
+
+// TestIntegration_TSAggregates exercises all three aggregate methods
+// (XOT220, wave 16 Stage 6) against a real server with real,
+// predictable data -- four events on field 0 with known values
+// (10, 20, 30, 40), so sum/avg/min/max/count all have a verifiable
+// answer, not just "didn't error." Covers both of TSAggregate's own
+// response shapes (scalar with no interval, bucketed with one) plus
+// TSRangeAggregate and TSFullAggregate with quantiles.
+func TestIntegration_TSAggregates(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	if _, err := env.c.TSProvision(ctx); err != nil {
+		t.Fatalf("TSProvision: %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 1, Name: "readings", Dims: 1,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	batch := []client.TSEvent{
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-3 * time.Hour), Nums: []float64{10}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-2 * time.Hour), Nums: []float64{20}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now.Add(-1 * time.Hour), Nums: []float64{30}},
+		{Timeline: 1, Dims: []uint64{7}, Time: now, Nums: []float64{40}},
+	}
+	if _, err := env.c.TSBatchAppend(ctx, batch); err != nil {
+		t.Fatalf("TSBatchAppend: %v", err)
+	}
+	from, to := now.Add(-4*time.Hour), now.Add(time.Minute)
+
+	// Scalar case: no Interval set.
+	scalar, err := env.c.TSAggregate(ctx, client.TSAggregateRequest{
+		Timeline: 1, Dims: []uint64{7}, From: from, To: to, NumField: 0, Function: "sum",
+	})
+	if err != nil {
+		t.Fatalf("TSAggregate (scalar): %v", err)
+	}
+	if scalar.Value == nil || *scalar.Value != 100 {
+		t.Fatalf("TSAggregate (scalar sum): want 100, got %+v", scalar)
+	}
+	if scalar.Count == nil || *scalar.Count != 4 {
+		t.Fatalf("TSAggregate (scalar count): want 4, got %+v", scalar)
+	}
+	if len(scalar.Buckets) != 0 {
+		t.Errorf("TSAggregate (scalar): want no buckets, got %+v", scalar.Buckets)
+	}
+
+	// Bucketed case: Interval set.
+	bucketed, err := env.c.TSAggregate(ctx, client.TSAggregateRequest{
+		Timeline: 1, Dims: []uint64{7}, From: from, To: to, NumField: 0, Function: "avg", Interval: "1h",
+	})
+	if err != nil {
+		t.Fatalf("TSAggregate (bucketed): %v", err)
+	}
+	if len(bucketed.Buckets) == 0 {
+		t.Fatalf("TSAggregate (bucketed): want at least one bucket, got none")
+	}
+	if bucketed.Value != nil || bucketed.Count != nil {
+		t.Errorf("TSAggregate (bucketed): want scalar fields nil, got Value=%v Count=%v", bucketed.Value, bucketed.Count)
+	}
+
+	rangeAgg, err := env.c.TSRangeAggregate(ctx, client.TSRangeAggregateRequest{
+		Timeline: 1, Dims: []uint64{7}, From: from, To: to,
+	})
+	if err != nil {
+		t.Fatalf("TSRangeAggregate: %v", err)
+	}
+	if !rangeAgg.Fields[0] {
+		t.Fatalf("TSRangeAggregate: want Fields[0]=true, got %+v", rangeAgg.Fields)
+	}
+	if rangeAgg.Sums[0] != 100 || rangeAgg.Mins[0] != 10 || rangeAgg.Maxs[0] != 40 || rangeAgg.Count != 4 {
+		t.Fatalf("TSRangeAggregate: want sum=100 min=10 max=40 count=4, got sum=%v min=%v max=%v count=%v",
+			rangeAgg.Sums[0], rangeAgg.Mins[0], rangeAgg.Maxs[0], rangeAgg.Count)
+	}
+
+	fullAgg, err := env.c.TSFullAggregate(ctx, client.TSFullAggregateRequest{
+		Timeline: 1, Dims: []uint64{7}, From: from, To: to,
+		Quantiles: []float64{0.5}, QuantileFields: []uint8{0},
+	})
+	if err != nil {
+		t.Fatalf("TSFullAggregate: %v", err)
+	}
+	if fullAgg.Sums[0] != 100 || fullAgg.Count != 4 {
+		t.Fatalf("TSFullAggregate: want the same exact stats as TSRangeAggregate, got sum=%v count=%v",
+			fullAgg.Sums[0], fullAgg.Count)
+	}
+	if len(fullAgg.Quantiles[0]) != 1 {
+		t.Fatalf("TSFullAggregate: want 1 quantile estimate for field 0, got %v", fullAgg.Quantiles[0])
+	}
+	if len(fullAgg.Quantiles[1]) != 0 {
+		t.Errorf("TSFullAggregate: want field 1 (not in QuantileFields) to have no quantiles, got %v", fullAgg.Quantiles[1])
+	}
+}
+
+// TestIntegration_TSRetentionStatsAndDataLifecycle exercises
+// retention, stats, and data lifecycle (XOT221, wave 16 Stage 7, the
+// final ts stage) against a real server. Two timelines: one has its
+// own data fully deleted (TSDeleteTimelineData, keeping the
+// definition -- confirmed via TSGetTimeline still finding it, and
+// TSTimelineStats now showing zero events), the other has a bounded
+// range purged (TSPurgeTimelineRange) and the survivors confirmed
+// through the already-covered TSQueryRange, not just trusting the
+// purge call's own success response.
+func TestIntegration_TSRetentionStatsAndDataLifecycle(t *testing.T) {
+	env := bootServerWithTS(t)
+	ctx := context.Background()
+
+	if _, err := env.c.TSProvision(ctx); err != nil {
+		t.Fatalf("TSProvision: %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 1, Name: "to-be-emptied", Dims: 1, RetentionDays: 7,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline (1): %v", err)
+	}
+	if _, err := env.c.TSDefineTimeline(ctx, client.TSDefineTimelineRequest{
+		ID: 2, Name: "to-be-purged", Dims: 1, RetentionDays: 14,
+	}); err != nil {
+		t.Fatalf("TSDefineTimeline (2): %v", err)
+	}
+
+	retention, err := env.c.TSGetRetention(ctx)
+	if err != nil {
+		t.Fatalf("TSGetRetention: %v", err)
+	}
+	if len(retention.Timelines) != 2 {
+		t.Fatalf("TSGetRetention: want 2 timelines, got %d: %+v", len(retention.Timelines), retention.Timelines)
+	}
+
+	patched, err := env.c.TSPatchRetention(ctx, 30)
+	if err != nil {
+		t.Fatalf("TSPatchRetention: %v", err)
+	}
+	if patched.DefaultRetentionDays != 30 {
+		t.Fatalf("TSPatchRetention: got %+v", patched)
+	}
+	afterPatch, err := env.c.TSGetRetention(ctx)
+	if err != nil {
+		t.Fatalf("TSGetRetention (after patch): %v", err)
+	}
+	if afterPatch.DefaultRetentionDays != 30 {
+		t.Fatalf("TSGetRetention (after patch): want default=30, got %+v", afterPatch)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := env.c.TSAppend(ctx, client.TSEvent{Timeline: 1, Dims: []uint64{7}, Time: now, Nums: []float64{1}}); err != nil {
+		t.Fatalf("TSAppend (timeline 1): %v", err)
+	}
+	purgeBatch := []client.TSEvent{
+		{Timeline: 2, Dims: []uint64{7}, Time: now.Add(-3 * time.Hour), Nums: []float64{1}},
+		{Timeline: 2, Dims: []uint64{7}, Time: now.Add(-2 * time.Hour), Nums: []float64{2}},
+		{Timeline: 2, Dims: []uint64{7}, Time: now, Nums: []float64{3}},
+	}
+	if _, err := env.c.TSBatchAppend(ctx, purgeBatch); err != nil {
+		t.Fatalf("TSBatchAppend (timeline 2): %v", err)
+	}
+
+	stats, err := env.c.TSStats(ctx)
+	if err != nil {
+		t.Fatalf("TSStats: %v", err)
+	}
+	if stats.Timelines != 2 {
+		t.Fatalf("TSStats: want 2 timelines, got %+v", stats)
+	}
+
+	tlStats1, err := env.c.TSTimelineStats(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSTimelineStats (1): %v", err)
+	}
+	if tlStats1.TotalEvents != 1 || tlStats1.OldestEvent == nil {
+		t.Fatalf("TSTimelineStats (1, before delete): got %+v", tlStats1)
+	}
+
+	if err := env.c.TSDeleteTimelineData(ctx, 1); err != nil {
+		t.Fatalf("TSDeleteTimelineData: %v", err)
+	}
+	tlStats1After, err := env.c.TSTimelineStats(ctx, 1)
+	if err != nil {
+		t.Fatalf("TSTimelineStats (1, after delete): %v", err)
+	}
+	if tlStats1After.TotalEvents != 0 {
+		t.Fatalf("TSTimelineStats (1, after TSDeleteTimelineData): want 0 events, got %+v", tlStats1After)
+	}
+	if _, err := env.c.TSGetTimeline(ctx, 1); err != nil {
+		t.Fatalf("TSGetTimeline (1, after TSDeleteTimelineData): want the definition to survive, got error: %v", err)
+	}
+
+	// Purge only the middle event's own range on timeline 2, keeping
+	// the oldest and newest -- confirmed via the already-covered
+	// TSQueryRange, not just trusting TSPurgeTimelineRange's own
+	// success response.
+	if err := env.c.TSPurgeTimelineRange(ctx, 2, now.Add(-150*time.Minute), now.Add(-90*time.Minute)); err != nil {
+		t.Fatalf("TSPurgeTimelineRange: %v", err)
+	}
+	remaining, err := env.c.TSQueryRange(ctx, client.TSQueryRangeRequest{
+		Timeline: 2, Dims: []uint64{7}, From: now.Add(-4 * time.Hour), To: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TSQueryRange (after purge): %v", err)
+	}
+	if len(remaining.Events) != 2 {
+		t.Fatalf("TSQueryRange (after purge): want 2 surviving events (oldest + newest), got %d: %+v",
+			len(remaining.Events), remaining.Events)
+	}
+}
+
 // TestIntegration_CalCreateCalendar_ClosesTheLoop is XM-8, end to
 // end: xoluman's own report was specifically that CalListCalendars
 // and CalListBookings both worked correctly but had nothing to list,
@@ -1526,6 +2016,563 @@ func TestIntegration_BalListAccounts_TenantIsolation(t *testing.T) {
 	}
 	if resB.Accounts[0].Value != "0.00" {
 		t.Errorf("tenant isolation violated: tenantb's own shared-id balance should be untouched by tenanta's transfer, got %+v", resB.Accounts[0])
+	}
+}
+
+func float64Ptr(f float64) *float64 { return &f }
+func int64Ptr(i int64) *int64       { return &i }
+
+// TestIntegration_ObjFullFlow exercises the core obj client surface
+// (XOT210, wave 15) against a real server: attach two subjects, list
+// (confirming the enumeration this primitive never had before XOT209
+// actually returns them), move one to a real /loc leaf and the other
+// into containment inside the first, report a raw position, resolve
+// position through the containment chain, patch capacity, read
+// contents both directly and transitively, retire, and detach --
+// every one of these went through a real request/response round trip
+// against a real server, not a mock that could share this file's own
+// wrong assumptions (see this suite's own header comment on why mocks
+// cannot catch wire-shape drift).
+func TestIntegration_ObjFullFlow(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	notPostableLoc := false
+	postableLoc := true
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "root", Name: "root", Postable: &notPostableLoc,
+		Placement: client.LocPlacement{Anchor: &client.LocAnchor{Lat: -34.9, Lon: -56.16, Alt: 10}},
+	}); err != nil {
+		t.Fatalf("LocDefine root: %v", err)
+	}
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "root/shelf", ParentID: strPtr("root"), Name: "shelf", Postable: &postableLoc,
+		Capacity: int64Ptr(500),
+	}); err != nil {
+		t.Fatalf("LocDefine root/shelf: %v", err)
+	}
+
+	veh, err := env.c.ObjAttach(ctx, client.ObjAttachRequest{
+		Subject:  "vehicles:1",
+		Capacity: client.ObjCapacity{MaxWeightKg: float64Ptr(12000), MaxVolumeM3: float64Ptr(40)},
+	})
+	if err != nil {
+		t.Fatalf("ObjAttach vehicles:1: %v", err)
+	}
+	if veh.Subject != "vehicles:1" || veh.PositionKind != "" {
+		t.Errorf("freshly-attached vehicles:1: got %+v", veh)
+	}
+	if _, err := env.c.ObjAttach(ctx, client.ObjAttachRequest{Subject: "pallets:9"}); err != nil {
+		t.Fatalf("ObjAttach pallets:9: %v", err)
+	}
+
+	listed, err := env.c.ObjList(ctx)
+	if err != nil {
+		t.Fatalf("ObjList: %v", err)
+	}
+	if len(listed.Subjects) != 2 {
+		t.Fatalf("ObjList: want 2 subjects, got %d: %+v", len(listed.Subjects), listed.Subjects)
+	}
+
+	moved, err := env.c.ObjMove(ctx, "vehicles:1", client.ObjMoveTarget{Kind: "loc_leaf", LocationID: "root/shelf"})
+	if err != nil {
+		t.Fatalf("ObjMove vehicles:1 to loc_leaf: %v", err)
+	}
+	if moved.PositionKind != "loc_leaf" || moved.LocLeafID == nil || *moved.LocLeafID != "root/shelf" {
+		t.Errorf("moved vehicles:1: got %+v", moved)
+	}
+
+	contained, err := env.c.ObjMove(ctx, "pallets:9", client.ObjMoveTarget{Kind: "obj", Subject: "vehicles:1"})
+	if err != nil {
+		t.Fatalf("ObjMove pallets:9 into vehicles:1: %v", err)
+	}
+	if contained.PositionKind != "obj" {
+		t.Errorf("contained pallets:9: want position_kind=obj, got %+v", contained)
+	}
+
+	if err := env.c.ObjReport(ctx, "vehicles:1", -34.9, -56.16, 12); err != nil {
+		t.Fatalf("ObjReport: %v", err)
+	}
+
+	pos, err := env.c.ObjPosition(ctx, "pallets:9")
+	if err != nil {
+		t.Fatalf("ObjPosition pallets:9: %v", err)
+	}
+	if pos.Resolved.Kind != "loc_leaf" {
+		t.Errorf("pallets:9 resolved through containment: want loc_leaf, got %+v", pos.Resolved)
+	}
+	if len(pos.Chain) == 0 {
+		t.Errorf("pallets:9 resolution chain should be non-empty (contained -> vehicles:1 -> loc_leaf), got %v", pos.Chain)
+	}
+
+	patched, err := env.c.ObjCapacityPatch(ctx, "vehicles:1", client.ObjCapacity{MaxWeightKg: float64Ptr(15000)})
+	if err != nil {
+		t.Fatalf("ObjCapacityPatch: %v", err)
+	}
+	if patched.Capacity.MaxWeightKg == nil || *patched.Capacity.MaxWeightKg != 15000 {
+		t.Errorf("capacity patch not applied: got %+v", patched.Capacity)
+	}
+
+	direct, err := env.c.ObjContents(ctx, "vehicles:1", false)
+	if err != nil {
+		t.Fatalf("ObjContents (direct): %v", err)
+	}
+	if len(direct.Contents) != 1 || direct.Contents[0] != "pallets:9" {
+		t.Errorf("direct contents: want [pallets:9], got %v", direct.Contents)
+	}
+	transitive, err := env.c.ObjContents(ctx, "vehicles:1", true)
+	if err != nil {
+		t.Fatalf("ObjContents (transitive): %v", err)
+	}
+	if len(transitive.Contents) != 1 {
+		t.Errorf("transitive contents: want 1, got %v", transitive.Contents)
+	}
+
+	if err := env.c.ObjRetire(ctx, "pallets:9"); err != nil {
+		t.Fatalf("ObjRetire pallets:9: %v", err)
+	}
+	retired, err := env.c.ObjGet(ctx, "pallets:9")
+	if err != nil {
+		t.Fatalf("ObjGet after retire: %v", err)
+	}
+	if retired.Subject != "pallets:9" {
+		t.Errorf("retired subject should still be gettable, got %+v", retired)
+	}
+}
+
+// TestIntegration_ObjPromoteDemote exercises the promote/demote pair
+// (XOT210) -- the one part of the obj client surface that is not
+// plain CRUD: an atomic dxp-orchestrated operation pairing obj
+// capability with a real bal transfer, both directions.
+func TestIntegration_ObjPromoteDemote(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	if _, err := env.c.BalDefine(ctx, client.BalDefineRequest{
+		AccountID: "~in", Unit: "u", Scale: 0, Floor: strPtr("-1000000"),
+	}); err != nil {
+		t.Fatalf("BalDefine ~in: %v", err)
+	}
+	if _, err := env.c.BalDefine(ctx, client.BalDefineRequest{
+		AccountID: "promo-acct", Unit: "u", Scale: 0,
+	}); err != nil {
+		t.Fatalf("BalDefine promo-acct: %v", err)
+	}
+	if _, err := env.c.ObjAttach(ctx, client.ObjAttachRequest{Subject: "containers:1"}); err != nil {
+		t.Fatalf("ObjAttach containers:1 (the promotion's own container): %v", err)
+	}
+
+	promoted, err := env.c.ObjPromote(ctx, client.ObjPromoteRequest{
+		BalAccount: "~in", ToAccount: "promo-acct", Amount: "500",
+		Entity:   client.ObjPromoteEntity{Kind: "widget", Create: map[string]interface{}{"name": "promoted-widget"}},
+		Position: client.ObjPromotePosition{Kind: "obj", Subject: "containers:1"},
+	})
+	if err != nil {
+		t.Fatalf("ObjPromote: %v", err)
+	}
+	if promoted.TxnID == 0 {
+		t.Errorf("ObjPromote: want a real txn id, got zero")
+	}
+	if promoted.Status != "committed" {
+		t.Errorf("ObjPromote: want status=committed, got %+v", promoted)
+	}
+
+	afterPromote, err := env.c.ObjGet(ctx, promoted.Subject)
+	if err != nil {
+		t.Fatalf("ObjGet after promote (%s): %v", promoted.Subject, err)
+	}
+	if afterPromote.PositionKind != "obj" {
+		t.Errorf("promoted subject should be contained in containers:1, got %+v", afterPromote)
+	}
+
+	demoted, err := env.c.ObjDemote(ctx, client.ObjDemoteRequest{
+		Subject: promoted.Subject, BalAccount: "~in", FromAccount: "promo-acct", Amount: "500",
+	})
+	if err != nil {
+		t.Fatalf("ObjDemote: %v", err)
+	}
+	if demoted.TxnID == 0 {
+		t.Errorf("ObjDemote: want a real txn id, got zero")
+	}
+}
+
+// TestIntegration_TenantSummary_EmptyTenant confirms a genuinely
+// empty tenant summarizes to Empty=true and every count at zero
+// (XOT213, wave 15) -- the exact case xoluman's own tenant-emptiness
+// safety check needs to be able to trust in one round trip.
+func TestIntegration_TenantSummary_EmptyTenant(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	summary, err := env.c.TenantSummary(ctx)
+	if err != nil {
+		t.Fatalf("TenantSummary: %v", err)
+	}
+	if !summary.Empty {
+		t.Errorf("Empty: want true for a genuinely empty tenant, got false: %+v", summary)
+	}
+	if summary.TS != 0 || summary.CalIndex != 0 || summary.BalRollup != 0 {
+		t.Errorf("pebble counts: want all zero, got ts=%d cal=%d bal=%d",
+			summary.TS, summary.CalIndex, summary.BalRollup)
+	}
+}
+
+// TestIntegration_TenantSummary_ReflectsRealData exercises the
+// closing of XOT209's own emptiness-check gap directly -- an obj
+// subject attached through the already-verified typed client (XOT210)
+// should be visible in the summary's own Obj counts, and a loc
+// location (XOT211) in its own Loc counts, without either of those
+// items needing their own separate enumeration call to prove it.
+func TestIntegration_TenantSummary_ReflectsRealData(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	before, err := env.c.TenantSummary(ctx)
+	if err != nil {
+		t.Fatalf("TenantSummary (before): %v", err)
+	}
+	if !before.Empty {
+		t.Fatalf("TenantSummary (before): want a fresh tenant to be empty, got %+v", before)
+	}
+
+	if _, err := env.c.ObjAttach(ctx, client.ObjAttachRequest{Subject: "vehicles:1"}); err != nil {
+		t.Fatalf("ObjAttach: %v", err)
+	}
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "root", Name: "root",
+		Placement: client.LocPlacement{Anchor: &client.LocAnchor{Lat: -34.9, Lon: -56.16}},
+	}); err != nil {
+		t.Fatalf("LocDefine: %v", err)
+	}
+
+	after, err := env.c.TenantSummary(ctx)
+	if err != nil {
+		t.Fatalf("TenantSummary (after): %v", err)
+	}
+	if after.Empty {
+		t.Fatalf("TenantSummary (after): want false, real data now exists, got true: %+v", after)
+	}
+	if after.Obj["obj_subjects"] == 0 {
+		t.Errorf("TenantSummary (after): want obj_subjects > 0 after ObjAttach, got %+v", after.Obj)
+	}
+	if after.Loc["locations"] == 0 {
+		t.Errorf("TenantSummary (after): want locations > 0 after LocDefine, got %+v", after.Loc)
+	}
+}
+
+// TestIntegration_TenantSummary_BlobOnlyTenant is XOT216's own real
+// proof through the full stack, not just the library level (see
+// TestSummarize_BlobOnlyTenant_NotReportedEmpty in pkg/tenantexport
+// for that layer): a fresh tenant that uploads a real file via the
+// already-existing BlobPut and touches nothing else must now report
+// Empty=false, not the wrong Empty=true this item exists to fix.
+func TestIntegration_TenantSummary_BlobOnlyTenant(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	before, err := env.c.TenantSummary(ctx)
+	if err != nil {
+		t.Fatalf("TenantSummary (before): %v", err)
+	}
+	if !before.Empty || before.Blob != 0 {
+		t.Fatalf("TenantSummary (before): want a fresh tenant empty with Blob=0, got %+v", before)
+	}
+
+	if _, err := env.c.BlobPut(ctx, "seed-file.txt", "text/plain", strings.NewReader("real tenant data")); err != nil {
+		t.Fatalf("BlobPut: %v", err)
+	}
+
+	after, err := env.c.TenantSummary(ctx)
+	if err != nil {
+		t.Fatalf("TenantSummary (after): %v", err)
+	}
+	if after.Blob != 1 {
+		t.Errorf("TenantSummary (after): want Blob=1, got %d", after.Blob)
+	}
+	if after.Empty {
+		t.Fatalf("TenantSummary (after): want Empty=false -- this tenant has real blob data -- got true: %+v", after)
+	}
+}
+
+// TestIntegration_LocCoreFlow exercises the loc client methods not
+// already incidentally covered by TestIntegration_ObjFullFlow's own
+// LocDefine setup calls (XOT211, wave 15) -- list, get, patch
+// (including the tri-state capacity semantics LocPatchRequest's own
+// doc comment describes: set a new ceiling, then clear it entirely),
+// move, report, and delete. Fences are deliberately out of scope
+// here, matching this item's own split-out follow-up.
+func TestIntegration_LocCoreFlow(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	notPostable := false
+	postable := true
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "warehouse", Name: "Warehouse", Postable: &notPostable,
+		Placement: client.LocPlacement{Anchor: &client.LocAnchor{Lat: -34.9, Lon: -56.16, Alt: 5}},
+	}); err != nil {
+		t.Fatalf("LocDefine warehouse: %v", err)
+	}
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "warehouse/bay1", ParentID: strPtr("warehouse"), Name: "Bay 1", Postable: &postable,
+		Capacity: int64Ptr(10),
+	}); err != nil {
+		t.Fatalf("LocDefine warehouse/bay1: %v", err)
+	}
+
+	listAll, err := env.c.LocList(ctx, "")
+	if err != nil {
+		t.Fatalf("LocList (unfiltered): %v", err)
+	}
+	if len(listAll.Locations) != 2 {
+		t.Fatalf("LocList (unfiltered): want 2, got %d: %+v", len(listAll.Locations), listAll.Locations)
+	}
+	listChildren, err := env.c.LocList(ctx, "warehouse")
+	if err != nil {
+		t.Fatalf("LocList (parent_id=warehouse): %v", err)
+	}
+	if len(listChildren.Locations) != 1 || listChildren.Locations[0].LocationID != "warehouse/bay1" {
+		t.Fatalf("LocList (parent_id=warehouse): want [warehouse/bay1], got %+v", listChildren.Locations)
+	}
+
+	got, err := env.c.LocGet(ctx, "warehouse/bay1")
+	if err != nil {
+		t.Fatalf("LocGet: %v", err)
+	}
+	if got.Name != "Bay 1" || got.Capacity == nil || *got.Capacity != 10 {
+		t.Fatalf("LocGet: got %+v", got)
+	}
+
+	newName := "Bay One"
+	newCap := int64(25)
+	newCapPtr := &newCap
+	patched, err := env.c.LocPatch(ctx, "warehouse/bay1", client.LocPatchRequest{
+		Name: &newName, Capacity: &newCapPtr,
+	})
+	if err != nil {
+		t.Fatalf("LocPatch (set capacity): %v", err)
+	}
+	if patched.Name != "Bay One" || patched.Capacity == nil || *patched.Capacity != 25 {
+		t.Fatalf("LocPatch (set capacity): got %+v", patched)
+	}
+
+	var clearedCap *int64
+	clearedPatched, err := env.c.LocPatch(ctx, "warehouse/bay1", client.LocPatchRequest{
+		Capacity: &clearedCap,
+	})
+	if err != nil {
+		t.Fatalf("LocPatch (clear capacity): %v", err)
+	}
+	if clearedPatched.Capacity != nil {
+		t.Fatalf("LocPatch (clear capacity): want nil ceiling, got %v", *clearedPatched.Capacity)
+	}
+	if clearedPatched.Name != "Bay One" {
+		t.Errorf("LocPatch (clear capacity): name should be untouched by a capacity-only patch, got %q", clearedPatched.Name)
+	}
+
+	moved, err := env.c.LocMove(ctx, "pallets", 501, "warehouse/bay1")
+	if err != nil {
+		t.Fatalf("LocMove: %v", err)
+	}
+	if !moved.Moved || moved.Leaf != "warehouse/bay1" {
+		t.Fatalf("LocMove: got %+v", moved)
+	}
+
+	reported, err := env.c.LocReport(ctx, "pallets", 501, client.LocPoint{Lat: -34.9, Lon: -56.16, Alt: 5})
+	if err != nil {
+		t.Fatalf("LocReport: %v", err)
+	}
+	if reported.Fences == nil {
+		t.Errorf("LocReport: want a non-nil (even if empty) fences slice, got nil")
+	}
+
+	// Delete tested on a SEPARATE, never-occupied location -- bay1 now
+	// holds pallets:501 (moved above), and a real, found-not-assumed
+	// server behaviour is that force=true does NOT override an
+	// occupied-location refusal (XOLU-LOC012): force's own actual
+	// meaning is narrower than "delete regardless of occupancy", and
+	// this test's first draft assumed otherwise until the real server
+	// said no. That refusal is correct, intentional safety behaviour,
+	// not a bug this client should route around.
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "warehouse/bay2", ParentID: strPtr("warehouse"), Name: "Bay 2", Postable: &postable,
+	}); err != nil {
+		t.Fatalf("LocDefine warehouse/bay2: %v", err)
+	}
+	if err := env.c.LocDelete(ctx, "warehouse/bay2", false); err != nil {
+		t.Fatalf("LocDelete (unoccupied, no force needed): %v", err)
+	}
+	if _, err := env.c.LocGet(ctx, "warehouse/bay2"); err == nil {
+		t.Errorf("LocGet after delete: want an error, got a live record")
+	}
+
+	// The occupied case, confirmed as the real, intentional refusal
+	// rather than routed around -- proves LocDelete correctly surfaces
+	// XOLU-LOC012 as a structured *client.Error, not a generic failure.
+	if err := env.c.LocDelete(ctx, "warehouse/bay1", true); err == nil {
+		t.Errorf("LocDelete on an occupied location: want XOLU-LOC012 refusal even with force, got success")
+	} else if xerr, ok := err.(*client.Error); !ok || xerr.Code != "XOLU-LOC012" {
+		t.Errorf("LocDelete on an occupied location: want a structured XOLU-LOC012 *client.Error, got %v (%T)", err, err)
+	}
+}
+
+// TestIntegration_LocFencesAndGeospatial exercises the fence,
+// subject-position/history, contains/nearby, and pattern methods
+// (XOT214, wave 16 Stage 2) against a real server -- everything
+// TestIntegration_LocCoreFlow's own core set didn't already cover.
+// Coordinate order is checked directly against loc.DecodeGeoJSONPolygon
+// before this test was written (GeoJSON [lon, lat], not [lat, lon]) --
+// a real square polygon around a known center, with a report point
+// placed inside it, so fence membership, contains, and history all
+// have something genuine to observe rather than an always-empty case.
+func TestIntegration_LocFencesAndGeospatial(t *testing.T) {
+	env := bootServer(t)
+	ctx := context.Background()
+
+	postable := true
+	if _, err := env.c.LocDefine(ctx, client.LocDefineRequest{
+		LocationID: "yard", Name: "Yard", Postable: &postable,
+		Placement: client.LocPlacement{Anchor: &client.LocAnchor{Lat: -34.90, Lon: -56.16}},
+	}); err != nil {
+		t.Fatalf("LocDefine yard: %v", err)
+	}
+
+	pattern, err := env.c.LocPatternDefine(ctx, "standard-yard", 50)
+	if err != nil {
+		t.Fatalf("LocPatternDefine: %v", err)
+	}
+	if pattern.Name != "standard-yard" || pattern.Capacity != 50 {
+		t.Fatalf("LocPatternDefine: got %+v", pattern)
+	}
+	patternList, err := env.c.LocPatternList(ctx)
+	if err != nil {
+		t.Fatalf("LocPatternList: %v", err)
+	}
+	if len(patternList.Patterns) != 1 {
+		t.Fatalf("LocPatternList: want 1, got %d: %+v", len(patternList.Patterns), patternList.Patterns)
+	}
+	gotPattern, err := env.c.LocPatternGet(ctx, "standard-yard")
+	if err != nil {
+		t.Fatalf("LocPatternGet: %v", err)
+	}
+	if gotPattern.Capacity != 50 {
+		t.Fatalf("LocPatternGet: got %+v", gotPattern)
+	}
+
+	// A real, valid closed square ring: 4 distinct vertices + closing
+	// repeat of the first, [lon, lat] order, centered near (-56.16,
+	// -34.90) with roughly a 0.02-degree half-width.
+	square := [][][2]float64{{
+		{-56.18, -34.88}, {-56.14, -34.88}, {-56.14, -34.92}, {-56.18, -34.92}, {-56.18, -34.88},
+	}}
+	fence, err := env.c.LocFenceAttach(ctx, client.LocFenceAttachRequest{
+		AlignedTo: "yard",
+		Geometry:  client.LocFenceGeometry{Type: "Polygon", Coordinates: square},
+		Pattern:   strPtr("standard-yard"),
+	})
+	if err != nil {
+		t.Fatalf("LocFenceAttach: %v", err)
+	}
+	if fence.FenceID != "yard" {
+		t.Fatalf("LocFenceAttach: want fence_id=yard (tree-aligned, identity is the location itself), got %+v", fence)
+	}
+	if fence.PatternID == nil || *fence.PatternID != "standard-yard" {
+		t.Errorf("LocFenceAttach: want pattern_id=standard-yard, got %+v", fence)
+	}
+
+	listed, err := env.c.LocFenceList(ctx)
+	if err != nil {
+		t.Fatalf("LocFenceList: %v", err)
+	}
+	if len(listed.Fences) != 1 || listed.Fences[0] != "yard" {
+		t.Fatalf("LocFenceList: want [yard], got %v", listed.Fences)
+	}
+
+	gotFence, err := env.c.LocFenceGet(ctx, client.LocFenceRefByLocation("yard"))
+	if err != nil {
+		t.Fatalf("LocFenceGet: %v", err)
+	}
+	if gotFence.FenceID != "yard" {
+		t.Fatalf("LocFenceGet: got %+v", gotFence)
+	}
+
+	// Widen the square slightly via patch, proving geometry replacement
+	// works, not just that attach's own initial geometry was stored.
+	widened := [][][2]float64{{
+		{-56.20, -34.86}, {-56.12, -34.86}, {-56.12, -34.94}, {-56.20, -34.94}, {-56.20, -34.86},
+	}}
+	patchedFence, err := env.c.LocFencePatch(ctx, client.LocFenceRefByLocation("yard"), client.LocFenceGeometry{Type: "Polygon", Coordinates: widened})
+	if err != nil {
+		t.Fatalf("LocFencePatch: %v", err)
+	}
+	if patchedFence.FenceID != "yard" {
+		t.Fatalf("LocFencePatch: got %+v", patchedFence)
+	}
+
+	// A real report INSIDE the fence's own area, so contains/nearby/
+	// position/history all have something genuine to observe.
+	if _, err := env.c.LocReport(ctx, "pallets", 701, client.LocPoint{Lat: -34.90, Lon: -56.16}); err != nil {
+		t.Fatalf("LocReport (inside fence): %v", err)
+	}
+
+	reconciled, err := env.c.LocFenceReconcile(ctx, client.LocFenceRefByLocation("yard"))
+	if err != nil {
+		t.Fatalf("LocFenceReconcile: %v", err)
+	}
+	if reconciled.FenceID != "yard" {
+		t.Fatalf("LocFenceReconcile: got %+v", reconciled)
+	}
+
+	contains, err := env.c.LocContains(ctx, -34.90, -56.16)
+	if err != nil {
+		t.Fatalf("LocContains: %v", err)
+	}
+	found := false
+	for _, f := range contains.Fences {
+		if f == "yard" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("LocContains: want yard in the result for a point inside its own fence, got %v", contains.Fences)
+	}
+
+	nearby, err := env.c.LocNearby(ctx, -34.90, -56.16, 5000)
+	if err != nil {
+		t.Fatalf("LocNearby: %v", err)
+	}
+	if len(nearby.Locations) == 0 && len(nearby.Fences) == 0 {
+		t.Errorf("LocNearby: want at least the yard location or fence within 5km, got neither: %+v", nearby)
+	}
+
+	pos, err := env.c.LocSubjectPosition(ctx, "pallets", 701)
+	if err != nil {
+		t.Fatalf("LocSubjectPosition: %v", err)
+	}
+	if pos.LastReportPoint == nil {
+		t.Fatalf("LocSubjectPosition: want a last report point after LocReport, got nil: %+v", pos)
+	}
+
+	history, err := env.c.LocSubjectHistory(ctx, "pallets", 701)
+	if err != nil {
+		t.Fatalf("LocSubjectHistory: %v", err)
+	}
+	if len(history.Entries) == 0 {
+		t.Fatalf("LocSubjectHistory: want at least one entry after LocReport, got none")
+	}
+
+	if err := env.c.LocFenceDelete(ctx, client.LocFenceRefByLocation("yard")); err != nil {
+		t.Fatalf("LocFenceDelete: %v", err)
+	}
+	if _, err := env.c.LocFenceGet(ctx, client.LocFenceRefByLocation("yard")); err == nil {
+		t.Errorf("LocFenceGet after delete: want an error, got a live record")
+	}
+
+	if err := env.c.LocPatternDelete(ctx, "standard-yard"); err != nil {
+		t.Fatalf("LocPatternDelete: %v", err)
+	}
+	if _, err := env.c.LocPatternGet(ctx, "standard-yard"); err == nil {
+		t.Errorf("LocPatternGet after delete: want an error, got a live record")
 	}
 }
 

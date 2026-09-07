@@ -72,7 +72,9 @@ func getTSDeleteFenceStore() timeseries.Store {
 }
 
 // tsDeleteFenceIteration is the critrepro-side verification for
-// XOT192's own fix: QueryRange, Latest, and Aggregate (pkg/timeseries/
+// XOT192's own fix, extended (2026-08-14, XOT193) to cover two more
+// functions of the same shape found afterward: QueryRange, Latest,
+// Aggregate, RangeAggregate, and RangeFullAggregate (pkg/timeseries/
 // store.go) each re-check the registry immediately before returning
 // their own scan results, closing a check-then-scan gap that let a
 // concurrent DeleteTimeline's own multi-step teardown complete
@@ -80,7 +82,7 @@ func getTSDeleteFenceStore() timeseries.Store {
 // result. The fix's own margin was reasoned, not measured, to narrow
 // under true multi-core parallelism (the same structural shape as
 // this tool's own canonical five-bal-legs case) -- this scenario is
-// that measurement. Each iteration races all three fixed functions
+// that measurement. Each iteration races all five fixed functions
 // independently, concurrently, against the same delete, on the
 // shared store described above.
 func tsDeleteFenceIteration(iter int) (bool, string) {
@@ -112,6 +114,7 @@ func tsDeleteFenceIteration(iter int) (bool, string) {
 
 	var wg sync.WaitGroup
 	var sawEmptyQueryRange, sawEmptyLatest, sawEmptyAggregate int32
+	var sawEmptyRangeAggregate, sawEmptyRangeFullAggregate int32
 	stop := make(chan struct{})
 
 	wg.Add(1)
@@ -172,6 +175,48 @@ func tsDeleteFenceIteration(iter int) (bool, string) {
 		}
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			res, err := s.RangeAggregate(ctx, timeseries.RangeAllQuery{
+				Timeline: tid, Dims: []uint64{0},
+				From: base.Add(-time.Hour), To: base.Add(time.Hour),
+			})
+			if err == nil && res.Count == 0 {
+				atomic.StoreInt32(&sawEmptyRangeAggregate, 1)
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			res, err := s.RangeFullAggregate(ctx, timeseries.RangeFullQuery{
+				RangeAllQuery: timeseries.RangeAllQuery{
+					Timeline: tid, Dims: []uint64{0},
+					From: base.Add(-time.Hour), To: base.Add(time.Hour),
+				},
+			})
+			if err == nil && res.Aggregate.Count == 0 {
+				atomic.StoreInt32(&sawEmptyRangeFullAggregate, 1)
+				return
+			}
+		}
+	}()
+
 	time.Sleep(2 * time.Millisecond)
 	if err := s.DeleteTimeline(ctx, tid); err != nil {
 		close(stop)
@@ -188,6 +233,10 @@ func tsDeleteFenceIteration(iter int) (bool, string) {
 		return false, "Latest observed a defined-but-empty timeline during delete"
 	case atomic.LoadInt32(&sawEmptyAggregate) == 1:
 		return false, "Aggregate observed a defined-but-empty timeline during delete"
+	case atomic.LoadInt32(&sawEmptyRangeAggregate) == 1:
+		return false, "RangeAggregate observed a defined-but-empty timeline during delete"
+	case atomic.LoadInt32(&sawEmptyRangeFullAggregate) == 1:
+		return false, "RangeFullAggregate observed a defined-but-empty timeline during delete"
 	}
 	return true, ""
 }

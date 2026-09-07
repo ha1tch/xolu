@@ -1,94 +1,295 @@
 #!/usr/bin/env python3
-"""scripts/wave_progress.py — regenerates docs/SUBSTRATE_TRACKING.md's
-own "## 1. Progress at a glance" summary from each wave's own per-item
+"""scripts/wave_progress.py — regenerates a wave-tracking document's own
+"## 1. Progress at a glance" summary from each wave's own per-item
 status table below it.
 
-Why this exists: that summary used to be hand-maintained prose with
-hand-computed percentages -- exactly the kind of thing that drifts
-from the data it's summarising, and did (Wave 1 was misreported as
-1/2 for a stretch; see T-113 in RESOLVED.md). This script makes the
-summary a pure function of the per-wave tables, which stay
-hand-maintained (their per-item Notes are genuinely bespoke prose,
-not something to generate) -- only the roll-up is mechanical now.
+Ported from xolu's own scripts/wave_progress.py (2026-08-17), which
+carries the original design rationale in full. That rationale is
+preserved here verbatim where it's still exactly true; only the
+xolu-specific bindings changed:
+
+  - DOC (the wave-tracking document) and the register file it
+    cross-references are now config-driven (wave_tracking, tracking
+    in .repoman.json), not hardcoded paths.
+  - SHORT_NAMES and WAVE_THEMES are now config-driven data
+    (wave_short_names, wave_themes), not Python dict literals -- both
+    default to empty, so a consumer that never sets them sees exactly
+    the behaviour of a project with no waves configured yet: no
+    summary line to regenerate, nothing to break.
+  - The id-format handling (_ID_ALT / _id_num) now reads the same
+    id_prefix / id_separator / legacy_id_prefix / legacy_id_separator
+    keys register.py reads, generalizing the same forward-only
+    mid-project prefix-migration need register.py was built for --
+    duplicated here rather than imported, preserving this file's own
+    original design choice to remain a standalone script with no
+    cross-script dependency for one shared regex fragment.
+
+Why this exists (xolu's own original rationale, unchanged): a
+hand-maintained progress summary drifts from the data it summarises --
+it did, in xolu, silently, for a stretch (see that project's own
+T-113). This script makes the summary a pure function of the per-wave
+tables, which stay hand-maintained (their per-item Notes are genuinely
+bespoke prose, not something to generate) -- only the roll-up is
+mechanical.
 
 Per-wave percentage: a table row's Status column is one of the three
 project-wide markers (✓ done, ◐ partial, ☐ not started). A row counts
 as 1.0 item done, 0.5, or 0.0 respectively; percentage is that sum
-over the row count. A "~" prefix marks any wave containing a ◐ row,
-matching this project's own existing convention of flagging partial
-waves as approximate rather than a precise fraction (Wave 2's own
-prose already says this explicitly: "not a precise fraction of
-anything countable" -- the formula agrees with that hand-written
-figure, it doesn't override it).
+over the row count. A "~" prefix marks any wave containing a ◐ row.
 
 Each wave also gets a "debt:" subtitle line, listing open register
-items (docs/TRACKING.md) whose theme is mapped to that wave via
-WAVE_THEMES -- open technical debt that shares a wave's subject
-matter but was never one of that wave's own planned items. Items
-already counted as SOME wave's own item (per that wave's own table
-column 4, not a theme guess) are excluded even if their theme happens
-to match a different wave -- T-81 is iolu-themed but is wave 8's own
-item 37, so it must not double up as wave 6 debt. Waves absent from
-WAVE_THEMES simply show no debt line, not an empty one.
+items whose theme is mapped to that wave via wave_themes -- open
+technical debt that shares a wave's subject matter but was never one
+of that wave's own planned items. Items already counted as SOME
+wave's own item (per that wave's own table column 4, not a theme
+guess) are excluded even if their theme happens to match a different
+wave. Waves absent from wave_themes simply show no debt line.
 
 A wave also gets a "blockers:" subtitle when any of its own items or
-its debt is waiting on a currently-open prerequisite (an "After:
-T-NN" field in TRACKING.md where T-NN is itself still open -- not
-"After: none", not a reference to something already shipped, and not
-an unfiled/unverifiable T-number like T-51, which T-52 names as its
-own blocker but which has never actually been filed in TRACKING.md OR
-RESOLVED.md). Grouped by blocker, not by blocked item, and blockers
-can be cross-wave (T-81 is wave 8's own item but is blocked by T-70,
-a wave 6 item -- that cross-wave signal is the point, not filtered).
+its debt is waiting on a currently-open prerequisite (an "After: X"
+field in the register where X is itself still open).
 
-Deliberately NOT preserved: hand-composed trailing annotations the
-old summary carried per wave (e.g. "— all 6 scoped as T-76–T-81",
-"shipped — T-127–T-129 in v0.21.3/v0.21.4..."). Those are narrative,
-not data, and belong in each wave's own detail section below the
-summary (untouched by this script) -- trying to mechanically preserve
-hand-written trailing prose across regenerations is exactly the kind
-of fragile pattern this script exists to avoid. The summary's job is
-a fast glance; detail lives one section down, same as before.
+Deliberately NOT preserved: hand-composed trailing annotations. Those
+are narrative, not data, and belong in each wave's own detail section
+below the summary (untouched by this script).
+
+Requires the wave-tracking document to carry a "## 1. Progress at a
+glance" section with a fenced code block (```...```) and, somewhere in
+that document, a line of the form "Overall by item count: N of M items
+≈ **P%**" -- a documented structural convention, the same way
+register.py requires "## <theme>" groupings, not itself a config key.
+
+Register sync (added 2026-08-20): before regenerating, each wave-table
+row's Status column is derived from its column-4 register item(s) --
+an id whose closure header appears in the resolution record (the
+"resolved" config key) counts done; an id still open in the register
+contributes its own ☐/◐ marker; a row citing any id found in neither
+place is left untouched with a warning, as is a row citing no ids at
+all. Multi-id and "X through Y" range rows aggregate (all done -> ✓,
+none started -> ☐, anything between -> ◐). Rows already marked ✗
+never match and stay hand-set: a drop is a decision, not a datum.
+Then each wave's canonical bold summary fragment
+("**Wave N: x/y, not started|in progress|complete.**") is recomputed
+from the synced rows -- ONLY the canonical form; a hand-written
+narrative bold line (xolu's own waves 2 and 8 are the live examples)
+is deliberately not touched, and prose trailing a canonical fragment
+on the same line survives. This closes the gap where register.py
+close and a wave table were independently maintained with no sync
+(xolu, noted 2026-08-18): the sync lives here, not in register.py,
+because this script is already the document's single mechanical
+reconciler and already runs at the release gate via --check -- one
+idempotent writer covering every transition (close, reopen, partial),
+not a second writer that only fires on close.
 
 Usage:
     python3 scripts/wave_progress.py           # regenerate in place
     python3 scripts/wave_progress.py --check   # exit 1 if it would change, don't write
-    python3 scripts/wave_progress.py --show    # print to stdout, touch nothing (make waves)
+    python3 scripts/wave_progress.py --show    # print to stdout, touch nothing
+    python3 scripts/wave_progress.py --html PATH        # standalone HTML file
+    python3 scripts/wave_progress.py --hide 6            # persist wave 6 as hidden
+    python3 scripts/wave_progress.py --unhide 6          # persist wave 6 as visible again
+    python3 scripts/wave_progress.py --show --include-hidden   # render everything anyway
 """
 import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DOC = ROOT / "docs" / "SUBSTRATE_TRACKING.md"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config as _config
 
-# Short display names for the summary line -- the wave headings below
-# use fuller phrasing ("ID widening and system-scope reservation")
-# than the terse summary form ("ID widening + sysmask") always has.
-# Edited by hand when a wave is added; low cardinality, changes rarely.
-SHORT_NAMES = {
-    "12": "pkg/client blob support",
-    "0": "Process foundation",
-    "1": "ID widening + sysmask",
-    "2": "Referential integrity",
-    "3": "Chronicle substrate",
-    "4": "bal",
-    "5": "dxp",
-    "6": "iolu operations",
-    "7": "Events + system stores",
-    "8": "OQL primitive queries",
-    "9": "/loc",
-    "9b": "/loc — bring to spec",
-    "10": "/obj",
-}
+_ROOT, _CFG = _config.load()
+DOC = _ROOT / _CFG["wave_tracking"]
+TRACKING = _ROOT / _CFG["tracking"]
+SHORT_NAMES = _CFG.get("wave_short_names", {})
+WAVE_THEMES = _CFG.get("wave_themes", {})
+WAVE_VISIBILITY = _CFG.get("wave_visibility", {})
+
+
+def is_visible(wave_id: str) -> bool:
+    """Absent entry = visible. This is the ONLY place either renderer
+    consults visibility state -- render_table() and render_html() both
+    call this rather than each keeping their own notion of what's
+    shown, so ASCII and HTML can never disagree about which waves are
+    currently hidden."""
+    return WAVE_VISIBILITY.get(wave_id, True)
+
+_P = _CFG["id_prefix"]
+_SEP = _CFG.get("id_separator", "-")
+_LEGACY_P = _CFG.get("legacy_id_prefix", "")
+_LEGACY_SEP = _CFG.get("legacy_id_separator", "-")
+
+if _LEGACY_P:
+    _ID_ALT = (r"(?:" + re.escape(_P) + re.escape(_SEP) + r"|"
+               + re.escape(_LEGACY_P) + re.escape(_LEGACY_SEP) + r")\d+")
+else:
+    _ID_ALT = re.escape(_P) + re.escape(_SEP) + r"\d+"
+
+
+def _id_num(tid: str) -> int:
+    """The numeric portion of an id, primary or legacy shape. Raises
+    ValueError on anything matching neither configured shape, rather
+    than silently returning a wrong number."""
+    primary = _P + _SEP
+    if tid.startswith(primary):
+        return int(tid[len(primary):])
+    if _LEGACY_P:
+        legacy = _LEGACY_P + _LEGACY_SEP
+        if tid.startswith(legacy):
+            return int(tid[len(legacy):])
+    raise ValueError(f"unrecognized id format: {tid!r}")
+
 
 STATUS_WEIGHT = {"✓": 1.0, "◐": 0.5, "☐": 0.0}
 
 HEADING_RE = re.compile(r"^### Wave (\S+) — [^(]+\(", re.M)
 ROW_RE = re.compile(r"^\|\s*\d+\s*\|.*\|\s*([✓◐☐])\s*\|", re.M)
 
+_PREFIX_ALT = (r"(?:" + re.escape(_P) + re.escape(_SEP) + r"|"
+               + re.escape(_LEGACY_P) + re.escape(_LEGACY_SEP) + r")") \
+              if _LEGACY_P else re.escape(_P) + re.escape(_SEP)
+# Captures the matched PREFIX itself (group 1, "T-" or "XOT", whichever
+# side of "through" it is -- a range is never written mixing prefixes,
+# e.g. nobody writes "XOT07 through T-13"), then lo/hi digits.
+RANGE_RE = re.compile(r"(" + _PREFIX_ALT + r")(\d+)\s+through\s+(?:"
+                       + _PREFIX_ALT + r")(\d+)")
+TNUM_RE = re.compile(r"(" + _ID_ALT + r")")
+# Column 4 of a wave's own item table: the register item(s) that ARE
+# this wave's own numbered items. Scoped to table ROWS specifically
+# (line starts with "| <digits> |"), not prose -- a file-wide id
+# regex can sweep up a bare mention inside an explanatory footnote
+# that explicitly says an id is NOT one of this wave's items (found
+# in xolu's own T-68 footnote under wave 6). Only the table's own
+# column 4 is authoritative for "this id IS one of this wave's items."
+ITEM_COL4_RE = re.compile(r"^\|\s*\d+\s*\|[^|]*\|\s*[✓◐☐]\s*\|([^|]*)\|", re.M)
 
-def parse_waves(text: str) -> list[dict]:
+
+def _col4_ids(col4: str) -> set[str]:
+    """Every id a single column-4 cell names, with "X through Y"
+    ranges expanded -- the one shared parse both the debt exclusion
+    set and the register sync depend on."""
+    result = set()
+    for prefix, lo, hi in RANGE_RE.findall(col4):
+        for n in range(int(lo), int(hi) + 1):
+            result.add(f"{prefix}{n:02d}" if n < 100 else f"{prefix}{n}")
+    for n in TNUM_RE.findall(col4):
+        result.add(n)
+    return result
+
+
+def all_wave_tnums(text: str) -> set[str]:
+    """Every id that is literally one of SOME wave's own numbered
+    items, per that wave's own table column 4 -- not just literal id
+    mentions (which also silently drop the middle of a "X through Y"
+    range notation) but the expanded range too. Used as a global
+    exclusion set for the debt calculation: a theme match alone isn't
+    enough -- an id already counted as one wave's own item must never
+    double up as a different wave's debt just because its theme
+    happens to match."""
+    result = set()
+    for col4 in ITEM_COL4_RE.findall(text):
+        result |= _col4_ids(col4)
+    return result
+
+
+RESOLVED_HDR_RE = re.compile(r"^## \[[^\]]+\]\s+(" + _ID_ALT + r")\b", re.M)
+WAVE_ROW_SYNC_RE = re.compile(
+    r"^(\|\s*\d+\s*\|[^|]*\|\s*)([✓◐☐])(\s*\|([^|]*)\|.*)$", re.M)
+SUMMARY_LINE_RE = re.compile(
+    r"\*\*Wave (\S+): \d+(?:\.\d+)?/\d+, "
+    r"(?:not started|in progress|complete)\.\*\*")
+
+
+def register_state() -> tuple[set[str], dict[str, str]]:
+    """(ids closed per the resolution record's own "## [version] ID"
+    closure headers, open id -> its register status marker). Either
+    source being absent or unconfigured yields its empty shape rather
+    than an error -- a consumer without a resolution record simply
+    has no closed set, and unknown ids leave rows untouched."""
+    closed: set[str] = set()
+    resolved_key = _CFG.get("resolved")
+    if resolved_key:
+        resolved = _ROOT / resolved_key
+        if resolved.is_file():
+            closed = set(RESOLVED_HDR_RE.findall(
+                resolved.read_text(encoding="utf-8")))
+    open_st: dict[str, str] = {}
+    if TRACKING.is_file():
+        for tnum, _s, _th, _p, st, _b in TRACKING_ROW_RE.findall(
+                TRACKING.read_text(encoding="utf-8")):
+            open_st[tnum] = st
+    return closed, open_st
+
+
+def sync_from_register(text: str) -> tuple[str, list[str]]:
+    """Derives each wave-table row's Status from its column-4 register
+    item(s), then recomputes each wave's canonical bold summary
+    fragment from the synced rows. Operates strictly inside wave
+    sections (per HEADING_RE spans), so an unrelated table elsewhere
+    in the document with a coincidentally similar row shape is never
+    touched. Returns (new_text, warnings); pure function of its
+    inputs, idempotent."""
+    closed, open_st = register_state()
+    if not closed and not open_st:
+        return text, []
+    warnings: list[str] = []
+
+    def derive(ids: set[str]) -> str | None:
+        weights = []
+        for i in sorted(ids):
+            if i in closed:
+                weights.append(1.0)
+            elif i in open_st:
+                weights.append(STATUS_WEIGHT.get(open_st[i], 0.0))
+            else:
+                return None
+        if all(w == 1.0 for w in weights):
+            return "✓"
+        if all(w == 0.0 for w in weights):
+            return "☐"
+        return "◐"
+
+    def row_sub(m: re.Match) -> str:
+        ids = _col4_ids(m.group(4))
+        if not ids:
+            return m.group(0)
+        st = derive(ids)
+        if st is None:
+            unknown = sorted(i for i in ids
+                             if i not in closed and i not in open_st)
+            warnings.append(
+                f"wave row citing {', '.join(sorted(ids))}: "
+                f"{', '.join(unknown)} in neither the register nor the "
+                f"resolution record -- row left untouched")
+            return m.group(0)
+        if st == m.group(2):
+            return m.group(0)
+        return m.group(1) + st + m.group(3)
+
+    headings = list(HEADING_RE.finditer(text))
+    if not headings:
+        return text, warnings
+    pieces = [text[:headings[0].start()]]
+    for i, m in enumerate(headings):
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        pieces.append(WAVE_ROW_SYNC_RE.sub(row_sub, text[m.start():end]))
+    text = "".join(pieces)
+
+    waves = {w["id"]: w for w in parse_waves(text, quiet=True)}
+
+    def summ_sub(m: re.Match) -> str:
+        w = waves.get(m.group(1))
+        if not w:
+            return m.group(0)
+        de, total = w["done_equiv"], w["total"]
+        state = ("not started" if de == 0
+                 else "complete" if de == total else "in progress")
+        return f"**Wave {m.group(1)}: {de:g}/{total}, {state}.**"
+
+    text = SUMMARY_LINE_RE.sub(summ_sub, text)
+    return text, warnings
+
+
+def parse_waves(text: str, quiet: bool = False) -> list[dict]:
     headings = list(HEADING_RE.finditer(text))
     waves = []
     for i, m in enumerate(headings):
@@ -98,8 +299,9 @@ def parse_waves(text: str) -> list[dict]:
         section = text[start:end]
         statuses = ROW_RE.findall(section)
         if not statuses:
-            print(f"WARNING: Wave {wave_id} heading found but no table rows parsed "
-                  f"-- skipped, check the table format", file=sys.stderr)
+            if not quiet:
+                print(f"WARNING: Wave {wave_id} heading found but no table rows parsed "
+                      f"-- skipped, check the table format", file=sys.stderr)
             continue
         weights = [STATUS_WEIGHT[s] for s in statuses]
         done_equiv = sum(weights)
@@ -112,68 +314,10 @@ def parse_waves(text: str) -> list[dict]:
     return waves
 
 
-# Which register themes belong to which wave, for the debt-subtitle
-# line below. Hand-curated (like SHORT_NAMES) rather than derived --
-# a theme like "bal" mapping to wave 4 isn't mechanically inferable
-# from anything in the data, it's a judgement call about which open
-# debt genuinely belongs to a wave's own subject matter. Waves with no
-# entry here (0, 1, 2, 9, 9b) currently have no open item whose theme
-# clearly maps to them -- not an omission, checked against the actual
-# theme list in TRACKING.md's status table each time this needed
-# updating.
-WAVE_THEMES = {
-    "3": ["chronicle"],
-    "4": ["bal"],
-    "5": ["dxp"],
-    "6": ["iolu"],
-    "7": ["events", "system-stores"],
-    "8": ["oql"],
-    "10": ["obj"],
-    "12": ["client"],
-}
-
-TRACKING = ROOT / "docs" / "TRACKING.md"
-# Matches register.py's own NEW_PREFIX/_ID_ALT (2026-08-04, forward-only
-# "XOT" prefix for new register items -- see register.py's own header
-# comment for the full story). Kept as a separate local constant, not
-# imported, since this is a standalone script like every other tool
-# here; duplicated deliberately rather than adding a cross-script
-# dependency for one shared regex fragment.
-_ID_ALT = r"(?:T-|XOT)\d+"
-ROW_T_RE = re.compile(r"^\|\s*(" + _ID_ALT + r")\s*\|[^|]*\|\s*([a-z0-9-]+)\s*\|", re.M)
-
-
-# Found 2026-08-09 (v0.30.2 release): _ID_ALT above already matched
-# both id formats correctly, but blockers_by_wave's own sort key
-# (t.split("-")[1]) still assumed every id has a hyphen -- true for
-# "T-136", false for "XOT176" (no hyphen at all), so .split("-")
-# returns a single-element list and [1] raises IndexError the moment
-# any XOT-prefixed id appears in a wave's own blocker set. This is
-# register.py's own _id_num, duplicated here for the same reason
-# _ID_ALT is duplicated rather than imported: this is a standalone
-# script like every other tool in this directory.
-def _id_num(tid: str) -> int:
-    """The numeric portion of an id, old ("T-NNN") or new ("XOTNNN")
-    format -- the two prefixes differ in length (2 chars vs. 3, and
-    only one carries a hyphen), so a fixed-offset slice like the old
-    t[2:] is wrong for one of them. Raises ValueError on anything
-    matching neither shape, rather than silently returning a wrong
-    number."""
-    if tid.startswith("T-"):
-        return int(tid[2:])
-    if tid.startswith("XOT"):
-        return int(tid[3:])
-    raise ValueError(f"unrecognized id format: {tid!r}")
-
-
 def debt_by_wave(full_text: str) -> dict[str, list[str]]:
-    """Open register items (docs/TRACKING.md's own status table),
-    grouped by wave via WAVE_THEMES, excluding anything that's already
-    SOME wave's own item (see all_wave_tnums's own doc for why theme
-    alone isn't a safe filter). Themes with no wave mapping are simply
-    absent from the result -- there is no "unaffiliated" bucket here,
-    that's the ~26 items this project already knows are pure backlog
-    with no wave tie."""
+    """Open register items, grouped by wave via wave_themes, excluding
+    anything that's already SOME wave's own item. Themes with no wave
+    mapping are simply absent from the result."""
     if not TRACKING.is_file():
         return {}
     text = TRACKING.read_text(encoding="utf-8")
@@ -182,46 +326,14 @@ def debt_by_wave(full_text: str) -> dict[str, list[str]]:
     for wave_id, themes in WAVE_THEMES.items():
         for t in themes:
             theme_to_wave[t] = wave_id
+    row_t_re = re.compile(r"^\|\s*(" + _ID_ALT + r")\s*\|[^|]*\|\s*([a-z0-9-]+)\s*\|", re.M)
     result: dict[str, list[str]] = {}
-    for tnum, theme in ROW_T_RE.findall(text):
+    for tnum, theme in row_t_re.findall(text):
         if tnum in already_a_wave_item:
             continue
         wave_id = theme_to_wave.get(theme)
         if wave_id:
             result.setdefault(wave_id, []).append(tnum)
-    return result
-
-
-RANGE_RE = re.compile(r"T-(\d+)\s+through\s+T-(\d+)")
-TNUM_RE = re.compile(r"T-(\d+)")
-# Column 4 of a wave's own item table: "Closed" (waves 0-5, version or
-# T-number) or "Register item" (waves 6-10, T-number). Scoped to table
-# ROWS specifically (line starts with "| <digits> |"), not prose --
-# a file-wide T-number regex incorrectly swept up T-68 from its own
-# explanatory footnote sentence ("T-68 is a related but distinct
-# gap... not item 24 itself"), which explicitly says it is NOT one of
-# wave 6's items. Only the table's own column 4 is authoritative for
-# "this T-number IS one of this wave's numbered items."
-ITEM_COL4_RE = re.compile(r"^\|\s*\d+\s*\|[^|]*\|\s*[✓◐☐]\s*\|([^|]*)\|", re.M)
-
-
-def all_wave_tnums(text: str) -> set[str]:
-    """Every T-number that is literally one of SOME wave's own
-    numbered items, per that wave's own table column 4 -- not just
-    literal T-NN mentions (which also silently drop the middle of
-    "T-07 through T-13" range notation) but the expanded range too.
-    Used as a global exclusion set for the debt calculation: a theme
-    match alone isn't enough (T-81 is iolu-themed but is wave 8's own
-    item 37, not wave 6 debt -- it must be excluded from wave 6's
-    debt list precisely because it's already counted, in a different
-    wave, not because of its theme)."""
-    result = set()
-    for col4 in ITEM_COL4_RE.findall(text):
-        for lo, hi in RANGE_RE.findall(col4):
-            for n in range(int(lo), int(hi) + 1):
-                result.add(f"T-{n:02d}" if n < 100 else f"T-{n}")
-        for n in TNUM_RE.findall(col4):
-            result.add(f"T-{n}")
     return result
 
 
@@ -242,19 +354,11 @@ TRACKING_ROW_RE = re.compile(
 
 def blockers_by_wave(full_text: str, waves: list[dict]) -> dict[str, list[tuple[str, list[str]]]]:
     """For each wave's own items plus its debt items, checks their
-    "After: T-NN" field (docs/TRACKING.md) and keeps only references
-    that resolve to a CURRENTLY OPEN item -- not "After: none", not a
-    version/item-number reference, and not a T-number that turns out
-    to be unfiled or already closed (T-52 says "After: T-51", but
-    T-51 isn't filed in TRACKING.md OR RESOLVED.md at all -- an
-    unverifiable reference isn't a real blocker, it's noise). Returns
-    wave_id -> [(blocker_tnum, [items it blocks in this wave]), ...],
-    grouped by blocker so "T-76 blocks four things here" reads as one
-    line, not four repeated ones. A blocker can be outside the wave
-    entirely (T-81, wave 8's own item, is "After: T-70" -- a wave 6
-    item) -- that cross-wave case is exactly the useful signal, not
-    filtered out.
-    """
+    "After: X" field and keeps only references that resolve to a
+    CURRENTLY OPEN item. Returns wave_id -> [(blocker, [items it
+    blocks in this wave]), ...], grouped by blocker. A blocker can be
+    outside the wave entirely -- that cross-wave case is the useful
+    signal, not filtered out."""
     if not TRACKING.is_file():
         return {}
     tracking_text = TRACKING.read_text(encoding="utf-8")
@@ -314,17 +418,217 @@ def render_overall(waves: list[dict]) -> str:
     return f"Overall by item count: {done_s} of {total_items} items \u2248 **{pct}%**"
 
 
+_HTML_HEAD = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+:root {
+  --bg: #ffffff; --surface: #f4f3f1; --text: #0b0b0b; --text-2: #52514e; --text-3: #898781;
+  --border: #e1e0d9;
+  --success: #0ca30c;
+  --warn-track: #fab219; --warn-bg: #faeeda; --warn-text: #854f0b;
+  --acc-track: #2a78d6; --acc-bg: #e6f1fb; --acc-text: #0c447c;
+  --muted-track: #d3d1c7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a; --surface: #232327; --text: #f0efec; --text-2: #c3c2b7; --text-3: #898781;
+    --border: #333338;
+    --success: #2ed92e;
+    --warn-track: #fab219; --warn-bg: #4a3417; --warn-text: #f5c876;
+    --acc-track: #4a95e6; --acc-bg: #163a5c; --acc-text: #a9d1f7;
+    --muted-track: #3a3a3e;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text); margin: 0; padding: 2rem 1.25rem;
+}
+.wrap { max-width: 720px; margin: 0 auto; }
+h1 { font-size: 15px; font-weight: 600; margin: 0 0 1.25rem; color: var(--text-2); }
+.row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; padding: 5px 0; }
+.row.sub { padding: 0 0 5px; }
+.wname { font-size: 13px; font-weight: 600; text-align: right; }
+.sublabel { font-size: 11px; color: var(--text-3); text-align: right; padding-top: 1px; }
+.barwrap { display: flex; align-items: center; gap: 8px; }
+.track { flex: 1; height: 7px; border-radius: 4px; background: var(--surface); overflow: hidden; }
+.fill { height: 100%; border-radius: 4px; }
+.fill.success { background: var(--success); }
+.fill.warn { background: var(--warn-track); }
+.fill.muted { background: var(--muted-track); }
+.fill.acc { background: var(--acc-track); }
+.count { font-size: 11px; color: var(--text-2); white-space: nowrap; }
+.pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { font-size: 11px; padding: 1px 7px; border-radius: 6px; white-space: nowrap; }
+.pill.debt { background: var(--warn-bg); color: var(--warn-text); }
+.pill.blocker { background: var(--acc-bg); color: var(--acc-text); }
+.overall { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 10px; }
+.overall .wname { font-size: 14px; }
+.overall .count { font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+"""
+
+_HTML_TAIL = """</div>
+</body>
+</html>
+"""
+
+
+def _html_escape(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;"))
+
+
+def render_html(waves: list[dict], full_text: str, title: str = "wave progress") -> str:
+    """Standalone HTML rendering of the same wave/debt/blocker data
+    render_table() already computes for the terminal -- genuinely
+    portable: real hex colours (light + dark via prefers-color-scheme),
+    no dependency on any host page's own CSS variables, opens
+    correctly in any browser with the file handed to it directly, not
+    just inside a chat context that happens to define the tokens this
+    was first prototyped against. Layout matches this project's own
+    established terminal convention exactly, not a redesign: wave name
+    (or a "debt"/"blocked by" sublabel) right-aligned in a fixed left
+    column, bar/pills left-aligned in the column beside it, starting
+    at the same point the bar itself starts."""
+    debt = debt_by_wave(full_text)
+    blockers = blockers_by_wave(full_text, waves)
+    parts = [_HTML_HEAD.replace("{title}", _html_escape(title))]
+    parts.append(f'<h1>{_html_escape(title)}</h1>\n')
+
+    def fill_class(pct: float, has_partial: bool) -> str:
+        if pct <= 0:
+            return "muted"
+        if pct >= 100 and not has_partial:
+            return "success"
+        return "warn"
+
+    for w in waves:
+        pct = 100 * w["done_equiv"] / w["total"] if w["total"] else 0
+        pct_s = f"~{round(pct)}%" if w["has_partial"] else f"{round(pct)}%"
+        name = SHORT_NAMES.get(w["id"], f"(unnamed wave {w['id']})")
+        cls = fill_class(pct, w["has_partial"])
+        parts.append(
+            f'<div class="row"><span class="wname">Wave {_html_escape(w["id"])} — '
+            f'{_html_escape(name)}</span><div class="barwrap">'
+            f'<div class="track"><div class="fill {cls}" style="width:{min(pct,100):.4g}%"></div></div>'
+            f'<span class="count">{pct_s} · {fmt_item_count(w["done_equiv"], w["total"])}</span>'
+            f'</div></div>\n'
+        )
+        wave_debt = debt.get(w["id"])
+        if wave_debt:
+            pills = "".join(f'<span class="pill debt">{_html_escape(d)}</span>' for d in wave_debt)
+            parts.append(f'<div class="row sub"><span class="sublabel">debt</span>'
+                          f'<div class="pills">{pills}</div></div>\n')
+        wave_blockers = blockers.get(w["id"])
+        if wave_blockers:
+            pills = "".join(
+                f'<span class="pill blocker">{_html_escape(b)} → '
+                f'{_html_escape(", ".join(blocked))}</span>'
+                for b, blocked in wave_blockers
+            )
+            parts.append(f'<div class="row sub"><span class="sublabel">blocked by</span>'
+                          f'<div class="pills">{pills}</div></div>\n')
+
+    total_done = sum(w["done_equiv"] for w in waves)
+    total_items = sum(w["total"] for w in waves)
+    overall_pct = 100 * total_done / total_items if total_items else 0
+    parts.append(
+        f'<div class="row overall"><span class="wname">Overall</span><div class="barwrap">'
+        f'<div class="track"><div class="fill acc" style="width:{min(overall_pct,100):.4g}%"></div></div>'
+        f'<span class="count">{round(overall_pct)}% · {fmt_item_count(total_done, total_items)}</span>'
+        f'</div></div>\n'
+    )
+    parts.append(_HTML_TAIL)
+    return "".join(parts)
+
+
+def _set_visibility(wave_id: str, visible: bool) -> int:
+    """--hide/--unhide: a single, distinct mutation, same shape as
+    guards.py's own `record` command -- persists to .repoman.json via
+    config.save_key(), confirms, exits. Never combined with a render
+    operation in the same invocation, so it's always obvious from the
+    command alone whether state changed or something was only
+    displayed."""
+    doc_text = DOC.read_text(encoding="utf-8") if DOC.is_file() else ""
+    known = {w["id"] for w in parse_waves(doc_text)} if doc_text else set()
+    if known and wave_id not in known:
+        print(f"warning: {wave_id!r} is not a wave id found in {DOC.name} "
+              f"(known: {', '.join(sorted(known))}) -- setting anyway, in "
+              f"case the wave document hasn't been regenerated yet",
+              file=sys.stderr)
+    visibility = dict(WAVE_VISIBILITY)
+    visibility[wave_id] = visible
+    _config.save_key(_ROOT, "wave_visibility", visibility)
+    print(f"wave {wave_id}: {'visible' if visible else 'hidden'} "
+          f"(persisted to .repoman.json)")
+    return 0
+
+
 def main() -> int:
+    if "--hide" in sys.argv or "--unhide" in sys.argv:
+        flag = "--hide" if "--hide" in sys.argv else "--unhide"
+        i = sys.argv.index(flag)
+        if i + 1 >= len(sys.argv):
+            print(f"{flag} requires a wave id argument", file=sys.stderr)
+            return 1
+        return _set_visibility(sys.argv[i + 1], visible=(flag == "--unhide"))
+
     check = "--check" in sys.argv
     show = "--show" in sys.argv
+    include_hidden = "--include-hidden" in sys.argv
+    html_out = None
+    if "--html" in sys.argv:
+        i = sys.argv.index("--html")
+        if i + 1 >= len(sys.argv):
+            print("--html requires a path argument", file=sys.stderr)
+            return 1
+        html_out = sys.argv[i + 1]
+    if not DOC.is_file():
+        print(f"no wave-tracking document at {DOC} -- nothing to do "
+              f"(set wave_tracking in .repoman.json if waves are wanted)",
+              file=sys.stderr)
+        return 1
     text = DOC.read_text(encoding="utf-8")
-    waves = parse_waves(text)
-    if not waves:
+    original = text
+    text, sync_warnings = sync_from_register(text)
+    for w in sync_warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
+    all_waves = parse_waves(text)
+    if not all_waves:
         print("no waves parsed -- aborting, not touching the file", file=sys.stderr)
         return 1
+    # Overall always reflects every wave, regardless of what's currently
+    # displayed -- visibility is a display concern (per is_visible's own
+    # docstring), and hiding a wave from view doesn't mean its work
+    # stops counting toward the real total.
+    visible_waves = all_waves if include_hidden else [
+        w for w in all_waves if is_visible(w["id"])]
+    if not visible_waves:
+        print("every wave is currently hidden -- pass --include-hidden to "
+              "render anyway, or --unhide <id> to bring one back",
+              file=sys.stderr)
+        return 1
 
-    new_table = render_table(waves, text)
-    new_overall = render_overall(waves)
+    new_table = render_table(visible_waves, text)
+    new_overall = render_overall(all_waves)
+
+    if html_out:
+        title = _CFG.get("wave_html_title", "wave progress")
+        html = render_html(visible_waves, text, title=title)
+        Path(html_out).write_text(html, encoding="utf-8")
+        hidden_n = len(all_waves) - len(visible_waves)
+        note = f", {hidden_n} hidden" if hidden_n else ""
+        print(f"wave_progress: wrote {html_out} ({len(visible_waves)} waves{note})")
+        if not show and not check:
+            return 0
 
     if show:
         print(new_table)
@@ -345,16 +649,20 @@ def main() -> int:
         return 1
     new_text = overall_re.sub(new_overall, new_text)
 
-    if new_text == text:
+    if new_text == original:
         print("wave_progress: already up to date")
         return 0
 
     if check:
-        print("wave_progress: SUBSTRATE_TRACKING.md is stale -- run without --check to regenerate")
+        print("wave_progress: wave-tracking document is stale (bar, row "
+              "statuses, or summary lines out of sync) -- run without "
+              "--check to regenerate")
         return 1
 
     DOC.write_text(new_text, encoding="utf-8")
-    print(f"wave_progress: regenerated ({len(waves)} waves)")
+    hidden_n = len(all_waves) - len(visible_waves)
+    note = f", {hidden_n} hidden" if hidden_n else ""
+    print(f"wave_progress: regenerated ({len(visible_waves)} waves{note})")
     return 0
 
 

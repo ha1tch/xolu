@@ -48,15 +48,28 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-KNOWN_ISSUES = ROOT / "docs" / "KNOWN_ISSUES.md"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config as _config
 
-HEAD_RE = re.compile(r"^### (G-\d+[a-z]?)\.\s*(.*)$", re.M)
+_ROOT, _CFG = _config.load()
+ROOT = _ROOT
+KNOWN_ISSUES = _ROOT / _CFG["known_issues"]
+# guard_id_prefix: the full prefix including separator (unlike
+# register.py's id_prefix/id_separator split, guards have no
+# mid-project migration need -- a plain, single configured prefix
+# string is sufficient generality here). Default "G-" reproduces this
+# project's original, only-ever-tested behaviour for any consumer that
+# doesn't set this key.
+_GP = _CFG.get("guard_id_prefix", "G-")
+_GP_RE = re.escape(_GP)
+
+HEAD_RE = re.compile(r"^### (" + _GP_RE + r"\d+[a-z]?)\.\s*(.*)$", re.M)
 LAST_RE = re.compile(
     r"^- \*\*Last exercised[^:*]*:\*\*\s*(.*(?:\n[ \t]+\S.*)*)", re.M)
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 INVOKE_RE = re.compile(r"^\s*[-|]?\s*\*?\*?Invocation:?\*?\*?\s*`([^`]+)`", re.M)
-TABLE_INVOKE_RE = re.compile(r"^\|\s*(G-\d+[a-z])\s*\|[^|]*\|[^|]*\|\s*`([^`]+)`\s*\|", re.M)
+TABLE_INVOKE_RE = re.compile(
+    r"^\|\s*(" + _GP_RE + r"\d+[a-z])\s*\|[^|]*\|[^|]*\|\s*`([^`]+)`\s*\|", re.M)
 
 
 class Guard:
@@ -70,25 +83,19 @@ class Guard:
 
     @property
     def last_date(self):
+        """The most recent ISO-8601 date mentioned in the bullet, not
+        just the first. A "Last exercised" bullet can carry multiple
+        dated addenda -- a tool appending new-first ("DATE ... Previous:
+        OLDER-DATE ..."), but this document also carries many
+        hand-written, free-form bullets where dates appear in whatever
+        order the prose put them, not that convention. max() over
+        "YYYY-MM-DD" strings is correct for both shapes -- lexicographic
+        comparison is equivalent to chronological comparison for this
+        format, so position in the text never matters. Backported from
+        xolu's own local fork 2026-08-17, verified there against a real
+        hand-written multi-sentence bullet before being trusted."""
         if not self.last_line:
             return None
-        # A "Last exercised" bullet can carry multiple dated addenda --
-        # cmd_record's own append order is new-first (new_val =
-        # f"{date} ..."; new_val += f" Previous: {prev}"), but this
-        # file also carries many hand-written, free-form bullets (e.g.
-        # G-13's own multi-sentence narrative) where dates appear in
-        # whatever order the prose put them, not that convention.
-        # max() over ISO-8601 "YYYY-MM-DD" strings is the one approach
-        # correct for both shapes -- lexicographic string comparison
-        # is equivalent to chronological comparison for this format,
-        # so position in the text never matters. Verified directly
-        # against a real KNOWN_ISSUES.md bullet, not assumed: an
-        # earlier version of this fix used dates[-1] on the strength
-        # of a comment claiming that was correct, and a second version
-        # used dates[0] after checking cmd_record's own order in
-        # isolation -- both looked right in a synthetic test and both
-        # were wrong the moment they hit a real, hand-written,
-        # non-cmd_record bullet.
         dates = DATE_RE.findall(self.last_line)
         return max(dates) if dates else None
 
@@ -121,7 +128,7 @@ def previous_release_date() -> str:
     """Date of the SECOND changelog entry — i.e. the previous release:
     the default staleness horizon (exercised since the last tag)."""
     dates = re.findall(r"^## \[[^\]]+\] - (\d{4}-\d{2}-\d{2})",
-                       (ROOT / "CHANGELOG.md").read_text(), re.M)
+                       (ROOT / _CFG["changelog"]).read_text(), re.M)
     return dates[1] if len(dates) > 1 else (dates[0] if dates else "1970-01-01")
 
 
@@ -146,7 +153,7 @@ def cmd_handoff(guards, ids):
     print("# For each command: run from the repository root; capture the full")
     print("# output; report PASS/FAIL, iteration counts, and wall time.")
     print("# On report, the registry updates with:")
-    print("#   python3 scripts/guards.py record <G-nn> --date <date> --env m1")
+    print(f"#   python3 {Path(sys.argv[0]).name} record <{_GP}nn> --date <date> --env m1")
     print()
     for g in chosen:
         print(f"## {g.gid}. {g.title}")

@@ -53,10 +53,15 @@ Wave 9   /loc                        ██████████████�
 Wave 9b  /loc — bring to spec        ████████████████████   100%  (6/6 items)
 Wave 10  /obj                        ████████████████████   100%  (6/6 items)
                                      debt: T-134
-Wave 12  pkg/client blob support     ░░░░░░░░░░░░░░░░░░░░     0%  (0/1 items)
+Wave 12  pkg/client blob support     ████████████████████   100%  (1/1 items)
+Wave 13  /cron                       ░░░░░░░░░░░░░░░░░░░░     0%  (0/6 items)
+Wave 14  iolu physical backup + restore  ░░░░░░░░░░░░░░░░░░░░     0%  (0/2 items)
+                                     blockers: XOT203 blocks XOT204
+Wave 15  Wave of Mutilation          ████████████████████   100%  (5/5 items)
+Wave 16  Client Completeness         ████████████████████   100%  (7/7 items)
 ```
 
-Overall by item count: 40.5 of 56 items ≈ **72%**. This is a coarse
+Overall by item count: 53.5 of 76 items ≈ **70%**. This is a coarse
 average — waves are not equal-sized. By the plan's own day-weighting
 (now ≈112.0 ideal days total across 11 waves plus the wave 9b
 addendum below), wave 5 alone is ~19%
@@ -190,7 +195,7 @@ log).
 (cal+bal+fsm+ts+entity) runs end-to-end on both collapsed and phased
 dispatch paths (T-107).
 
-### Wave 6 — iolu operations (6 items, ideal 8.5d)
+### Wave 6 — iolu operations (6 items, ideal 8.0d, revised 2026-08-17)
 
 | # | Summary | Status | Register item |
 |---|---|---|---|
@@ -198,11 +203,17 @@ dispatch paths (T-107).
 | 25 | iolu: query + REPL | ☐ | T-70 |
 | 26 | iolu: db check (promote oracles) | ☐ | T-73 |
 | 27 | iolu: reindex-fts | ☐ | T-75 |
-| 28 | iolu: backup + verify | ☐ | T-71 (backup), T-72 (verify) |
+| 28 | iolu: backup (rescoped, ~0.5d) + verify (~1.0d), 1.5d total | ☐ | T-71 (backup, rescoped 2026-08-17), T-72 (verify) |
 | 29 | iolu: rebuild-graph | ☐ | T-74 |
 
 **Wave 6: 0/6, not started.** (T-68 is a related but distinct gap found
-while scoping item 24 — not item 24 itself.)
+while scoping item 24 — not item 24 itself.) Item 28's ideal-days
+revised 2.0 -> 1.5, wave total 8.5 -> 8.0, following T-71's 2026-08-17
+rescope to reuse `pkg/tenantexport` -- see `docs/TRACKING.md`'s Plan
+deviations log, 2026-08-17 entry, for the full finding. The scope split
+out of T-71 (physical/raw-file backup, XOT203) and the newly-filed
+restore item (XOT204) are not part of this wave -- see the new wave
+created for postponed backup/restore concerns.
 
 ### Wave 7 — Events, system stores, residual debt (2 items, ideal 10d, provisional)
 
@@ -382,9 +393,65 @@ scheduled later, plausibly wave 11.
 
 | # | Summary | Status | Register item |
 |---|---|---|---|
-| 57 | pkg/client blob support: blob.go + types_blob.go mirroring cal.go, package-doc scope-declaration update, integration test coverage | ☐ | T-142 |
+| 57 | pkg/client blob support: blob.go + types_blob.go mirroring cal.go, package-doc scope-declaration update, integration test coverage | ✓ | T-142 |
 
-**Wave 12: 0/1, not started.**
+**Wave 12: 1/1, complete.** Item 57 shipped 2026-08-04 as v0.25.0 -- see `CHANGELOG.md` and `RESOLVED.md` (T-142) for detail.
+
+---
+
+### Wave 13 — /cron (6 items, ideal 15.5d, revised 2026-08-17, added 2026-08-17)
+
+| # | Summary | Status | Register item |
+|---|---|---|---|
+| 58 | /cron storage, def/job registration, prototype-clone, capability introspection at def time | ☐ | XOT197 |
+| 59 | /cron recurrence rules + IANA zones + DST policy, scheduler loop (lifecycle shell reuses pkg/gc.Worker's proven pattern incl. panic recovery around verb execution, T-156/T-157 precedent), tick plane, missed-fire/overlap policy, suppression streak, watchdog + reset -- the deep pit and the racy loop as one item | ☐ | XOT198 |
+| 60 | /cron chime: cron.chime event type, event_latch_source coordinates, payload; unconditional on every non-suppressed tick, designed around T-07 | ☐ | XOT199 |
+| 61 | /cron verb registry, cancellable + progress-reporting interfaces, two verbs (fsm_walk, one prune) | ☐ | XOT200 |
+| 62 | /cron job control + execution observability: info/pause/resume/stop/kill across job and execution planes, memory-only progress, honest kill refusal | ☐ | XOT201 |
+| 63 | /cron retention + ~trim, reclamation classes + Reclaimer + /blob Reclaimer + ~sweep, system jobs armed by default -- dxp janitor AND pkg/gc's four existing Sweepers (blob GC, ts retention, fsm v2 collection, event delivery log v2) migrated, REST/client/molu/docs/guards -- the closing, dogfooding item | ☐ | XOT202 |
+
+**Wave 13: 0/6, not started.** Ideal-days revised 15.75 -> 15.5
+2026-08-17 after `docs/proposals/cron-primitive.md` §13.10 found
+`pkg/gc` as directly relevant in-tree prior art during wave 6's own
+backup review -- see `docs/TRACKING.md`'s Plan deviations log, same
+date, for the full finding.
+
+---
+
+### Wave 14 — iolu physical backup + restore (2 items, ideal 3.0d, added 2026-08-17)
+
+| # | Summary | Status | Register item |
+|---|---|---|---|
+| 64 | iolu db backup: physical/raw-file single-instance backup -- SQLite online-backup API plus Pebble checkpoints for ts, cal, and bal rollup (split out of T-71 when T-71 was rescoped to reuse pkg/tenantexport) | ☐ | XOT203 |
+| 65 | iolu db restore -- promoted from a permanent scope-exclusion note in T-71/T-72 to a real trackable item; two distinct paths (from a physical backup, from a logical export) | ☐ | XOT204 |
+
+**Wave 14: 0/2, not started.**
+
+### Wave 15 — Wave of Mutilation (5 items, ideal 6.0d, added 2026-08-17)
+
+| # | Summary | Status | Register item |
+|---|---|---|---|
+| 66 | obj REST-level enumeration endpoint (GET /obj/list, ids + kinds), unblocking the tenant-emptiness check for the one primitive it currently cannot verify | ✓ | XOT209 |
+| 67 | obj typed pkg/client write methods (attach/detach/move/report/position/retire/capacity-patch/contents/promote/demote), matching the bal/cal/dxp pattern | ✓ | XOT210 |
+| 68 | loc typed pkg/client write methods (def/list/get/patch/delete/report/move; fences split to XOT214), server side already real and working | ✓ | XOT211 |
+| 69 | ts typed pkg/client write methods (TSAppend, TSBatchAppend) -- both server routes confirmed to already exist, same router as the already-wrapped reads | ✓ | XOT212 |
+| 70 | single-round-trip tenant-emptiness endpoint, derived from the real, combined table inventory (PrimaryStoreTables + LocStoreTables + ObjStoreTables + per-tenant Pebble stores) rather than a hand-maintained, drift-prone list | ✓ | XOT213 |
+
+**Wave 15: 5/5, complete.**
+
+### Wave 16 — Client Completeness (7 items, ideal 8.0d, added 2026-08-19)
+
+| # | Summary | Status | Register item |
+|---|---|---|---|
+| 71 | tenant-summary blob correctness fix -- a tenant with real uploaded files and nothing else currently reports Empty=true, a wrong answer from the feature built to prevent wrong answers | ✓ | XOT216 |
+| 72 | loc completeness -- fences, subject position/history, contains/nearby, patterns (14 routes), justified by xoluman's own general ask for loc write coverage | ✓ | XOT214 |
+| 73 | ts timeline lifecycle + sync (7 routes) -- foundational, staged first among the ts stages since rollup/aggregate work depends on it | ✓ | XOT217 |
+| 74 | ts query completeness -- GET /events, GET /events/latest (2 routes) | ✓ | XOT218 |
+| 75 | ts rollup completeness -- def/parent/delete/run/status, rollup/tree (6 routes) | ✓ | XOT219 |
+| 76 | ts aggregates -- /aggregate, /range_aggregate, /full_aggregate (3 routes, highest shape-uncertainty of the ts stages) | ✓ | XOT220 |
+| 77 | ts retention, stats, and data lifecycle -- retention get/patch, stats x2, delete-data, purge-range (6 routes) | ✓ | XOT221 |
+
+**Wave 16: 7/7, complete.**
 
 ---
 

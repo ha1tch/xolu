@@ -119,7 +119,7 @@ than repeated here:
 | 25 | iolu: query + REPL | iolu roadmap item 3 (surface + iaul template); target-directory resolution policy (`IOLU_BASE_DIR`, upward discovery); backend coupling (logical-core via executor) | 3 | — | 6 |
 | 26 | iolu: db check (promote oracles) | iolu roadmap item 5 | 1 | #13 | 6 |
 | 27 | iolu: reindex-fts | iolu roadmap item 2 | 1 | — | 6 |
-| 28 | iolu: backup + verify | iolu roadmap item 4 | 2 | — | 6 |
+| 28 | iolu: backup (rescoped 2026-08-17, reuses `pkg/tenantexport`) + verify | iolu roadmap item 4; T-71's own 2026-08-17 rescope note | 1.5 | — | 6 |
 | 29 | iolu: rebuild-graph | iolu roadmap item 6 | 0.5 | — | 6 |
 | 30 | Event model part 2 | T-07 through T-13 (re-triage at wave entry); @D05c tier 3 (events are commit-fed) | 5 (provisional) | — | 7 |
 | 31 | System stores content: ~metering (ts) and ~billing (bal) | @S03 (residents); tilde-sigil convention; #17 (bal molu surface) | 5 | #9, #17 | 7 |
@@ -240,17 +240,36 @@ but because a Pebble store mechanically cannot join one SQL
 transaction regardless. Full detail, including the correction, in
 dxp-coordinator-design.md.
 
-**Wave 6 — iolu operations (≈ 8.5 days).** Items 24–29. cal
-provisioning first (the only no-workaround gap), REPL second
+**Wave 6 — iolu operations (≈ 8.0 days, revised 2026-08-17).** Items
+24–29. cal provisioning first (the only no-workaround gap), REPL second
 (leverage), then the maintenance set. All new commands written against
 the Store interface per the backend-coupling strategy. Exit: an
 operator can provision, inspect, query, verify, back up, and repair a
-deployment without writing Go.
+deployment without writing Go. **Item 28's backup half rescoped
+2026-08-17** to wrap `pkg/tenantexport.ExportTenant` (T-149, already
+shipped) called offline as a library, rather than building fresh
+SQLite-online-backup-API code -- more coverage (`ts`/`cal`/`bal` Pebble
+stores plus `/loc`/`/obj`, not just cal as originally scoped) for less
+effort (2d -> 1.5d for the item). The original physical/raw-file
+backup scope is not dropped -- split out as XOT203, together with a
+newly-filed restore item (XOT204), into a new wave. See
+`docs/TRACKING.md`'s Plan deviations log, 2026-08-17 entry, for the
+full finding; this paragraph is left otherwise as originally written
+per this project's own "never silently edit the plan to match reality"
+rule.
 
 **Wave 7 — Events, system stores, and residual debt (≈ 10 days,
 provisional).** Items 30–31 plus the register sweep. ~metering and
 ~billing are the substrate dogfooding its own primitives; their
 completion is the natural demo artefact for fundraising conversations.
+**Audited 2026-08-17** -- item 30 confirmed real, pre-existing debt
+(predates this plan); item 31's justification traced to this paragraph
+alone, no consumer found. See `docs/TRACKING.md`'s Plan deviations log,
+2026-08-17 entry, for the full finding. Not rescoped here -- this
+paragraph is left as originally written per this project's own "never
+silently edit the plan to match reality" rule; the deviations log is
+the record of the reconsideration, the same convention item 22's own
+in-place "RETIRED" annotation followed.
 
 **Wave 8 — OQL primitive queries (≈ 13 days, added 2026-07-28).**
 Items 32–37, per oql-primitive-queries.md. The Pebble-backed and
@@ -320,6 +339,18 @@ refusal (`XOLU-OBJ012`).
 
 
 **Wave 12 — pkg/client blob support (≈ 2.0d, added 2026-08-03).** Reopens the client's own documented v0.16.0 exclusion of /blob (pkg/client/client.go's own package doc, drawn by the T-02/Stage-6 audit -- docs/CLIENT_STAGE6_PLAN.md), triggered by a real consumer needing it: Seam AMS. Mirrors T-67's own shape exactly (bal's own client addition -- bal.go+types_bal.go, matching cal.go's established pattern), the closest precedent for adding client support to an already-shipped primitive; T-67 itself was never wave-numbered, so this is the first wave whose purpose is closing a documented client-scope exclusion rather than building a new primitive. Wraps the six native (non-S3-compat) blob endpoints only -- the S3-compatible surface exists for real S3 SDKs, not xolu's own first-party client. Timeseries is the other primitive on the same original exclusion list, named for the same reason in the same audit; not part of this wave, an obvious sibling candidate if reopened later.
+
+
+**Wave 13 — /cron (≈ 15.75d, added 2026-08-17).** Schedules the /cron primitive proposed in docs/proposals/cron-primitive.md (captured v0.30.24) -- the primitive that owns temporal causation the way /fsm owns state causation, and the layer TIME_HANDLING.md always implied for wall-clock intentions but never had. Six items follow the proposal's own §16.2 breakdown grouped into comparable chunks so wave_progress.py's per-item weighting yields honest partial credit; §16 carries the calibration against /loc and /obj (planned vs. actual, including the un-planned hardening tails), which is why the wave is priced at 15.75 planned ideal days with a further +5.0 hardening allowance deliberately NOT expressed as a wave item -- it lands as its own register items when the adversarial pass finds what it finds, per T-125/T-135/T-138 precedent. No hard prerequisites: T-07 is designed around (§6), T-49/T-50 gate only the deferred calendar-aware tier, T-12 is a compatibility constraint. Two decisions must precede item 2 (XOT198): §10.2 recurrence grammar and §10.3 DST enum. Sequencing note: if the eager stale-checkpoint recompute (§8) is a v1 dogfooding job, T-55's remaining /cal and /ts rulings land first; otherwise the janitor migration carries the dogfooding proof alone. Natural v1.1 deferral lever if scoped down: §15 reclamation (≈2.75d), leaving the internal maintenance jobs -- mostly atomic/idempotent -- as the first consumers. **Revised 2026-08-17, same day:** wave 6's own code-reuse review found `pkg/gc` -- an in-tree, already-production, ticker-driven sweep scheduler with four real consumers (blob GC, ts retention, fsm v2 collection, event delivery log v2 cleanup) and two real incident-driven fixes (a double-`Start` lifecycle guard; panic recovery around a sweep, after a real CI-crashing panic) directly relevant to item 2 (XOT198)'s scheduler-loop design. Estimate revised 15.75 -> 15.5d (scheduler-loop lifecycle shell −0.5d for the proven pattern to mirror; dogfooding item +0.25d for covering four consumers instead of one). This paragraph's original figures are left otherwise as written, per this project's own "never silently edit the plan to match reality" rule -- see `docs/TRACKING.md`'s Plan deviations log, 2026-08-17, for the full finding.
+
+
+**Wave 14 — iolu physical backup + restore (≈ 3.0d, added 2026-08-17).** Collects the concerns deliberately postponed during the 2026-08-17 wave-6 code-reuse review (docs/TRACKING.md Plan deviations log, same date), rather than leaving them as scope-exclusion prose with nothing tracking them. T-71 (iolu db backup) was rescoped the same day to wrap pkg/tenantexport's already-shipped ExportTenant (T-149, v0.25.0) -- more coverage (ts/cal/bal Pebble stores plus /loc//obj, not just cal as T-71 originally named) for a fraction of the effort. Two things that reuse genuinely does NOT give T-71 are collected here instead of silently dropped: a byte-exact physical backup (XOT203 -- SQLite's own online-backup API, for disaster-recovery scenarios wanting guaranteed-identical restore-by-copy, which a logical JSON export cannot promise), and restore itself (XOT204 -- named as out-of-scope in T-71 and T-72 since the iolu-operations-roadmap was written, but never once filed as its own item until now). A register-wide search for other related open debt (backup, restore, disaster recovery, litestream) found nothing else genuinely adjacent: FLEET_ARCHITECTURE.md's own Litestream-based continuous replication is real but is fleet/nolu-scoped multi-instance disaster recovery, a different layer and a different document's problem, not bundled here to avoid manufacturing scope the way the wave-7 audit warned against. Two items, honestly, not padded. No hard prerequisites -- XOT203 can start independently of T-71's own (now much smaller) work; XOT204 benefits from XOT203 existing first for its physical-restore path but the export-based restore path does not strictly need it.
+
+
+**Wave 15 — Wave of Mutilation (≈ 6.0d, added 2026-08-17).** Requested by, and scoped entirely around, the xoluman team's own seed-system work (packaged, previewable data sets applied to a connected tenant) -- every claim in their own request document was independently verified against xolu's real source before any item here was filed, not accepted on the strength of the document alone: the obj route table read completely (11 routes, zero enumeration), loc's own GET /loc/list confirmed working exactly as claimed, ts's client confirmed read-only with two real, unwrapped write routes found in the same router (answering that team's own open question about whether this was deliberate), and one real imprecision caught and corrected before filing (the tenant-emptiness item's own authoritative table list is three sibling variables plus Pebble stores, not the single variable the original proposal named). XOT209 and XOT213 are related but independent -- XOT213 would practically resolve XOT209's urgency for the emptiness-check use case specifically, but XOT209's own value (general obj listing) stands on its own. Named for the Pixies song, not for anything more ominous than that -- this wave breaks nothing that a tenant doesn't already survive today.
+
+
+**Wave 16 — Client Completeness (≈ 8.0d, added 2026-08-19).** Extends Wave 15 directly -- same external motivation (xoluman's own seed-system needs), same rigor (every request/response shape verified against real server source before being typed, every method proven against a real running server, not gofmt's syntax validation standing in for correctness). Full staged reasoning, including why ts's remaining surface was recommended for deferral and then explicitly overridden into full scope, lives in docs/CLIENT_WAVE16_PLAN.md -- that document is the authoritative source for stage ordering and estimates; this wave's own item table mirrors it, not the other way around. Stage order matters: XOT216 first regardless of size (a correctness fix, not new scope), XOT217 before XOT218-221 (ts foundation before what depends on it), XOT214 (loc) has no hard ordering constraint against the ts stages and sits second as the smaller, quicker complete win. ~8 days total across all seven stages.
 
 **Not scheduled here, deliberately:** `/far` and `/dxp/mxn`
 (far-and-dxp-mxn.md) are reviewed proposals, not a wave — sequenced

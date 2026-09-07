@@ -68,7 +68,13 @@ ZIP_SOURCES = [
     "LICENSE", "Makefile", "Dockerfile", "docker-compose.yml",
     ".golangci.yml", ".repoman.json", "run_tests.sh", "syncver.sh", "release.sh",
     "go.mod", "go.sum",
-    "cmd", "pkg", "docs", "scripts", "tests", ".github", "tools", "examples",
+    "cmd", "pkg", "docs", "scripts", "tests", ".github", "tools",
+    # "examples" deliberately absent (BUGFIX found 2026-08-14, XOT195):
+    # examples/crm was removed entirely in v0.30.0 (CHANGELOG.md) --
+    # xoluman now maintains it as the canonical end-user example, to
+    # avoid two drifting copies of the same demo. This list was never
+    # updated to match, so every checkpoint zip attempted since v0.30.0
+    # failed on "zip source missing: examples" until this fix.
 ]
 ZIP_OPTIONAL = ["TS_PROGRESS.md"]
 
@@ -463,7 +469,16 @@ def main() -> int:
             say(f"   FAIL {name}: {e}")
             say(f"   run halted; fix and re-run with --resume")
             return 1
-        ctx.journal.record(name, "ok", seconds=round(time.time() - t, 1), **meta)
+        # BUGFIX (found 2026-08-14): a step returning {"skipped": True}
+        # (--no-lint, --no-zip) was still journaled as status "ok" here,
+        # unconditionally -- indistinguishable from a step that genuinely
+        # ran and passed. journal.green() only checks status == "ok", so
+        # a later --resume run, even WITHOUT the skip flag, would see
+        # that stale "ok" and silently skip the step forever, believing
+        # it already passed. Real-world consequence: a --no-lint release
+        # run followed by a plain --resume never actually lints again.
+        status = "skipped" if meta.get("skipped") else "ok"
+        ctx.journal.record(name, status, seconds=round(time.time() - t, 1), **meta)
         say(f"   ok {name} ({time.time() - t:.0f}s)")
 
     tests = ctx.journal.data.get("test", {}).get("tests_run", "?")

@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.30.23
-Last reviewed: 2026-08-10
+Version: 0.30.36
+Last reviewed: 2026-08-19
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -62,7 +62,7 @@ item's Trigger line.
 | T-68 | iolu tenant provision-cal: provisions/rebuilds cal's Pebble occupancy index offline -- a real gap found while scoping item 24, but NOT item 24 itself (see T-69 for that correction) | iolu | P3 | ◐ | After: none. Related: T-69 (item 24's actual scope, cal CRUD, still open). |
 | T-69 | iolu cal create/list/info/delete (item 24, wave 6, as actually specified): the real no-workaround gap -- no operator path exists to create a bookable calendar without writing Go | iolu | P2 | ☐ | After: none. Leads wave 6 per the roadmap's own sequencing ("the only gap with no workaround"). Related: T-68 (a different, already-shipped gap found while scoping this one). |
 | T-70 | iolu query + repl (item 25, wave 6): one-shot OQL/sulpher/SQL query execution, then an interactive REPL borrowing aulsql's iaul shape | iolu | P2 | ☐ | After: none. Second in the roadmap's own sequencing, after cal CRUD (T-69). |
-| T-71 | iolu db backup (item 26a, wave 6): SQLite online-backup API per database file plus a Pebble checkpoint for cal's index, into a timestamped directory | iolu | P3 | ☐ | After: none. Related: T-72 (verify), T-73 (check) -- roadmap recommends batching these four as one operations release, but scopes them as distinct concerns. |
+| T-71 | iolu db backup (item 26a, wave 6): rescoped 2026-08-17 to wrap pkg/tenantexport's already-shipped ExportTenant, called offline as a library -- ships more complete coverage than the original SQLite-online-backup-API scope, which is split out to XOT203 | iolu | P2 | ☐ | After: none. Related: T-72 (verify, unaffected by this rescope), T-73 (check), XOT203 (physical backup, the split-out original scope), XOT204 (restore, both paths). |
 | T-72 | iolu db verify (item 26b, wave 6): PRAGMA integrity_check across all databases, confirming SQL-level structural integrity -- distinct from db check's oracle-based semantic checks (T-73) | iolu | P3 | ☐ | After: none. Related: T-71 (backup), T-73 (check, a different kind of verification). |
 | T-73 | iolu db check: promote remaining oracles (item 26c, wave 6) -- cal index-equals-rebuild and blob-usage-walk oracles still need wiring in; graph and all three bal oracles already are | iolu | P3 | ☐ | After: none, but directly enabled by T-68 (cal's rebuild path already exists as a callable function). Related: T-71 (backup), T-72 (verify, a different kind of check). |
 | T-74 | iolu db rebuild-graph (item 26d, wave 6): explicit offline graph rebuild with a before/after node/edge count report -- the rebuild logic already exists server-side, this is invocation and reporting only | iolu | P3 | ☐ | After: none. Related: T-71/T-72/T-73 -- the fourth and cheapest of the roadmap's recommended operations-hygiene batch. |
@@ -80,6 +80,16 @@ item's Trigger line.
 | T-134 | obj patterns: the full §4a mechanism deferred out of T-124 (obj-01-rest-api.md §4a, obj-00-design.md §7a) -- def/extract/list/get/delete endpoints, pattern/pattern_after wiring into attach, pattern/pattern_id/pattern_deleted GET fields, XOLU-OBJ013 reachability | obj | P3 | ☐ | none directly |
 | T-137 | tsqlparser chained method-call access (`@FSM.state(1).name`) drops the base call entirely -- structural parser defect, not a display bug | oql | P3 | ☐ | After: none. Relevant to: whichever wave-8 provider first needs chained access (not T-76, not scoped this wave). |
 | T-148 | dispatchEvent fires unconditionally on every v1 CRUD write, regardless of APIV2Enabled -- eventStore() never checks it, so any v1-only deployment logs a WARN on every single write (event_defs genuinely doesn't exist until v2 is on) | server | P3 | ☐ | — |
+| XOT196 | New repoman-descended tool, scripts/str_replace_extended.py: format-aware, journaled, base64-payload substitution -- built to retire the failure class that direct str_replace/sed/awk substitution invites (shell-quoting corruption, edits landing without a syntax check), following a real gap found and fixed during the tool's own build (a balanced escape-and-reenter injection the first delimiter check missed) | tooling | P2 | ◐ | After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, Horacio applying the proposed working-agreement and skill amendments. |
+| XOT197 | /cron item 1: storage, def/job registration, prototype-clone, capability introspection -- the def is the prototype, the job the armed clone; verb capabilities (cancellable, progress-reporting) discovered by interface assertion at def time and recorded on the def, never self-declared | cron | P2 | ☐ | Blocks: every other /cron item. After: none (design decisions cron-primitive.md §10.2/§10.3 should be settled before item XOT198 starts, not before this one). |
+| XOT198 | /cron item 2: recurrence rule object, IANA zones, DST policy, scheduler loop, tick plane, missed-fire + overlap policy, suppression-streak counter, watchdog shape + reset -- the deep pit and the racy loop, deliberately one item so the tick plane and the rules that decide which ticks chime are built and tested together | cron | P2 | ☐ | After: item XOT197. Blocks: items XOT199, XOT201, XOT202. Prerequisite decisions: cron-primitive.md §10.2 (recurrence grammar) and §10.3 (DST enum) MUST be settled before this item starts. |
+| XOT199 | /cron item 3: the chime -- `cron.chime` event type into EVENT_MODEL.md's closed set, shape discriminated in event_latch_source, payload carrying due-instant/def/job/shape and originally-due for catch-up ticks; unconditional on every non-suppressed tick regardless of T-07 | cron | P2 | ☐ | After: item XOT198. Blocks: item XOT201 (job control's info reads chimes alongside ticks). Not blocked by T-07 -- designed around it (cron-primitive.md §6). |
+| XOT200 | /cron item 4: verb registry, the cancellable and progress-reporting interfaces, and two verbs (`fsm_walk`, one prune) -- capabilities are what the Go type implements, discovered by item XOT197's assertion; each further verb is its own small addition, never speculative | cron | P2 | ☐ | After: item XOT197. Blocks: items XOT201, XOT202. cron-primitive.md §10.6 (OQL-verb reconciliation with the events OQL-action target) is deliberately NOT in this item. |
+| XOT201 | /cron item 5: job control and execution observability -- `info`/`pause`/`resume`/`stop`/`kill` split across job and execution planes, in-memory execution and progress state (never persisted; Postgres pg_stat_progress precedent), `kill` refuses honestly on non-cancellable verbs, `resume` hands accumulated due instants to the job's own missed-fire policy | cron | P2 | ☐ | After: items XOT198, XOT199, XOT200. Blocks: item XOT202 (system jobs are controlled through this surface). cron-primitive.md §10.10 (progress phase vocabulary) and §10.11 (stop-drain deadline) decided here. |
+| XOT202 | /cron item 6: retention + `~trim`, reclamation classes + Reclaimer interface + `/blob` Reclaimer + `~sweep`, system jobs armed at startup, dxp janitor migrated onto /cron, REST surface + pkg/client + molu + docs + dormant-guard registration -- the wave's closing item, where the primitive proves itself by maintaining xolu on its own clock | cron | P2 | ☐ | After: items XOT197, XOT198, XOT199, XOT200, XOT201. Blocks: none. Sequencing note: if the eager stale-checkpoint recompute (cron-primitive.md §8) is included as a v1 dogfooding job, T-55's remaining /cal and /ts rulings should land first; otherwise the janitor migration carries the dogfooding proof alone. |
+| XOT203 | iolu db backup: physical/raw-file single-instance backup -- SQLite online-backup API per database file plus Pebble checkpoints for ts, cal, and bal's rollup index (all three, corrected from T-71's original cal-only scope) -- split out of T-71 when T-71 was rescoped to reuse pkg/tenantexport's logical export instead | iolu | P4 | ☐ | After: none. Related: T-71 (the logical-export path this complements, not replaces), T-72 (db verify, unaffected by this split). |
+| XOT204 | iolu db restore -- documented manual procedure only today (T-71/T-72's own stated initial boundary: 'copy back onto a stopped server'); never filed as its own trackable item until now | iolu | P4 | ☐ | After: XOT203 (physical backup) for full restore-by-copy; can restore from tenantexport's logical export independently once that path exists, at reduced guarantee (see scope note). |
+| XOT215 | roles.py's Go block-comment detection (_go_role) is a naive substring count of '/*'/'*/' across the whole file, not comment/string-aware -- a literal '/*' inside an ordinary // line comment (e.g. a URL pattern like /api/v2/cal/*) is misread as an unclosed block comment, misclassifying every line after it as go-comment for the rest of the file | tooling | P3 | ☐ | After: none. |
 
 ---
 
@@ -96,6 +106,136 @@ item's Trigger line.
 
 
 ## Plan deviations (recorded per @P header rule)
+
+- **2026-08-17 — wave 6 code-reuse review: T-71 rescoped, wave 13
+  revised, wave 14 created, one real tooling bug found and fixed.**
+  Direct instruction: review `pkg/tenantexport` (the existing
+  backup-to-blob feature) for wave-6 reuse before building T-71 fresh,
+  then rescope everything the review touched and move postponed
+  concerns to a new wave. Four linked outcomes, one session:
+  - **T-71 rescoped in place**, not replaced: `pkg/tenantexport`
+    (T-149, v0.25.0, already shipped) exports offline as a library
+    call, no server required, and already covers more (`ts`/`cal`/`bal`
+    Pebble stores plus `/loc`/`/obj`) than T-71's original SQLite-
+    online-backup-API scope ever named. Estimate 2.0d -> 0.5d.
+  - **Two postponed concerns split out and filed, not dropped**:
+    XOT203 (physical/raw-file backup -- the byte-exact guarantee
+    `tenantexport`'s logical export cannot make) and XOT204 (restore --
+    named as out-of-scope in T-71/T-72 since the roadmap was written,
+    never once filed as its own item until now). A register-wide
+    search for other related debt (backup, restore, DR, Litestream)
+    found nothing else genuinely adjacent -- `FLEET_ARCHITECTURE.md`'s
+    Litestream replication is real but fleet/nolu-scoped, a different
+    document's problem, not bundled in to avoid the wave-7-audit's own
+    named failure mode (manufacturing scope).
+  - **Wave 14 created** (`iolu physical backup + restore`, items
+    64-65, ≈3.0d, XOT203/XOT204) via `add_wave.py`. Wave 6 revised
+    8.5d -> 8.0d to match T-71's new estimate.
+  - **`pkg/gc` found as in-tree prior art for wave 13 (/cron), while
+    tracing `tenantexport`'s TTL sweep.** A generic, already-production
+    ticker scheduler with four real consumers and two real incident-
+    driven fixes (a double-`Start` lifecycle guard; panic recovery
+    after a real CI-crashing panic, T-156/T-157) -- more authoritative
+    than any of `cron-primitive.md` §13's external DBMS citations,
+    since its incidents are this project's own. Folded in as new §13.10,
+    a panic-recovery requirement added to §6 (the same lesson,
+    inherited rather than re-learned), and §8's dogfooding table gained
+    four already-working migration targets. Wave 13 revised 15.75d ->
+    15.5d (scheduler-loop lifecycle shell -0.5d for the proven pattern
+    to mirror; dogfooding item +0.25d for four consumers instead of
+    one) -- the harder half of /cron's design (recurrence rules, DST,
+    tick/chime planes) has no `pkg/gc` analogue and gained nothing.
+  - **One real, previously-latent tooling bug found and fixed same
+    session, filed and closed as XOT205:** `wave_progress.py`'s
+    `all_wave_tnums` exclusion set recognised only `T-NNN` ids, never
+    `XOT NNN` -- invisible until wave 14 shared a theme (`iolu`) with
+    wave 6 and an XOT-format item needed excluding from the wrong
+    wave's debt line. Fixed, verified against both broken and fixed
+    output, no regression on an unaffected wave's own debt/blockers
+    line (wave 8, checked directly).
+  - **Checked, not assumed: none of this belonged in repoman.**
+    T-56's own scope line names exactly five repoman-covered scripts
+    (`ed`/`roles`/`register`/`guards`/`syncver`) -- `wave_progress.py`
+    and `add_wave.py` are xolu-substrate-specific tooling with no
+    repoman analogue, confirmed by reading T-56 directly rather than
+    assumed. T-56's own text separately surfaced that the sync
+    direction on two *other*, unrelated defects runs the other way --
+    repoman's extraction already fixed two things xolu's local
+    `register.py` still carries latently -- noted on T-56 for whenever
+    it's picked up, not acted on here.
+  - **Rebased 2026-08-17, same session: this entire entry originally
+    filed against a stale local clone of xolu.** A fresh GitHub clone
+    at session start silently returned v0.30.23, missing a full day of
+    real work (v0.30.24-26, including XOT193-196) that existed only in
+    an unpushed local checkpoint, surfaced only when that checkpoint
+    was supplied directly. Four ids this session had assigned
+    (XOT194-197 in the original filing) collided with different, real,
+    already-shipped content under those same numbers in the checkpoint
+    lineage; a fifth (the session's own XOT193, a `ZIP_SOURCES` fix)
+    turned out to duplicate a bug already found and fixed independently
+    in the checkpoint lineage under its own real XOT195, and was
+    dropped rather than re-filed. All nine of this session's real items
+    renumbered to the true next-free sequence (XOT197-205) against the
+    checkpoint as base; content unchanged, only ids and cross-references
+    corrected. Built as a separate merged tree, the stale branch and the
+    real checkpoint both kept intact and unmodified for retrieval.
+
+- **2026-08-17 — wave 7 audited for real vs. rationalised justification;
+  finding split, no scope change yet, decision pending.** Direct
+  question, prompted by wave 7 sitting at 0/2 since 2026-08-01 with no
+  blocker recorded (`docs/RESOLVED.md`/`CHANGELOG.md` show attention
+  went to waves 9, 10, 12, and now 13 instead): was wave 7 real need,
+  or work rationalised into existence by the plan's own investor-facing
+  framing? Examined item by item, evidence traced rather than asserted.
+  - **Item 30 (event model part 2, T-07 through T-13) — real, and
+    predates any wave or fundraising context.** Traced to
+    `docs/API_V2_TRACKING.md`'s S9 entry (v0.10.0, patch015): the async-
+    only, at-most-once base explicitly deferred "sync execution,
+    retry/backoff, dead-letter/replay, `sulpher`/`fsm.walk` actions, and
+    the other event types" to S13–S17 -- the identical scope, filed as
+    debt the moment the base shipped, months before the wave programme
+    existed. T-07 names a real, if not yet triggered, failure mode:
+    "Blocks any consumer (molu included) treating events as source of
+    truth for state change." Not urgent today -- nothing currently
+    depends on events as authoritative, and `docs/proposals/cron-
+    primitive.md` (this session, wave 13) explicitly designed `/cron`'s
+    chime *around* T-07 rather than waiting on it, one more concrete
+    data point that nothing live is blocked by it. **Verdict: legitimate
+    debt, correctly filed, not falsely prioritised as urgent** -- the
+    plan's own "(provisional)" tag on its 5-day estimate already hedges
+    honestly.
+  - **Item 31 (system stores content, T-114: `~metering`/`~billing`) --
+    the suspicion holds up on the evidence found.** The prerequisite
+    *mechanism* is real and already shipped (`pkg/timeseries/sysmask.go`
+    -- `IsSystem`, tested, in production use). But no consumer, internal
+    or downstream, was found anywhere asking for usage metering or
+    billing: every real Seam AMS trigger in `docs/RESOLVED.md` concerns
+    guard syntax, FSM validation, or client bugs -- none concern billing,
+    ever. The item's own cited source, `@S03` ("residents"), does not
+    resolve to any document findable in this tree, so its rationale
+    beyond the plan's own prose cannot be independently confirmed either
+    way. That prose is the plan's ONLY stated rationale, quoted exactly:
+    *"their completion is the natural demo artefact for fundraising
+    conversations."* A follow-up reconstruction (API-call counting per
+    tenant, noisy-neighbour detection, Seam billing) was floated and
+    checked: noisy-neighbour mitigation IS real and already documented,
+    but in `docs/FLEET_ARCHITECTURE.md`'s own "Future Considerations"
+    section -- unbuilt, fleet/nolu-scoped, about advisory CPU/IO quotas
+    at the hot-instance level, a different and later concern than a
+    substrate-resident API-call counter. Seam billing remains pure
+    hypothesis, zero recorded demand. Generic per-tenant API-usage
+    counting is buildable and would serve `FLEET_ARCHITECTURE.md`'s
+    already-spec'd `iolu report usage --tenant` command independent of
+    billing -- but "buildable and sensible" is not the same claim as
+    "requested," and only the weaker claim holds here.
+  - **Not decided here, deliberately -- pending Horacio's call:**
+    whether to (a) leave T-114 as filed, (b) narrow its scope to generic
+    API-usage counting only (drop the billing framing, keep the fleet-
+    report tie-in), (c) mark it explicitly parked pending a real
+    consumer, or (d) drop it from wave 7 and re-shape wave 7 around item
+    30 alone (≈5 provisional days, not the current ≈10). No register
+    item's status or priority changed by this entry; T-114 (§ below)
+    carries a pointer to this finding.
 
 - **2026-08-01 — waves 9 and 10 created: `/loc` and `/obj` formally
   scheduled.** `SUBSTRATE_DEVELOPMENT_PLAN.md` previously had no wave
@@ -675,6 +815,7 @@ Theme: chronicle · Priority: P1 · Status: ◐ · Blocks/after: subsumed T-51's
 - **Delivered (0.16.24):** the shared vocabulary (`pkg/chronicle/policy.go`: TemporalPolicy, ErrBackdatedRefused sentinel, CheckAdmission reference function, CanTransition) and the full bal wiring — guard-plane `temporal_policy` column with legacy detection, the admission predicate folded into both Transfer leg UPDATEs (write-first doctrine preserved), XOLU-BAL006 via BackdatedError unwrapping to the sentinel, in-transaction stale-marking of invalidated checkpoints, stale-skipping as-of reads, Checkpoint-clears-stale recompute, and the VerifyCheckpoints oracle prong. **Recorded deviation from the filed wording:** same-instant entries are ADMITTED under append_only (refusal is strictly-earlier only) — batches and bal's own two-leg writes legitimately share timestamps; asserted by test so it cannot silently narrow. A design consequence worth noting: the checkpoints table moved from InitRollup to core Init, because Transfer's write path now maintains checkpoint staleness in-transaction — the journal plane owns the table's lifecycle.
 - **Remaining, re-scoped after recon (2026-07-22):** /cal wiring is feasible as designed — SQLiteBookingSource calendars have an authoritative row for the policy column — but the admission INSTANT is ambiguous (booking start time vs creation time) and needs a ruling. /ts is BLOCKED on two findings: (a) no per-timeline guard-plane row exists (points live in Pebble keyed by timeline id; policy storage requires a timeline registry that does not exist), and (b) ts ingestion normally tolerates late-arriving points, so an append_only default would drop every delayed telemetry packet — suggesting ts wants `backdated` as its own default, which cuts against the accounting-default rule as stated and therefore needs the team's explicit ruling on per-primitive defaults before any wiring.
 - **Not in scope:** narrowing transitions; per-entry policy overrides; retroactive policy migration tooling.
+- **Vocabulary note (2026-08-15, terminology only, no scope change):** SQL:2011's bitemporal vocabulary names this item's policy enum exactly — **system time** (when the record knew) vs **application/valid time** (when it was true in the world). `append_only` is "valid time must track system time"; `backdated` is "valid time runs free of system time." Independent confirmation of the recorded same-instant deviation: SQL Server's temporal tables stamp periods with the *transaction start time*, so batch rows legitimately share instants — a second system converging on same-instant admissibility under append_only. See docs/proposals/cron-primitive.md §13.8.
 
 
 ### T-66. chronicle.Engine.Append has no locking (lost-update race on concurrent same-bucket appends) -- currently masked for bal by SQL commit latency, but the fix belongs in chronicle itself before ts migrates onto it
@@ -700,9 +841,19 @@ Theme: chronicle · Priority: P2 · Status: ☐ · Blocks/after: After: none. Re
 Theme: tooling · Priority: P3 · Status: ☐
 
 - **Trigger:** repoman v0.1.0 extracted from xolu's scripts (2026-07-22): ed/roles adopted verbatim, register/guards/syncver generalised onto .repoman.json config, release orchestration split into a portable core (relcore.py, manifest-driven) with archive/syncver builtins. Eighteen-check selftest green.
-- **Scope:** replace scripts/{ed,roles,register,guards,syncver}.py with thin wrappers over (or direct copies of) the repoman versions; express release.py's xolu-specific steps (make targets, sharded go-test via testrun.py, c04dcheck, gate, generators) as either a relcore manifest plus local step commands, or keep release.py and have it import relcore's Journal/archive. xolu's .repoman.json (added this release) already carries the id prefix and version.go sync target, so repoman's register/guards/syncver operate on this tree TODAY — migration is about de-duplicating code, not enabling function.
-- **Ordering note:** repoman fixed two defects during extraction that xolu's copies still carry latently: a hardcoded id-prefix in register add's row locator (harmless while the prefix is T) and nothing else — the HEAD_RE multiline fix was introduced BY the extraction, not inherited. Verify against repoman's selftest expectations during migration.
+- **Repoman has grown substantially since this item was filed, same day, single session (2026-08-17): v0.1.0 -> v0.5.0.** New: full generalised wave management (wave_progress.py/add_wave.py, ported FROM this project's own scripts of the same name), a config-driven id-format generalisation matching this project's own T-/XOT- dual-format need, guard_id_prefix generalisation, a fixed syncver.check()/check_detail() API split (a real footgun found and fixed entirely within repoman's own, separately-designed syncver.py -- see below, this never affected this project's own syncver.py, which is unrelated code), str_replace_extended.py ported and extended with JavaScript/TypeScript/CSS/HTML support (this project's own copy predates and lacks all four), and doctor.py, a new environment-diagnostic tool. 43-check outer selftest, plus str_replace_extended.py's own 24-path and ed.py's own 9-path embedded selftests.
+- **Corrected 2026-08-17: this item's own prior text overstated repoman's current usability against this tree.** The claim "repoman's register/guards/syncver operate on this tree TODAY" was checked directly, not assumed, and found false for two of the three:
+  - **register.py: does NOT work against this tree as configured today, and fails SILENTLY, not loudly.** Pointing repoman's own (config-driven, generalised) register.py at this project's real, unmodified .repoman.json returns 0 open items, then 9 (against a real 58), with no error -- a materially worse failure mode than refusing to run, since a caller trusting the result would be silently wrong. Root cause, now precisely known rather than guessed: this project's own .repoman.json sets only id_prefix; repoman's own register.py additionally needs id_separator (empty string, not the default -, since this project's XOT ids carry no separator) and legacy_id_prefix/legacy_id_separator ("T"/"-", for the frozen pre-XOT id sequence that is still most of this project's own open items). Verified: adding exactly these three keys to a scratch copy of .repoman.json makes repoman's own register.py agree byte-for-byte with this project's own scripts/register.py (58 open items both ways).
+  - **guards.py: this part of the claim is TRUE, checked and confirmed.** Repoman's own guards.py, pointed at this tree with zero extra config, produces output identical to this project's own scripts/guards.py -- this project's guard ids already use the default G- prefix repoman assumes.
+  - **syncver.py: the claim doesn't meaningfully apply.** This project's own scripts/syncver.py is not a repoman-descended tool at all -- its own module docstring says so directly ("Direct port of syncver.sh"), and it was never intended to be swapped for repoman's version. The two tools share a name and a similar purpose, nothing else; this project's own check() already returns a plain bool and always has, unrelated to repoman's own, separate fix to its own check() (see repoman's own CHANGELOG, 0.3.0).
+  - **wave_progress.py/add_wave.py: this item's own original text does not mention these at all -- they did not exist in repoman when this item was filed.** They now do (repoman 0.2.0), ported FROM this project's own scripts of the same name. Checked the same way: repoman's own wave_progress.py, pointed at this tree, agrees with this project's own copy once (and only once) wave_tracking, wave_plan, wave_short_names, and wave_themes are also supplied in .repoman.json -- none of which this project's own config currently carries, since this project's own scripts hardcode all of it directly rather than reading the config file at all.
+- **The underlying reason all of the above needed checking rather than trusting the original claim: this project's own scripts/ directory was never actually built on repoman's config.py system.** Every tool here -- register.py, guards.py, syncver.py, wave_progress.py, add_wave.py -- hardcodes its own paths and values directly (.repoman.json's own _comment field says as much for the id prefix specifically: "This file exists as a discoverable, documented anchor point, not a mechanism register.py actually reads"). This project's tools share DESIGN LINEAGE with repoman's, not ARCHITECTURE. A genuine migration is a bigger undertaking than "replace scripts/{ed,roles,register,guards,syncver}.py with thin wrappers" suggested when this item was first filed -- it means either adopting repoman's config.py system properly (config.py itself, plus the seven keys named above added to .repoman.json) or keeping this project's own call sites and swapping only the underlying implementation behind them.
+- **Scope, revised:** replace scripts/{ed,roles,register,guards,syncver,wave_progress,add_wave}.py with thin wrappers over (or direct copies of) the repoman versions, PLUS add config.py and populate .repoman.json with the seven keys now precisely known (above) -- not previously scoped, since their need was only established by this correction. Express release.py's xolu-specific steps (make targets, sharded go-test via testrun.py, c04dcheck, gate, generators) as either a relcore manifest plus local step commands, or keep release.py and have it import relcore's Journal/archive.
+- **Known, accepted divergence, not urgent for this project specifically:** this project's own scripts/str_replace_extended.py/scripts/roles.py predate and lack repoman's own JavaScript/TypeScript/CSS/HTML support (repoman 0.4.0) -- low cost today, since this project is Go-only, but a real gap between the two copies, named here rather than left silent.
+- **A separate, low-risk fix (not part of the migration question) backported the same day this correction was written:** scripts/add_wave.py's own insert_tracking_section depended on a hardcoded "## 3." section-number anchor in SUBSTRATE_TRACKING.md -- fragile (would break silently if that document's own numbering ever changed), fixed in repoman first (0.2.0) by finding the last existing wave section and inserting after it instead, no anchor needed. Backported here as XOT206 -- a pure robustness fix, no architectural entanglement, unlike everything else in this item.
 - **Not in scope:** c04dcheck (repo-local by nature), TESTING.md/badge generators, gate pins.
+- **Strategic note, 2026-08-17 (direct instruction, recorded not acted on):** as soon as repoman genuinely achieves parity-or-better with this project's own ad hoc tooling, this project's own copies should likely be replaced with repoman's entirely, rather than continuing to hand-port individual features both directions indefinitely. XOT207 (wave visibility, same date) is a concrete, live instance of exactly the maintenance cost this note is about: a feature built in repoman first, then manually re-implemented here with a deliberately different persistence mechanism, because this project's own architecture (hardcoded paths and values, no config.py) doesn't yet support repoman's own approach directly. The precise gap between "repoman could operate on this tree" and "actually does, natively" is now known exactly (see this item's own 2026-08-17 correction, above) rather than estimated -- three config keys for register.py, four for wave_progress.py/add_wave.py, zero for guards.py. Not a trigger to migrate today; a standing reminder that the case for eventual migration gets stronger with every feature added twice.
+- **Update, same day, 2026-08-17 (XOT208): most of the migration this note anticipated has already happened.** Following a direct instruction to move on the readiness assessment above rather than wait for every piece to be ready, this project's own scripts/{ed,roles,register,guards,syncver,wave_progress,add_wave,str_replace_extended}.py were swapped for repoman's own generalised versions -- config.py and doctor.py added alongside them -- with every swap verified against real, current project data before landing, and the whole set proven together through one real, complete release.py run (v0.30.30), not a synthetic test. release.py itself remains this project's own, deliberately -- the one piece the readiness assessment named as genuinely not ready, and still true: its 12-step pipeline has no equivalent in relcore.py's own two generic builtins. This item's own original Scope (above) is accordingly narrowed to release.py alone; everything else it named is done.
 
 
 ### T-106. two small release/version tooling gaps found while running the actual 0.20.0 release: release.py's zip exclusions didn't cover .pyc/__pycache__ (fixed), syncver.py's bump-minor doesn't respect --help and executes instead (found, not fixed)
@@ -715,8 +866,29 @@ Theme: tooling · Priority: P4 · Status: ◐ · Blocks/after: After: none. Neit
 - **Both findings are about the tooling used to ship this exact release, not about xolu's own shipped code** -- filed as their own item rather than folded into T-105 or any other dxp-scoped item, since neither has anything to do with dxp.
 - Left at ◐ (gap 1 fixed and verified; gap 2 genuinely still open, not closed) -- ready to formally close gap 1's portion whenever gap 2 is also addressed, or split if that's preferred later.
 
-## storage-config
+### XOT196. New repoman-descended tool, scripts/str_replace_extended.py: format-aware, journaled, base64-payload substitution -- built to retire the failure class that direct str_replace/sed/awk substitution invites (shell-quoting corruption, edits landing without a syntax check), following a real gap found and fixed during the tool's own build (a balanced escape-and-reenter injection the first delimiter check missed)
 
+Theme: tooling · Priority: P2 · Status: ◐ · Blocks/after: After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, Horacio applying the proposed working-agreement and skill amendments.
+
+- **Trigger:** direct request, following two edit mistakes this session (a shell-quoting corruption of a comment's own escape sequences; a duplicated line from an overlapping replacement span) plus the project's own longer-standing recorded incidents in the same class (the `` `+expr+` `` inside `"..."` corruption pattern named in the working agreement's own §7.4). Requested design: a `str_replace`-shaped tool whose search/replace content travels as base64-encoded JSON, never as a CLI argument; format-aware; generates collision-proof markers; and something Claude is actually steered toward using instead of the built-in `str_replace`, `sed`, or `awk`.
+- **Design proposed first, approved, then implemented exactly as proposed** -- payload schema, refusal classes, per-format syntax validators, and the enforcement-layer question (a tool cannot be un-installed from the harness; steering has to make the right tool the reflexively cheap one, not attempt to remove the wrong ones) were all laid out and agreed before any code was written.
+- **`scripts/roles.py` extended**, not forked: python/json/yaml/shell classifiers added alongside the existing go/md ones, wired into the same `classify()` dispatch `ed.py` already depends on -- one classifier, two consumers, no drift between them. Each new classifier's own docstring documents its known heuristic limitations honestly (YAML block scalars, shell heredocs, Python f-string interiors) rather than silently misclassifying them without a record.
+- **`scripts/str_replace_extended.py` built**: JSON payload (stdin or file) with base64-encoded UTF-8 search/replace content; mandatory `expect` count and `roles` assertion (no silent defaults); Unicode-normalization-mismatch detection distinct from a genuine zero-match; a two-part delimiter-integrity precheck (below); per-format post-apply syntax validation (`gofmt -e`, `ast.parse`, `json.loads`, a YAML/Markdown structural lint, `bash -n`) with automatic rollback on failure; atomic multi-op/multi-file batching by default; collision-checked marker generation (`⟦RM:...⟧`, U+27E6/U+27E7) with a sweep op; and journal integration through `ed.py`'s own WAL (`ed.record`/`ed.load_journal`) -- one undo history for both tools, not two.
+- **A real design gap found and fixed during the tool's own build, not assumed correct:** the first delimiter-integrity implementation only sampled syntactic role *after* a replacement, comparing original-vs-new at increasing offsets. Selftest case 5 (`hello" + injected + "` replacing `hello` inside a Go `"..."` string) exposed that this misses a *balanced* escape-and-reenter -- the injected content opens and recloses the string with an even number of quotes, so parity (and therefore role) at every point *after* the replacement matches perfectly even though unescaped code was injected *inside* it. Traced precisely (a standalone script printing the role trajectory character-by-character through the replacement's own span, not guessed at) before fixing. Fixed with a second check: when the edit starts inside a content role (string/comment, any format), every offset within the replacement's own interior must classify as that same role throughout -- any deviation refuses. Verified the fix doesn't over-correct into false positives: a companion selftest case confirms inserting a complete, self-balanced string literal into ordinary code is *not* refused, since that check only applies when the edit starts inside a content role to begin with.
+- **18 selftest paths, all green**, covering: basic sub, count-mismatch, missing-expect/missing-roles, role-mismatch with real census, the delimiter-break case above (both the interior and the after-tail variant), syntax-check-failure-triggers-rollback, dry-run leaves disk untouched, marker generation/uniqueness/sweep, normalization-mismatch detection (without ever silently auto-normalizing), all four new format classifiers each producing a clean sub plus a passing validator, `ed.py undo` reverting a `str_replace_extended`-made edit, an atomic batch rolling back an already-staged change in the same file when a later op in the same batch fails its syntax check, the false-positive guard above, and a direct regression test for the original session incident (tabs/newlines/apostrophes landing byte-exact, confirmed by asserting no literal backslash-n or backslash-t sequence appears on disk).
+- **Dogfooded on a real edit, not just synthetic selftest cases:** used to add its own row to `docs/TOOLING.md`'s file-inventory table, authored via the documented library path (`from str_replace_extended import apply_payload`, content as ordinary Python string literals, base64-encoded by the driver itself -- no shell one-liner at any point). Confirmed in `ed.py log` as a normal journaled transaction alongside every other edit this session.
+- **Enforcement is procedural, not structural** -- the tool cannot be removed from the harness, so three layers were used to make the correct tool the reflexively easy one: (1) a memory edit steering future sessions toward it and away from the built-in `str_replace`/`sed`/`awk` with no exception; (2) a proposed working-agreement amendment (Part 1 §6.2/§6.3's tool-precedence ladder), presented to Horacio as exact replacement text since Claude cannot edit `userPreferences` directly; (3) a proposed `repoman-tools` skill update with the same content, presented as a deliverable file since `/mnt/skills/user/` is read-only to this session. None of the three claim to make bypass impossible -- only procedurally discouraged and, for (1), immediately actionable.
+- **Not yet done:** upstreaming to `github.com/ha1tch/repoman` itself -- built and verified in xolu's own in-repo copy first (this repository's own scripts are authoritative pending T-56's migration), matching how every other repoman-descended tool in this tree has been introduced. Also not done: extending repoman's own top-level `selftest.py` (18 checks) with these new paths, since that file lives in the separate repoman repository, not this one.
+
+### XOT215. roles.py's Go block-comment detection (_go_role) is a naive substring count of '/*'/'*/' across the whole file, not comment/string-aware -- a literal '/*' inside an ordinary // line comment (e.g. a URL pattern like /api/v2/cal/*) is misread as an unclosed block comment, misclassifying every line after it as go-comment for the rest of the file
+
+Theme: tooling · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** found live while editing `pkg/server/server.go` for XOT213 (wave 15) -- `str_replace_extended.py` refused a plainly-code anchor (`tr.Get("/blob/export/{ticket}", ...)`) with role-mismatch, reporting `go-comment`. Traced directly to `scripts/roles.py`'s own `_go_role`: line 826's `// /api/v2/cal/*; the manager owns...` contains the literal two-character substring `/*` (from `cal/*`) inside an ordinary `//` comment -- `before.count("/*") > before.count("*/")` then reports every subsequent offset in the file as inside an unclosed block comment, confirmed directly by checking `func (s *Server) setupRoutes()` (line 918, unambiguous code) also misclassified as `go-comment`.
+- **Root cause, precisely:** the block-comment fallback counts raw substring occurrences of `/*`/`*/` anywhere in the text, without excluding occurrences inside `//` line comments or string literals (double-quoted or backtick) -- unlike the rest of `_go_role`, which does correctly strip strings before checking for `//`.
+- **Scope of the real fix (not done here):** `_strip_go_strings` already exists and does the right thing for the `//` check just above it in the same function -- the block-comment counting pass needs the equivalent treatment, additionally stripping `//`-comment tails (to end of each line) before counting `/*`/`*/`, not just quoted strings.
+- **Worked around for this session's own edit** via `ed.py` (span-based, no role dependency) rather than blocked on this fix.
+- Not started -- found and filed, not yet fixed in either repoman (the canonical source) or xolu's own migrated copy (XOT208).
 
 ## iolu
 
@@ -755,14 +927,17 @@ Theme: iolu · Priority: P2 · Status: ☐ · Blocks/after: After: none. Second 
 - **Roadmap's own effort estimate:** ~2-3 days with iaul as the template and the executor already in-tree.
 - Not started.
 
-### T-71. iolu db backup (item 26a, wave 6): SQLite online-backup API per database file plus a Pebble checkpoint for cal's index, into a timestamped directory
+### T-71. iolu db backup (item 26a, wave 6): rescoped 2026-08-17 to wrap pkg/tenantexport's already-shipped ExportTenant, called offline as a library -- ships more complete coverage than the original SQLite-online-backup-API scope, which is split out to XOT203
 
-Theme: iolu · Priority: P3 · Status: ☐ · Blocks/after: After: none. Related: T-72 (verify), T-73 (check) -- roadmap recommends batching these four as one operations release, but scopes them as distinct concerns.
+Theme: iolu · Priority: P2 · Status: ☐ · Blocks/after: After: none. Related: T-72 (verify, unaffected by this rescope), T-73 (check), XOT203 (physical backup, the split-out original scope), XOT204 (restore, both paths).
 
-- **Trigger:** wave 6 planning/grouping pass (docs/proposals/iolu-operations-roadmap.md item 4, backup half).
-- **Scope:** `iolu db backup --base-dir D [--tenant NAME]` uses the SQLite online-backup API for each database file, plus a Pebble checkpoint for cal's occupancy index state (the roadmap's own note: hand-rolled file copies have "no handling of the cal Pebble index" today -- a real gap this closes), into a timestamped directory.
-- **Explicitly not in scope:** restore. The roadmap states this deliberately: "Restore remains a documented manual procedure initially (copy back onto a stopped server) rather than a command." Not a deferred oversight -- a stated initial-scope boundary.
-- **Roadmap's own effort estimate (backup+verify together):** ~2 days. Filed as its own item per this session's request for granularity; verify (T-72) is a genuinely separate concern despite sharing the roadmap's combined estimate.
+- **Priority raised P3 -> P2**, 2026-08-17: mostly-reuse work, cheap to ship, no longer the original from-scratch estimate.
+- **Trigger:** wave-6 code-reuse review, 2026-08-17. `pkg/tenantexport` (T-149, v0.25.0) already does most of what this item was going to build: `ExportTenant` takes a raw `*sql.DB`, not an HTTP client, so it is directly callable offline, the same established pattern `T-68`'s `calprovision.go` already uses -- no running server required. `blob.NewStore(dir, maxSize)` is likewise directory-based and offline-openable. `iolu tenant list` already solves "enumerate every tenant."
+- **Rescoped implementation:** `iolu db backup --base-dir D [--tenant NAME]` opens each tenant's primary `*sql.DB` and blob store directly, calls `tenantexport.ExportTenant` per tenant (defaulting to every tenant `iolu tenant list` returns when `--tenant` is omitted), writing under the *same* `tenantexport.ExportKeyPrefix` key convention the server-side async path already uses. Deliberate consequence: an iolu-triggered backup and a server-triggered `POST /blob/export` become indistinguishable artifacts -- visible through the same `GET /blob/export/{ticket}`-adjacent tooling once the server is back up, and swept by the *same* TTL sweep (`SweepExpiredExports`) without iolu needing to know anything about retention itself.
+- **Coverage gain over the original scope, not just a reuse shortcut:** the original text named only cal's Pebble index. `tenantexport` already correctly covers all three per-tenant Pebble stores (`ts`, `cal`, `bal`'s rollup) plus `/loc` and `/obj`'s dedicated files, none of which the original scope mentioned. Building the original scope as written would have shipped *less* coverage than reuse gives for less effort.
+- **What tenantexport does NOT give this item, named rather than glossed over:** a byte-exact physical image. `ExportTenant` produces a portable JSON export -- inspectable, tolerant of schema drift, but not a guaranteed-identical restore-by-copy target. That guarantee is real and split out as its own item, XOT203, not silently dropped.
+- **Restore, still explicitly out of scope here:** now tracked as its own item, XOT204, rather than a permanent scope-exclusion note with nothing behind it.
+- **Estimate: ~0.5 days** (down from the original ~1d implied share of "backup+verify together, ~2 days" -- a thin CLI wrapper around already-tested library code, not new backup logic).
 - Not started.
 
 ### T-72. iolu db verify (item 26b, wave 6): PRAGMA integrity_check across all databases, confirming SQL-level structural integrity -- distinct from db check's oracle-based semantic checks (T-73)
@@ -812,6 +987,29 @@ Theme: iolu · Priority: P3 · Status: ☐ · Blocks/after: After: T-70 (query+R
 - **Separable from the rest of wave 8, deliberately:** shares no code dependency with T-76 through T-80 (pkg/oql work) -- rides along on the same wave because it was raised in the same planning pass, not because it's blocked by or blocks the query-provider work.
 - **Relationship to T-70:** T-70 (query + REPL, filed under wave 6) already covers the REPL mechanics (one-shot query execution, interactive readline shell borrowing iaul's shape). This item is specifically the RENAME/repurposing -- what currently answers to "iolu" (tenant management, provisioning, db init/status/upgrade, bal prune, cal provisioning) becomes xia; the NEW iolu becomes the query-focused tool T-70 already scoped. T-70's own work is a prerequisite: repurposing iolu's name only makes sense once there's a query tool worth putting the name on.
 - **Default invocation behaviour (recorded, direct instruction, refined against a named concrete precedent):** the renamed `iolu` follows the `mysqladmin`/`mysql` split precisely -- `xia` is the `mysqladmin` analog (administrative operations, no interactive mode expected), the renamed `iolu` is the `mysql` analog. `mysql`'s own actual behaviour is more precise than "bare args means REPL" alone: it dispatches on whether **stdin is a TTY**, not merely on argument count. Interactive terminal stdin -> REPL (prompt, readline, history). Piped or redirected stdin (`iolu < script.oql`, `cat queries.oql | iolu`) -> read statements from stdin and execute them as a batch, no prompt, no readline, exits when stdin is exhausted -- this is DISTINCT from both the REPL and from `iolu query --oql "..."` (a single statement via flag), a third invocation shape `mysql` itself also has (`mysql -e "..."` vs `mysql < file` are both non-interactive but different). `iolu <subcommand> ...` (`iolu query`, `iolu repl` explicitly, any future non-query subcommand) still runs as the ordinary scriptable CLI regardless of stdin's TTY status -- the TTY check only governs the FULLY-BARE invocation's dispatch between REPL and batch-from-stdin. Not verified against a live mysql binary in this sandbox (unavailable here) -- recorded as the standard, documented mysql/psql/sqlite3 convention, not a live-tested behaviour in this session. Applies to the RENAMED iolu specifically, per the same transitional-state caveat already recorded above.
+- Not started.
+
+### XOT203. iolu db backup: physical/raw-file single-instance backup -- SQLite online-backup API per database file plus Pebble checkpoints for ts, cal, and bal's rollup index (all three, corrected from T-71's original cal-only scope) -- split out of T-71 when T-71 was rescoped to reuse pkg/tenantexport's logical export instead
+
+Theme: iolu · Priority: P4 · Status: ☐ · Blocks/after: After: none. Related: T-71 (the logical-export path this complements, not replaces), T-72 (db verify, unaffected by this split).
+
+- **Trigger:** T-71's original scope (SQLite online-backup API + a Pebble checkpoint) was found, on review, to genuinely under-cover what `pkg/tenantexport` (T-149, v0.25.0) already does correctly -- and to solve a *different* problem from it (byte-exact physical restore vs. a portable logical export). Rather than silently drop the physical-backup case, it is split out here as its own item, named explicitly, matching this project's own "not a deferred oversight, a stated boundary" discipline.
+- **Corrected scope, using tenantexport's own already-verified coverage as the reference:** T-71's original text named only cal's Pebble index. The real per-tenant Pebble footprint is three stores -- `ts`, `cal`'s occupancy index, and `bal`'s rollup index (`storelayout.TenantTSDir`/`TenantCalDir`/`TenantBalRollupDir`, confirmed directly in `pkg/tenantexport/export_tenant.go`). This item's scope is corrected to all three, not just cal's.
+- **Distinct from T-71 (now the logical-export path), by design guarantee, not just format:** SQLite's own online-backup API and a Pebble checkpoint produce a byte-exact image -- restore-by-copy, no schema-drift risk, no JSON round-trip on any edge-case type. `tenantexport`'s zip-of-JSON-tables is portable and inspectable but is a *logical* export, not an image. Real disaster-recovery scenarios wanting guaranteed-identical restore need this, not that.
+- **Not urgent relative to T-71:** T-71's rescoped reuse of `tenantexport` ships real backup capability now, offline-capable, more complete than this item's own original scope was. This item exists so the physical-backup case is tracked and priced, not lost -- not because it's blocking anything today.
+- **Estimate:** ~1.5 days (SQLite online-backup API wrapper + Pebble checkpoint for three stores instead of one; roughly T-71's original ~1d share plus the two added Pebble stores).
+- Not started.
+
+### XOT204. iolu db restore -- documented manual procedure only today (T-71/T-72's own stated initial boundary: 'copy back onto a stopped server'); never filed as its own trackable item until now
+
+Theme: iolu · Priority: P4 · Status: ☐ · Blocks/after: After: XOT203 (physical backup) for full restore-by-copy; can restore from tenantexport's logical export independently once that path exists, at reduced guarantee (see scope note).
+
+- **Trigger:** T-71 and T-72 both name restore as explicitly out of scope ("Restore remains a documented manual procedure initially... rather than a command" -- the roadmap's own words, quoted in T-71's own entry) -- a real, named boundary, but one that was never itself filed as a register item, only as a scope-exclusion note inside two other items. Promoted to its own trackable item now rather than left permanently implicit.
+- **Two distinct restore paths, matching the two distinct backup paths (T-71/XOT203), not one:**
+  1. **From a physical backup (XOT203):** copy the SQLite files and Pebble directories back onto a stopped instance -- byte-exact, the documented manual procedure today, this item's job is to turn it into a real `iolu db restore` command (stop-server discipline enforced by the tool, not just the operator's own memory).
+  2. **From a logical export (T-71/`tenantexport`):** re-materialise a tenant's data from the exported JSON tables into a fresh or existing store. A genuinely different operation -- closer to import than restore, and not guaranteed byte-identical (it's a re-derivation from the same rows, not a copy).
+- **Not scoped further here, deliberately:** which path(s) ship first, and whether `iolu db restore` should be one command with a `--from-physical`/`--from-export` switch or two separate commands, is an implementation decision for whichever wave picks this up -- not decided in advance of that work.
+- **Estimate:** ~1.5 days provisional (physical-restore path only, the higher-value one; export-based restore priced separately if/when scoped).
 - Not started.
 
 ## oql
@@ -908,6 +1106,12 @@ Theme: system-stores · Priority: P3 · Status: ☐ · Blocks/after: After: #9 (
 - **Prerequisites already met:** both named dependencies -- #9 (sysmask,
   closed T-43/T-44) and #17 (bal molu surface, closed T-67, v0.20.2) --
   have shipped. Nothing blocks scoping this properly once wave 7 opens.
+- **Review note (2026-08-17):** this item's own justification was
+  audited -- see the Plan deviations log entry of the same date, above.
+  No consumer found asking for usage metering or billing; the only
+  surviving rationale traced is the plan's own "demo artefact for
+  fundraising conversations" line. Not closed, reprioritised, or
+  rescoped by the audit itself -- decision pending.
 - Not started.
 
 
@@ -937,5 +1141,59 @@ Theme: server · Priority: P3 · Status: ☐
 
 
 ## sulpher
+
+## cron
+
+### XOT197. /cron item 1: storage, def/job registration, prototype-clone, capability introspection -- the def is the prototype, the job the armed clone; verb capabilities (cancellable, progress-reporting) discovered by interface assertion at def time and recorded on the def, never self-declared
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: Blocks: every other /cron item. After: none (design decisions cron-primitive.md §10.2/§10.3 should be settled before item XOT198 starts, not before this one).
+
+- **Design:** `docs/proposals/cron-primitive.md` §1, §3, §14.4. Mirrors `pkg/server/v2_dxp_def_handlers.go`'s def-registration shape.
+- **Scope:** `pkg/cron` skeleton; def storage with shape/schedule/zone/policies/verb/reclamation-class fields; job as clone; capability record populated by interface assertion against the verb registry (item XOT200's interfaces, but the assertion mechanism lives here).
+- **Not in scope:** the scheduler loop (item XOT198), any verb implementation (item XOT200).
+- **Estimate:** 1.5 ideal days (cron-primitive.md §16.2 row 1).
+
+
+### XOT198. /cron item 2: recurrence rule object, IANA zones, DST policy, scheduler loop, tick plane, missed-fire + overlap policy, suppression-streak counter, watchdog shape + reset -- the deep pit and the racy loop, deliberately one item so the tick plane and the rules that decide which ticks chime are built and tested together
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: item XOT197. Blocks: items XOT199, XOT201, XOT202. Prerequisite decisions: cron-primitive.md §10.2 (recurrence grammar) and §10.3 (DST enum) MUST be settled before this item starts.
+
+- **Design:** `docs/proposals/cron-primitive.md` §2, §4, §5, §6 (panic recovery), §13.1, §13.8 (zone/offset rule), §13.9 (starvation), §13.10 (pkg/gc precedent, added 2026-08-17).
+- **Scope:** structured recurrence rule (not five-field cron strings -- §13.2's `DBMS_SCHEDULER` calendaring precedent); zone field is an IANA name, never an offset; per-def DST policy; `at`/`after`/`every`/`watchdog` resolution to due-instants; the scheduler goroutine, its ticker-and-stop-channel lifecycle mirroring `pkg/gc.Worker`'s own proven shape including the double-start guard (§13.10); tick records as facts (suppressed ticks recorded); missed-fire (`skip`/`fire_once`/`catch_up`) and overlap (`skip`/`queue`/`concurrent`) as mandatory per-def fields; consecutive-suppression counter on the job; `watchdog` + `reset`; a panicking verb recovered and recorded as a distinct tick outcome (`panicked`), never a crashed scheduler -- the same fix `pkg/gc.Worker.RunOnce` shipped after a real incident (T-156/T-157), inherited here rather than re-learned.
+- **Risk, revised 2026-08-17:** the scheduler loop's lifecycle *shell* (ticker, start/stop, panic recovery) now has a proven-in-production pattern to mirror (`pkg/gc.Worker`, §13.10), reducing that portion's risk and cost. What is NOT de-risked: overlap policy under real concurrent load is still the shape that produced 0.23.0's coordinator races -- `pkg/gc` has no per-def overlap concept -- and a sandbox pass is still not evidence. Multi-core confirmation is owed (Part 1 §5.2) and lands as its own dormant guard, registered same session (§8).
+- **Estimate:** 2.5 + 1.5 + 0.75 = 4.75 ideal days (was 5.25; scheduler-loop row revised 2.0 -> 1.5 -- cron-primitive.md §16.2 rows 2-4).
+
+### XOT199. /cron item 3: the chime -- `cron.chime` event type into EVENT_MODEL.md's closed set, shape discriminated in event_latch_source, payload carrying due-instant/def/job/shape and originally-due for catch-up ticks; unconditional on every non-suppressed tick regardless of T-07
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: item XOT198. Blocks: item XOT201 (job control's info reads chimes alongside ticks). Not blocked by T-07 -- designed around it (cron-primitive.md §6).
+
+- **Design:** `docs/proposals/cron-primitive.md` §3 (tick vs chime planes), §6, §9, §10.8 (chime/verb ordering -- decided at implementation, here).
+- **Scope:** one new event type, not four; `event_latch_source` coordinate grammar (e.g. `cron/every/<def>`); payload; the ordering decision between chime and verb outcome (§10.8) is made and recorded here.
+- **Estimate:** 0.75 ideal days (cron-primitive.md §16.2 row 5).
+
+### XOT200. /cron item 4: verb registry, the cancellable and progress-reporting interfaces, and two verbs (`fsm_walk`, one prune) -- capabilities are what the Go type implements, discovered by item XOT197's assertion; each further verb is its own small addition, never speculative
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: item XOT197. Blocks: items XOT201, XOT202. cron-primitive.md §10.6 (OQL-verb reconciliation with the events OQL-action target) is deliberately NOT in this item.
+
+- **Design:** `docs/proposals/cron-primitive.md` §6, §13.5 (one verb per def, forever), §14.4.
+- **Scope:** registry; context-based cancellation interface; progress-reporter interface (`phase?`, `done`, `total?`, `updated_at`); `fsm_walk` (machine id + input) and one prune verb (`ts_rollup_prune` or `bal_checkpoint_recompute`, chosen at implementation by which has a live consumer). Verb outcome recorded on the tick per §6.
+- **Estimate:** 1.5 ideal days (cron-primitive.md §16.2 row 6).
+
+### XOT201. /cron item 5: job control and execution observability -- `info`/`pause`/`resume`/`stop`/`kill` split across job and execution planes, in-memory execution and progress state (never persisted; Postgres pg_stat_progress precedent), `kill` refuses honestly on non-cancellable verbs, `resume` hands accumulated due instants to the job's own missed-fire policy
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: items XOT198, XOT199, XOT200. Blocks: item XOT202 (system jobs are controlled through this surface). cron-primitive.md §10.10 (progress phase vocabulary) and §10.11 (stop-drain deadline) decided here.
+
+- **Design:** `docs/proposals/cron-primitive.md` §14 in full.
+- **Scope:** the five endpoints; the execution as third vocabulary object; memory-only progress; terminal `stop` with no `restart` (re-clone the def); no rollback on `kill` (the def's reclamation class governs, item XOT202); existence always observable even for opaque verbs.
+- **Estimate:** 1.5 ideal days (cron-primitive.md §16.2 row 7).
+
+### XOT202. /cron item 6: retention + `~trim`, reclamation classes + Reclaimer interface + `/blob` Reclaimer + `~sweep`, system jobs armed at startup, dxp janitor migrated onto /cron, REST surface + pkg/client + molu + docs + dormant-guard registration -- the wave's closing item, where the primitive proves itself by maintaining xolu on its own clock
+
+Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: items XOT197, XOT198, XOT199, XOT200, XOT201. Blocks: none. Sequencing note: if the eager stale-checkpoint recompute (cron-primitive.md §8) is included as a v1 dogfooding job, T-55's remaining /cal and /ts rulings should land first; otherwise the janitor migration carries the dogfooding proof alone.
+
+- **Design:** `docs/proposals/cron-primitive.md` §5 (retention), §8, §15 in full, §16.5.
+- **Scope:** per-def retention as the third mandatory policy; `~trim` job honouring the sweep horizon (§15.4: a tick with pending reclamation is unprunable); five reclamation classes on the def; Reclaimer interface in the dxp Participant mold; `/blob` Reclaimer for `staged` and `attributed` (v1: /blob only); `~sweep` job(s); `~` system jobs arm themselves at instance startup, disabling is an explicit recorded act; the dxp janitor (T-54's Janitor) AND `pkg/gc`'s four existing Sweepers (blob GC, ts retention, fsm v2 collection, event delivery log v2 cleanup -- found 2026-08-17, cron-primitive.md §13.10) migrated onto /cron as `~` jobs, "closer to a rename than new work" per that section's own framing; REST + client + molu + docs; every dormant guard this wave creates registered in the same session (Part 3 §8).
+- **Deferral lever:** if scoped down, §15 (reclamation) is the natural v1.1 deferral (≈ 2.75 ideal days saved -- cron-primitive.md §16.4 lever 2); the rest of this item stays.
+- **Estimate:** 0.75 + 2.0 + 1.25 + 1.5 = 5.5 ideal days (was 5.25; dogfooding row revised 1.0 -> 1.25 for covering four gc consumers plus the janitor, not the janitor alone -- cron-primitive.md §16.2 rows 8-11).
 
 ---

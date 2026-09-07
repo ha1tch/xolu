@@ -1108,6 +1108,9 @@ func (s *Server) setupRoutes() {
 			// blob_export_handlers.go's own header comment.
 			tr.Post("/blob/export", s.handleBlobExportStart)
 			tr.Get("/blob/export/{ticket}", s.handleBlobExportStatus)
+			// Tenant data-presence summary (XOT213, wave 15) -- see
+			// v2_tenant_summary_handlers.go's own header comment.
+			tr.Get("/tenant-summary", s.handleTenantSummary)
 
 			// Tenant-scoped graph routes — available in both path and strict mode.
 			// Node IDs in requests/responses use the client-facing "entity:id"
@@ -1210,6 +1213,9 @@ func (s *Server) setupRoutes() {
 			r.Delete("/blob/{key}", s.handleBlobDelete)
 			r.Post("/blob/export", s.handleBlobExportStart)
 			r.Get("/blob/export/{ticket}", s.handleBlobExportStatus)
+			// Tenant data-presence summary (XOT213, wave 15) -- see
+			// v2_tenant_summary_handlers.go's own header comment.
+			r.Get("/tenant-summary", s.handleTenantSummary)
 		}
 	})
 

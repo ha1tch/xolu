@@ -1140,6 +1140,18 @@ func (s *PebbleStore) RangeFullAggregate(ctx context.Context, q RangeFullQuery) 
 			res.Quantiles[i] = estimates
 		}
 	}
+
+	// Re-check existence after the scan, not just before it (2026-08-14).
+	// Same fix, same reasoning, as QueryRange/Latest/Aggregate's own
+	// identical re-check -- see QueryRange's own comment for the full
+	// mechanism. RangeFullAggregate shares the exact same shape and so
+	// shares the exact same gap, previously untested here. Confirmed
+	// via TestRangeFullAggregate_DeletingMarker_ConcurrentReader: 4/100
+	// failures under -race on this project's own single-core sandbox
+	// against the reverted (unfixed) code.
+	if _, ok := s.reg.get(q.Timeline); !ok {
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
+	}
 	return res, nil
 }
 
@@ -1233,6 +1245,17 @@ func (s *PebbleStore) RangeAggregate(ctx context.Context, q RangeAllQuery) (*Ran
 		}
 	}
 
+	// Re-check existence after the scan, not just before it (2026-08-14).
+	// Same fix, same reasoning, as QueryRange/Latest/Aggregate's own
+	// identical re-check -- see QueryRange's own comment for the full
+	// mechanism. RangeAggregate shares the exact same shape and so
+	// shares the exact same gap, previously untested here. Confirmed
+	// via TestRangeAggregate_DeletingMarker_ConcurrentReader: 2/100
+	// failures under -race on this project's own single-core sandbox
+	// against the reverted (unfixed) code.
+	if _, ok := s.reg.get(q.Timeline); !ok {
+		return nil, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", q.Timeline)
+	}
 	return res, nil
 }
 

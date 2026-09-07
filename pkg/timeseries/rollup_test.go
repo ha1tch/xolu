@@ -1299,3 +1299,125 @@ func TestAggregate_DeletingMarker_ConcurrentReader(t *testing.T) {
 		t.Error("Aggregate: reader observed a defined-but-empty timeline during delete — marker did not fence the read")
 	}
 }
+
+// TestRangeAggregate_DeletingMarker_ConcurrentReader is the same fix,
+// same reasoning, as TestLatest_DeletingMarker_ConcurrentReader above,
+// applied to RangeAggregate specifically (2026-08-14). RangeAggregate
+// shares QueryRange's own exact shape (an initial s.reg.get() only
+// proves the timeline was defined when the call started, then an
+// unguarded scan follows) and so shares the exact same gap -- never
+// checked or fixed during XOT192 itself, no prior test coverage of any
+// kind for this until now.
+func TestRangeAggregate_DeletingMarker_ConcurrentReader(t *testing.T) {
+	s := rollupStore(t, true)
+	defineTimelines(t, s, 1)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 50; i++ {
+		if err := s.Append(context.Background(), Event{
+			Timeline: 1, Dims: []uint64{0},
+			Time: base.Add(time.Duration(i) * time.Second), Nums: []float64{float64(i)},
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var sawEmptyDefined int32
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg, ok := s.reg.get(1)
+			if !ok {
+				continue
+			}
+			_ = cfg
+			res, err := s.RangeAggregate(context.Background(), RangeAllQuery{
+				Timeline: 1, Dims: []uint64{0},
+				From: base.Add(-time.Hour), To: base.Add(time.Hour),
+			})
+			if err == nil && res.Count == 0 {
+				atomic.StoreInt32(&sawEmptyDefined, 1)
+				return
+			}
+		}
+	}()
+
+	time.Sleep(2 * time.Millisecond)
+	if err := s.DeleteTimeline(context.Background(), 1); err != nil {
+		t.Fatalf("DeleteTimeline: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+
+	if atomic.LoadInt32(&sawEmptyDefined) == 1 {
+		t.Error("RangeAggregate: reader observed a defined-but-empty timeline during delete — marker did not fence the read")
+	}
+}
+
+// TestRangeFullAggregate_DeletingMarker_ConcurrentReader is the same
+// fix, same reasoning, applied to RangeFullAggregate specifically
+// (2026-08-14). Same history as
+// TestRangeAggregate_DeletingMarker_ConcurrentReader above -- never
+// checked or fixed during XOT192 itself, no prior test coverage at all
+// for this combination.
+func TestRangeFullAggregate_DeletingMarker_ConcurrentReader(t *testing.T) {
+	s := rollupStore(t, true)
+	defineTimelines(t, s, 1)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 50; i++ {
+		if err := s.Append(context.Background(), Event{
+			Timeline: 1, Dims: []uint64{0},
+			Time: base.Add(time.Duration(i) * time.Second), Nums: []float64{float64(i)},
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var sawEmptyDefined int32
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg, ok := s.reg.get(1)
+			if !ok {
+				continue
+			}
+			_ = cfg
+			res, err := s.RangeFullAggregate(context.Background(), RangeFullQuery{
+				RangeAllQuery: RangeAllQuery{
+					Timeline: 1, Dims: []uint64{0},
+					From: base.Add(-time.Hour), To: base.Add(time.Hour),
+				},
+			})
+			if err == nil && res.Aggregate.Count == 0 {
+				atomic.StoreInt32(&sawEmptyDefined, 1)
+				return
+			}
+		}
+	}()
+
+	time.Sleep(2 * time.Millisecond)
+	if err := s.DeleteTimeline(context.Background(), 1); err != nil {
+		t.Fatalf("DeleteTimeline: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+
+	if atomic.LoadInt32(&sawEmptyDefined) == 1 {
+		t.Error("RangeFullAggregate: reader observed a defined-but-empty timeline during delete — marker did not fence the read")
+	}
+}

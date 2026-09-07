@@ -4,6 +4,371 @@ Append-only record of closed register items and resolved issues, newest first.
 Each entry preserves the item's full text as at closure, stamped with its
 closing version and date.
 
+## [0.30.37] XOT227 — wave_progress.py: sync wave-table row Status and per-wave summary-line counts from register/RESOLVED state (the register.py-close/wave-table gap noted 2026-08-18) (v0.30.37, 2026-08-20)
+
+Theme: tooling · closed 0.30.37 · 2026-08-20
+
+
+**Trigger:** noted 2026-08-18: register.py close and a wave's item-table Status column are independently maintained with no sync -- closing a register item does not update the wave table row. Horatio asked for a reminder once Wave 15 completed; it has. A live instance of the same defect class was found at session start 2026-08-20: Waves 15 and 16 have every row ✓ (and the generated bar at 100%) while the hand-maintained bold summary lines under both tables still read "0/5, not started" / "0/7, not started".
+
+**Fix shape (decided):** wave_progress.py -- already this document's only mechanical reconciler, already run at release gate via --check -- gains a sync step ahead of bar regeneration: (1) each wave-table row's Status derives from its column-4 register item(s): id closed in RESOLVED.md -> ✓; id open in the register -> the register's own ☐/◐ marker; id found nowhere -> warn, leave untouched; ✗ rows untouched (a drop is a hand decision, and ✗ is already invisible to the bar). Multi-id/range rows aggregate: all closed -> ✓, any progress -> ◐, else ☐. (2) The bold per-wave summary fragment "**Wave N: x/y, state.**" is rewritten from the synced rows, preserving any trailing narrative prose after the closing bold marker. register.py itself stays untouched: making close write a second, hand-edited document adds a second writer and misses reopen/partial transitions; a single idempotent reconciler covers every transition.
+
+**Repo separation (per instruction 2026-08-20):** the change lands in repoman's own wave_progress.py first (xolu's scripts/ copies are repoman's generalised versions per .repoman.json), with repoman's selftest extended for the new path in the same session; xolu then takes the synced copy.
+
+Cross-ref: CHANGELOG 0.30.37.
+
+## [0.30.36] XOT226 — fenceLookupPath's colon-collision limitation (XOT224, documented as "not fixable by a small change") is now actually fixed -- prompted by a direct question about whether dxp's own Claim.Primitive+Resource shape (an explicit tag field alongside a primitive-scoped string, never one overloaded string) pointed at the real answer. It did, and checking further found something even more direct: loc's own server API already exposes GET /loc/fences/{kind}/{key} as two explicit path segments, and LocFenceAttachRequest already correctly used two separate fields (Subject/AlignedTo) -- only the four lookup methods (Get/Delete/Patch/Reconcile) collapsed that already-unambiguous shape into one string and tried to guess the split back out. Replaced with LocFenceRef (Kind, Key as explicit fields, two named constructors), mirroring the server's own path structure and dxp's own established tag-plus-string pattern directly -- nothing left to guess (v0.30.36, 2026-08-19)
+
+Theme: client · closed 0.30.36 · 2026-08-19
+
+
+- **Trigger:** a direct follow-up question after XOT224 was filed and closed as "documented, not fixed -- no small fix exists": could dxp's own Participant abstraction resolve the identity ambiguity? Checked directly rather than answered from memory.
+- **What `Participant` actually is, confirmed by reading `pkg/dxp/dxp.go`:** the reserve/validate/execute protocol interface a primitive implements to be reserve-capable -- one per primitive *type* (loc's own, obj's own, bal's own), not a resource-naming scheme. Not directly reusable here, and said so plainly rather than stretching it to fit.
+- **What actually was the right precedent, in the same file:** `dxp.Claim` carries `Primitive` and `Resource` as two separate fields (`Primitive: "bal"`, `Resource: "acct:42"`) -- the colon inside `Resource` is harmless precisely because `Primitive` is a separate field, not something to infer from `Resource`'s own shape. Real, established precedent in this codebase for "explicit tag plus string, not one overloaded string."
+- **Then found something more direct than following that precedent from scratch:** `loc`'s own server route is `GET /loc/fences/{kind}/{key}` -- two explicit path segments already. At attach time, `LocFenceAttachRequest` already correctly uses two separate fields, `Subject` and `AlignedTo` -- attach was never actually ambiguous. Only the four lookup methods collapsed the server's own already-unambiguous two-segment shape into one client-side string and tried to reconstruct the split by guessing. The bug was self-inflicted by the client, not a gap in the server's own design.
+- **Fixed:** `LocFenceRef{Kind, Key string}` replaces the single `fenceID string` parameter across `LocFenceGet`/`Delete`/`Patch`/`Reconcile`. Two named constructors -- `LocFenceRefByLocation(id)` for tree-aligned fences, `LocFenceRefBySubject(kind, key)` for obj-anchored ones -- so a caller never hand-builds the struct or re-derives which case applies. `fenceLookupPath` is now a direct, non-guessing path builder.
+- **A real, deliberate breaking change to an experimental v2 API surface (`X-API-Stability: experimental`)**, made without preserving the old signature -- the old shape was actively wrong for some real inputs, not just inconvenient, and preserving it would have meant knowingly shipping a bug forward.
+- **Verified:** the adversarial test that found this (renamed in place from confirming the bug to confirming the fix) now round-trips `LocFenceGet`/`Delete` against the exact colon-containing location id (`root:special`) that used to defeat the guess -- get succeeds, delete succeeds, a follow-up get correctly 404s. The full `TestIntegration_LocFencesAndGeospatial` suite (18 requests, every fence/pattern/geospatial method) re-verified against the new signature. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.36.
+
+## [0.30.35] XOT225 — loc.Store.Patch() never validated a negative capacity ceiling -- found by an unsolicited adversarial test (TestAdversarial_LocPatchTriStateEdges); a grep across pkg/server and pkg/loc found no existing guard before the test confirmed it. Fixed by reusing the existing, already-wired loc.ValidationError type (the same one geometry.go already uses for a circle fence's own radius >= 0 check), not a new typed error. Also notes two lower-severity findings from the same adversarial round: LocFenceAttach's self-anchored-circle refusal message is stale ("depends on /obj, wave 10, not built yet" -- obj has been built for a long time), and LocPatch accepts an explicit empty-string name distinct from an omitted one, left as-is deliberately (genuinely ambiguous, unlike the capacity case) (v0.30.35, 2026-08-19)
+
+Theme: client · closed 0.30.35 · 2026-08-19
+
+
+- **Trigger:** unsolicited adversarial testing requested directly against wave 15/16's own implementation. This item bundles the smaller of that round's findings that share a theme (loc validation gaps and stale text), rather than filing three near-trivial items separately.
+- **Fixed: negative capacity.** `Patch()`'s own Ceiling-application block had no lower-bound check at all -- confirmed directly, not assumed, before the test proved it real (`LocPatch(capacity=-5)` succeeded, setting a physically nonsensical ceiling). Fixed by returning `&ValidationError{Detail: "capacity ceiling must be >= 0, got %d"}` -- the exact same type `geometry.go`'s own circle-radius check already uses, already wired into `writeLocError`'s own classification switch, so no new error type or server-side wiring was needed. Consistent now: fences already validated radius `>= 0`; locations now validate capacity the same way.
+- **Noted, not fixed: stale self-anchored-fence refusal message.** `LocFenceAttach` correctly refuses `center.self=true`, but the stated reason ("depends on /obj, wave 10, not built yet") is now false -- `obj` has been built for a long time, including this same session's own further work on it (XOT209/XOT210). The refusal itself is still the right behavior (self-anchored fences genuinely aren't implemented); only the explanatory text is wrong. Left as a small, low-priority text fix for whenever that area is next touched, not urgent enough to justify a standalone edit right now.
+- **Noted, deliberately not fixed: explicit empty-string name.** `LocPatch(Name: strPtr(""))` is accepted, genuinely clearing the location's own name -- distinct at the wire level from an omitted `Name` (`omitempty` only omits a nil pointer, not a non-nil pointer to an empty string). Unlike negative capacity, this has no obviously-wrong physical interpretation -- a location could plausibly want an empty display name -- so it was left as real, working behavior rather than "fixed" into a refusal that might itself be wrong.
+- **Verified:** the adversarial test's own negative-capacity case, initially red, is now green after the fix; the self-anchor and empty-name cases remain informational `t.Logf` notes, matching how this same adversarial round treated other confirmed-but-not-fixed findings (the `Summarize` TOCTOU gap, the `fenceLookupPath` colon collision). Full `pkg/loc`/`pkg/server` test suites, `-race`, and lint all re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.35.
+
+## [0.30.35] XOT224 — fenceLookupPath (pkg/client/loc.go) cannot distinguish a genuine "kind:key" shorthand from a tree-aligned fence whose own plain location id happens to contain a colon -- confirmed real by an unsolicited adversarial test (TestAdversarial_FenceLookupPathColonCollision), predicted correctly in advance. The ambiguity is inherent to a single-string fenceID parameter, not fixable by a smarter heuristic; a real API change (splitting LocFenceGet/Delete/Patch/Reconcile into explicit ByID/BySubject variants, or adding an explicit kind signal) would be needed to close it properly. Documented as a known limitation directly in fenceLookupPath's own doc comment rather than left as the false "never contains a colon" assumption an earlier draft stated; not redesigned in this pass (v0.30.35, 2026-08-19)
+
+Theme: client · closed 0.30.35 · 2026-08-19
+
+
+- **Trigger:** unsolicited adversarial testing requested directly against wave 15/16's own implementation, proposed as a predicted concern before it was ever proven: "a tree-aligned fence's own location id legitimately contains a colon -- nothing stops someone naming a location `root:special`."
+- **Confirmed real, not hypothetical:** a location defined with id `root:special`, a tree-aligned fence attached to it, then `LocFenceGet("root:special")` -- the client's own `strings.Cut` split the id at its own colon, sent `GET /loc/fences/root/special`, and the server (correctly, given what it was actually asked) returned a confusing `XOLU-LOC005` ("entity subject key must be a positive integer: \"special\"") rather than finding the real fence.
+- **Why this wasn't fixed with a smarter heuristic, and why that's the right call, not a shortcut:** the ambiguity is genuinely inherent -- a single string cannot carry both "this might be shorthand" and "this is a literal id, colons and all" without an explicit signal from the caller. Any heuristic (checking format, checking against known kinds, etc.) would produce a different but equally real false-positive/false-negative boundary somewhere else. The real fix is an API shape change (explicit ByID/BySubject methods, or an explicit kind parameter), which is real, separately-scoped work -- not attempted here, to avoid a larger, unplanned redesign in the middle of an adversarial-testing pass.
+- **Delivered instead: honest documentation, correcting an earlier false claim.** `fenceLookupPath`'s own doc comment previously asserted a tree-aligned location id "never contains \":\"" -- that claim was never verified and turned out to be false. Corrected to state the real, confirmed limitation directly, including practical guidance (avoid colons in fence-bound location ids, or construct the raw request directly) rather than leaving the false assumption in place for the next reader.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.35.
+
+## [0.30.35] XOT223 — Summarize() is not atomic across the stores it queries -- confirmed directly by an unsolicited adversarial test (TestSummarize_ConcurrentWriteRace, deterministic via a minimal test-only sync hook) rather than left as an unstated assumption: a write landing in an already-read store during the call is invisible to that call's own result, and Empty() can genuinely report true for a tenant that, by the moment the call returns, already holds real data. Inherent to querying independent storage engines with no shared transaction possible across all of them -- documented directly in Summarize's own doc comment, not fixed (no small fix exists), and not silently left undocumented either (v0.30.35, 2026-08-19)
+
+Theme: storage-config · closed 0.30.35 · 2026-08-19
+
+
+- **Trigger:** unsolicited adversarial testing requested directly against wave 15/16's own implementation, proposed as a concern before it was ever proven -- "the most safety-relevant test," given a wrong Empty() answer is exactly the failure mode XOT213 exists to prevent.
+- **Made deterministic, not left as a probabilistic many-iterations guess:** `testHookAfterPrimaryRead`, a minimal, test-only synchronization point in `pkg/tenantexport/summary.go` -- nil on every real call path, a nil-check-plus-no-op-call is the only production cost, unconditional whether or not tests ever run. This is what let the test pause `Summarize` deterministically between reading Primary and reading everything else, insert a real row, then resume -- rather than hoping a race window gets hit by chance.
+- **Confirmed real:** a genuinely empty tenant, `Summarize` reads Primary (0 rows, correct at that instant), pauses; a real write lands in Primary while paused; `Summarize` resumes, reads everything else (still legitimately empty), returns. Result: `Empty()==true`, while an independent, direct `COUNT(*)` query confirms the tenant genuinely holds 1 real row by that same moment.
+- **Not fixed, and not fixable by a small change:** this is inherent to querying multiple independent storage engines (SQL, two dedicated SQLite files, three Pebble stores, blob storage) with no shared transaction possible across all of them -- tightening any single query's own logic cannot close this gap, only a fundamentally different architecture (e.g. a single consistent snapshot mechanism spanning every engine) could, and that is real, separately-scoped work this item does not attempt.
+- **Delivered instead: honest documentation.** `Summarize`'s own doc comment now states directly that the result is a point-in-time snapshot, not a live guarantee -- correct in the absence of concurrent writes during the call (the expected case for xoluman's own pre-seed emptiness check), not a property the function can enforce on a caller's behalf. Silently shipping this limitation undocumented would have been worse than the limitation itself.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.35.
+
+## [0.30.35] XOT222 — obj.Store.List() used an INNER JOIN against obj_position, silently omitting any subject whose own position row was missing -- found by an unsolicited adversarial test (TestObjAdversarial_SubjectWithNoPositionRow) manufacturing exactly that data shape; a tenant with this shape would under-report its own subject count, and XOT213's tenant-summary would report Empty=true for a tenant that is not empty if this were its only subject. Fixed to a LEFT JOIN, treating a missing position row as unassigned (PositionKind "") rather than vanishing (v0.30.35, 2026-08-19)
+
+Theme: obj · closed 0.30.35 · 2026-08-19
+
+
+- **Trigger:** unsolicited, adversarial testing requested directly against wave 15/16's own implementation claims, specifically List()'s own doc comment asserting an INNER JOIN was safe "matching Get's own documented invariant that Attach always creates the position row in the same transaction" -- that invariant was trusted from reading a comment, never independently verified against a row that violates it.
+- **Confirmed real, not hypothetical:** a row inserted directly into `obj_subjects` with no matching `obj_position` row (a real bug, a crash mid-transaction, or direct tampering could all produce this shape) was silently absent from `GET /obj/list`'s own result entirely -- not merely mis-rendered, genuinely missing.
+- **Fixed:** `LEFT JOIN` instead of `JOIN`; every position column scanned as nullable; a subject with no position row surfaces with `PositionKind ""` (unassigned) -- the same state a subject has immediately after `Attach`, before any `Move` -- rather than vanishing.
+- **`Get()` has a related but different gap, not fixed here:** the same malformed row causes `Get()` to return an unwrapped `sql.ErrNoRows` rather than either a well-formed error or the same graceful unassigned-state handling `List()` now has. Pre-existing code from wave 10 (T-119), outside this item's own scope -- noted here so it isn't lost, not silently left unaddressed forever.
+- **Verified:** the adversarial test itself, initially red (confirming the bug), now green after the fix (confirming the correction) -- both states captured directly rather than the test being written only after the fix existed. Full existing `pkg/obj`/`pkg/server` test suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.35.
+
+## [0.30.34] XOT221 — ts: typed pkg/client coverage for retention, stats, and data lifecycle (Wave 16 Stage 7) -- retention get/patch, stats x2, delete-timeline-data, purge-range -- 6 routes, more admin/ops-flavored, likely simplest per route among the ts stages (v0.30.34, 2026-08-19)
+
+Theme: timeseries · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** same instruction as XOT217 -- part of ts's now-fully-in-scope remaining surface, staged separately for independent shippability, and the last of the five ts stages.
+- **Scope:** `GET /retention`, `PATCH /retention`, `GET /stats`, `GET /stats/{id}`, `DELETE /tl/{id}/data`, `POST /tl/{id}/data/purge`.
+- **Delivered:** all 6 methods -- `TSGetRetention`, `TSPatchRetention`, `TSStats`, `TSTimelineStats`, `TSDeleteTimelineData`, `TSPurgeTimelineRange`. `TSPurgeTimelineRange`'s own From/To are formatted explicitly as `time.RFC3339`, the same discipline `TSRollupRun` already follows, confirmed directly against the server's own strict `time.Parse(time.RFC3339, ...)` call rather than assumed.
+- **Verified:** `TestIntegration_TSRetentionStatsAndDataLifecycle` -- 15 real HTTP requests against a live server. `TSDeleteTimelineData` confirmed to zero a timeline's own event count while its definition survives (via the already-covered `TSGetTimeline`), distinct from `TSDeleteTimeline` which removes both. `TSPurgeTimelineRange` confirmed with real boundary math -- three events seeded, the middle one's own range purged, exactly the oldest and newest survive, checked through the already-covered `TSQueryRange` rather than trusting the purge call's own success response alone. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- **This closes Wave 16 entirely -- all seven stages done, register and wave table both to be synced immediately after this closure.**
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT220 — ts: typed pkg/client coverage for aggregates (Wave 16 Stage 6) -- /aggregate, /range_aggregate, /full_aggregate -- 3 routes, likely the most semantically complex shapes in this whole plan, not yet read closely (v0.30.34, 2026-08-19)
+
+Theme: timeseries · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** same instruction as XOT217 -- part of ts's now-fully-in-scope remaining surface, staged separately for independent shippability.
+- **Scope:** `POST /aggregate` (`HandleTSAggregate`), `POST /range_aggregate` (`HandleTSRangeAggregate`), `POST /full_aggregate` (`HandleTSFullAggregate`).
+- **Flagged directly, not glossed over:** only 3 routes but the highest-uncertainty estimate of the five ts stages -- grouping-function and time-bucket parameter shapes haven't been read yet, so the day-and-a-quarter estimate in docs/CLIENT_WAVE16_PLAN.md carries more risk of revision than the other stages.
+- **The flagged uncertainty was real, and reading closely before writing anything paid off with zero wrong-guess corrections this time -- worth naming since most other stages this wave found at least one:** `/range_aggregate` and `/full_aggregate` turned out to compute a genuinely different thing than `/aggregate` -- all seven numeric fields' sum/avg/min/max at once, no function selector, no time bucketing at all -- not thin variants of the same shape their similar naming might suggest. `interval` on `/aggregate` is a strict 9-value enum (`"1m"` through `"7d"`), confirmed directly against the server's own `parseInterval`, not a general Go duration string. `/aggregate`'s own response is a real union: bucketed (`Buckets` populated) or scalar (`Value`/`Count`/`From`/`To` populated), never both -- captured directly in `TSAggregateResult`'s own doc comment.
+- **Delivered:** `TSAggregate`, `TSRangeAggregate`, `TSFullAggregate`, with six new types covering both of `TSAggregate`'s own response shapes plus the two multi-field aggregate results.
+- **Verified:** `TestIntegration_TSAggregates` -- four events with known values (10, 20, 30, 40) so sum/avg/min/max/count all have a verifiable answer, not just "didn't error." Exercises both of `TSAggregate`'s own response shapes (scalar sum=100/count=4 with no interval; bucketed with `interval=1h`, scalar fields confirmed nil), `TSRangeAggregate` (`Fields[0]=true`, exact sum/min/max/count matching the seeded data), and `TSFullAggregate` (the same exact stats as `TSRangeAggregate`, plus a quantile estimate present only for the one requested field). Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT219 — ts: typed pkg/client coverage for rollup completeness (Wave 16 Stage 5) -- rollup def/parent/delete/run/status, plus /rollup/tree -- 6 routes, building on the already-covered rollup list/get (v0.30.34, 2026-08-19)
+
+Theme: timeseries · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** same instruction as XOT217 -- part of ts's now-fully-in-scope remaining surface, staged separately for independent shippability.
+- **Scope:** `POST /tl/{id}/rollup/def`, `GET /tl/{id}/rollup/parent`, `DELETE /tl/{id}/rollup/{id}`, `POST /tl/{id}/rollup/{id}/run`, `GET /tl/{id}/rollup/{id}/status`, `GET /rollup/tree`.
+- **Head start:** bucket-duration and late-window semantics are already partially understood from `TSRollup`'s own read-side doc comment (XOT172); definition and run are the genuinely new pieces.
+- **Delivered:** all 6 methods -- `TSRollupDefine`, `TSRollupParent`, `TSRollupDelete`, `TSRollupRun`, `TSRollupStatus`, `TSRollupTree`. `TSRollupDefine`/`TSRollupParent` reuse the existing `TSRollup` type directly (confirmed byte-identical to the server's own `tsRollupDefResponse` before reusing it), rather than duplicating a near-identical shape. `TSRollupRun`'s own From/To are formatted explicitly as `time.RFC3339` rather than relying on `time.Time`'s default JSON marshaling (which produces RFC3339Nano) -- checked directly against the server's own strict `time.Parse(time.RFC3339, ...)` call before choosing this, not assumed lenient. `TSRollupTree` correctly returns `nil` (not an error) for the null-body case, confirmed directly against `treeNodeToResponse`'s own nil handling.
+- **A real, mechanical mistake caught by the compiler, not inspection:** the first draft of the integration test called `TSAppend` expecting two return values; the real signature returns only `error`. Caught on the first build attempt, fixed before running anything.
+- **Verified:** `TestIntegration_TSRollupCompleteness` -- 11 real HTTP requests against a live server: two timelines, a rollup defined between them, parent lookup confirming the same rollup, a real append feeding the rollup real data, a manual run over a bounded range, status and tree both reflecting the live rollup, then delete confirmed via the already-covered `TSRollupGet` now 404ing. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT218 — ts: typed pkg/client coverage for query completeness (Wave 16 Stage 4) -- GET /events (query-string alternative to the already-covered POST /query/range) and GET /events/latest -- 2 routes (v0.30.34, 2026-08-19)
+
+Theme: timeseries · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** same instruction as XOT217 -- part of ts's now-fully-in-scope remaining surface, staged separately for independent shippability.
+- **Scope:** `GET /events` (`HandleTSQueryRange`, confirmed via direct route-table read to be genuinely distinct from `HandleTSQueryRangePost`, which `TSQueryRange` already wraps), `GET /events/latest` (`HandleTSLatest`).
+- **Delivered:** `TSQueryRangeGet` (reuses `TSQueryRangeRequest`/`TSQueryRangeResult` directly, no duplicate types -- same semantics as the already-covered `TSQueryRange`, different transport) and `TSLatest` (new `TSLatestRequest`).
+- **A real, mechanical mistake caught by the compiler, not inspection:** `ts.go` was missing four imports (`net/url`, `strconv`, `strings`, `time`) the new code needed -- caught immediately on the first build attempt, fixed before moving on.
+- **Verified:** `TestIntegration_TSQueryCompleteness` cross-checks that `TSQueryRangeGet` and the already-verified `TSQueryRange` agree on the same real data (3 identical events via both transports), not just that each independently returns 2xx -- exactly the kind of check this suite's own header explains a mock cannot provide. `TSLatest` confirmed to return the correct count and the most-recent-relevant events. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT217 — ts: typed pkg/client coverage for timeline lifecycle + sync (Wave 16 Stage 3, foundational) -- provision, tl/def, tl/{id} update/delete, tl/{id}/sync get/on/off -- 7 routes, ordered first among the ts stages since rollup/aggregate work only makes sense against timelines the client can actually create/update/retire (v0.30.34, 2026-08-19)
+
+Theme: timeseries · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** direct instruction -- ts's remaining client surface, originally recommended for deferral (matching docs/CLIENT_STAGE6_PLAN.md's own declared-out-of-scope precedent for this same subsystem), overridden explicitly: ts is now fully in scope, not deferred. See docs/CLIENT_WAVE16_PLAN.md for the full staged breakdown and the reasoning this item is an exception to, not a refutation of.
+- **Scope:** `POST /provision`, `POST /tl/def`, `PATCH /tl/{id}`, `DELETE /tl/{id}`, `GET /tl/{id}/sync`, `POST /tl/{id}/sync/on`, `POST /tl/{id}/sync/off` -- 7 routes, verified directly against `pkg/server/server.go`'s own ts route sub-tree, none yet covered by `pkg/client/ts.go`.
+- **Verified before implementing, as planned:** `Dims` is creation-only, confirmed directly against `HandleTSUpdateTimeline` -- the update path decodes the same request struct but its own call to `store.UpdateTimeline` never reads `Dims` at all, silently discarding it if sent. `TSUpdateTimelineRequest` accordingly exposes only `Name`/`RetentionDays`, not the full define-shape fields, so a caller can't be misled into sending a value that would be quietly ignored.
+- **A stale doc comment found in xolu's own source, not a mistake in this work:** `HandleTSDefineTimeline`'s own comment says `POST .../ts/timelines`; the real, currently-registered route (checked directly in `pkg/server/server.go`) is `POST .../ts/tl/def` -- an older path naming convention, left commented out in the route table, that the doc comment was simply never updated to match. This item's own scope was verified against the real route table, not the stale comment.
+- **A real, worth-documenting nuance caught before it could confuse a future reader:** "sync" here means WAL fsync durability mode, not data replication -- `NoSync=false` (the default) waits for fsync before an append returns; `NoSync=true` trades that durability for speed. Captured directly in `TSSyncStatus`'s own doc comment rather than left for the name alone to imply something else.
+- **Delivered:** all 7 methods -- `TSProvision`, `TSDefineTimeline`, `TSUpdateTimeline`, `TSDeleteTimeline`, `TSSyncGet`, `TSSyncOn`, `TSSyncOff`. `TSDefineTimeline`/`TSUpdateTimeline` reuse the existing `TSTimeline` type rather than duplicating a near-identical response shape (confirmed byte-identical to the server's own `tsTimelineResponse` before reusing it).
+- **Verified:** `TestIntegration_TSLifecycleAndSync` -- provision, define, sync toggled both directions, update verified through the already-covered `TSGetTimeline` as an independent read path (not just trusting the write call's own response) and specifically confirming `Dims` really is unaffected by update, then delete confirmed via a follow-up get. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT214 — loc: remaining typed pkg/client surface -- fences (6), subject position/history (2), contains/nearby (2), patterns (4) -- 14 routes, widened from the original 6-route fence-only filing after a full route-table audit found the rest (Wave 16, Stage 2) (v0.30.34, 2026-08-19)
+
+Theme: client · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** honesty about scope, not a new requirement -- XOT211 was originally filed promising fence coverage as part of its own scope. When the core set (def/list/get/patch/delete/report/move) was actually implemented and tested, fences were deliberately deferred rather than silently included as "done" without being built. This item exists so that deferral is tracked, not lost.
+- **Widened, same session, before any work started:** the original filing named fences plus an unconfirmed "maybe" on patterns. A full route-table audit (`docs/CLIENT_WAVE16_PLAN.md`'s own Stage 2) found four more routes never named at all -- `/loc/subjects/{entity}/{id}/position`, `/loc/subjects/{entity}/{id}/history`, `/loc/contains`, `/loc/nearby` -- on top of confirming the four pattern routes are genuinely in scope, not a maybe.
+- **Scope, all fourteen routes, confirmed directly against `pkg/server/v2_loc_handlers.go`'s and `v2_loc_pattern_handlers.go`'s own route tables:**
+  - Fences: `POST /loc/fences/attach`, `GET /loc/fences/list`, `GET /loc/fences/{kind}/{key}`, `DELETE /loc/fences/{kind}/{key}`, `PATCH /loc/fences/{kind}/{key}`, `GET /loc/fences/{kind}/{key}/reconcile`.
+  - Subject lookups: `GET /loc/subjects/{entity}/{id}/position`, `GET /loc/subjects/{entity}/{id}/history`.
+  - Geospatial: `GET /loc/contains`, `GET /loc/nearby`.
+  - Patterns: `POST /loc/patterns/def`, `GET /loc/patterns/list`, `GET /loc/patterns/{id}`, `DELETE /loc/patterns/{id}`.
+- **Justification for staying in scope, not declared out like `ts`'s own remaining surface:** xoluman's own document asked generally for "typed request/response structs and Client methods for loc write operations," not a narrowly scoped subset -- and their own seed system's stated ambition (seeding varied primitive data) plausibly reaches fences and patterns even though neither was named explicitly. Real consumer signal, not speculative completeness.
+- **A real doc-comment mistake caught and fixed before shipping, not after:** the first draft of `LocFenceGeometry`'s own coordinate-order documentation said `[lat, lon]`. Checked directly against `loc.DecodeGeoJSONPolygon` before writing the integration test's own geometry -- the server reads `lon, lat := pos[0], pos[1]`, standard GeoJSON order, not the reversed order the doc comment first claimed. Fixed before any test data was built on the wrong assumption.
+- **Delivered:** all 14 methods across `pkg/client/loc.go`/`types_loc.go` -- fence attach/list/get/delete/patch/reconcile, subject position/history, contains/nearby, pattern def/list/get/delete. `fenceLookupPath` mirrors `resolveFenceLookupID`'s own two branches server-side exactly (a `kind:key` shorthand splits into two path segments; anything else, notably a tree-aligned fence's own plain location id, is sent as `kind=id`).
+- **Verified:** `TestIntegration_LocFencesAndGeospatial` -- 18 real HTTP requests against a live server, using a real, valid closed polygon (verified vertex/closing-repeat rules directly against `DecodeGeoJSONPolygon` before writing it) with a report point genuinely inside it, so fence membership, `contains`, `nearby`, subject position, and subject history all had something real to observe rather than an always-empty case. Green under `-race`; full repo build/vet/lint/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.34] XOT216 — tenant-summary correctness fix: TenantDataSummary/TenantSummary never counted a tenant's own uploaded blob content -- a tenant with real files and nothing else currently reports Empty=true, since ExportTenant's own authoritative list (which Summarize deliberately reuses) only ever uses blob.Store as the export zip's destination, never as a source of tenant data (v0.30.34, 2026-08-19)
+
+Theme: storage-config · closed 0.30.34 · 2026-08-19
+
+
+- **Trigger:** found during a post-wave-15 review, not reported externally -- checked `PackageAndStore` directly and confirmed `bs *blob.Store` is only ever used as the destination for the packaged zip, never iterated as a source of counted data. This is a real wrong-answer bug in a shipped safety-check feature, not new scope -- prioritized ahead of everything else in Wave 16 regardless of its own small size.
+- **Scope:** thread `*blob.Store` into `Summarize` (currently `primaryDB` + `basePath` + `tenantID` only) -- a signature change, the one existing caller (`v2_tenant_summary_handlers.go`) updated in the same pass. Add a blob key count to `TenantDataSummary`/`TenantSummary` (both the `pkg/tenantexport` struct and the `pkg/client` wire type), sourced from `bs.List("")` (already exists, no new low-level primitive needed), folded into `.Empty()`'s own check.
+- **Delivered:** `Summarize` takes a nilable `*blob.Store` parameter -- nil (blob disabled, the common case on many deployments) treats the blob count as 0, matching every other per-store field's own "never used this primitive" treatment, not a sentinel meaning "unknown." A real design decision made and stated directly in the handler's own comment: if blob is DISABLED, nil is passed silently; if blob is ENABLED but the store genuinely fails to open, that's treated as a hard error for the whole call rather than a quiet zero -- this endpoint exists specifically because a wrong "empty" answer has a real cost, so a real anomaly in a component it would otherwise silently summarize as empty is not swallowed the same way a merely-absent primitive is.
+- **Verified, both layers, not just the library:** `TestSummarize_BlobOnlyTenant_NotReportedEmpty` includes a sanity check proving the bug would have been real before asserting the fix -- calling `Summarize` with `nil` first, confirming `Empty()==true` on a tenant with only a seeded blob key, then confirming the same tenant with `bs` passed correctly reports `Empty()==false`. `TestIntegration_TenantSummary_BlobOnlyTenant` proves the same thing through the full stack -- a real `BlobPut` via the already-existing typed client, against a real running server. All green under `-race`; full repo build/vet/existing-test-suites re-confirmed clean afterward.
+- Not started.
+
+Cross-ref: CHANGELOG 0.30.34.
+
+## [0.30.32] XOT213 — tenant-emptiness endpoint: a single Client method/REST route reporting whether a tenant has any data at all, derived from the real, already-audited table inventory (PrimaryStoreTables + LocStoreTables + ObjStoreTables + the per-tenant ts/cal/bal Pebble stores) rather than xoluman maintaining its own, independently-drifting notion of what counts (v0.30.32, 2026-08-19)
+
+Theme: storage-config · closed 0.30.32 · 2026-08-19
+
+
+- **Trigger:** xoluman team request. That team's own tenant-emptiness safety check (`seedapply.CheckEmpty`) currently makes seven separate round trips for one yes/no question, hand-maintains its own list of "what counts as tenant data" (mirroring xolu's primitive set as of today, with no guarantee of staying in sync as primitives are added), and cannot verify `obj` at all today, for real, permanent reasons (XOT209).
+- **Correction made while filing this, not left in the original proposal's own wording:** the proposal attributed the authoritative table list to `pkg/tenantexport`'s own `PrimaryStoreTables` alone. Checked directly: `obj`'s and `loc`'s own tables live in separate sibling variables (`ObjStoreTables`, `LocStoreTables`), each exported via their own `exportDedicatedFile` call, not inside `PrimaryStoreTables` itself. The genuinely complete, authoritative list is the combination of all three SQLite table lists plus the per-tenant Pebble stores (`ts`, `cal`'s occupancy index, `bal`'s rollup) `ExportTenant`'s own docstring already names. An implementation working from `PrimaryStoreTables` alone would silently miss `loc`/`obj`/`ts`/`cal`/`bal` entirely.
+- **Scope:** one endpoint (or `Client` method backed by one), single round trip, deriving its own answer from the four sources above rather than a fifth, independently-maintained list. Open question from xoluman's own document, resolved rather than left open: delivered both -- the full per-store breakdown, plus a server-computed `Empty` boolean in the same response, so a caller isn't forced to choose one contract or re-derive the boolean itself from the breakdown.
+- **Delivered:** `pkg/tenantexport/summary.go` (`Summarize`, `TenantDataSummary`, `.Empty()`) -- reuses `PrimaryStoreTables`/`LocStoreTables`/`ObjStoreTables` and `SQLiteTableSpec.tableName()` directly rather than re-deriving table-name resolution (see this item's own correction above about that logic's real bug history); two new lightweight counters (`countTable`, `countPebbleStore`) answer row/key counts without writing any export files, unlike the functions they're modeled on. `pkg/server/v2_tenant_summary_handlers.go` (`GET /tenant-summary`, registered at both call sites `blob/export` uses). `pkg/client/tenant_summary.go` + `types_tenant_summary.go` (`Client.TenantSummary`).
+- **Verified:** two library-level tests in `pkg/tenantexport` (`TestSummarize_EmptyTenant`, `TestSummarize_PopulatedAcrossAllSixStores` -- the latter seeding real data in all six stores at once, including a tenant-isolation check on the filtered primary table) and two real HTTP integration tests in `pkg/client` (`TestIntegration_TenantSummary_EmptyTenant`, `TestIntegration_TenantSummary_ReflectsRealData` -- the second directly closing XOT209's own original motivation: an `ObjAttach` through the already-verified typed client is visible in the summary's own `Obj` counts, and a `LocDefine` in its own `Loc` counts, without either primitive needing its own separate enumeration call to prove it). All green under `-race`; full repo build/vet/existing-test-suites re-confirmed clean afterward.
+- **A real bug found and filed separately while writing this item, not folded in here:** `roles.py`'s Go block-comment detection misclassified most of `pkg/server/server.go` due to a literal `/*` inside an ordinary `//` comment (a URL pattern, `/api/v2/cal/*`) -- filed as XOT215 with the precise root cause and fix location. Worked around here via `ed.py` (span-based, no role dependency) rather than blocked on it.
+
+Cross-ref: CHANGELOG 0.30.32.
+
+## [0.30.32] XOT212 — ts: typed pkg/client write methods -- TSAppend and TSBatchAppend, closing the read-only gap in pkg/client/ts.go -- both server-side routes confirmed to exist (POST /ts/events, POST /ts/events/batch), same router and pattern as the already-wrapped read methods, no evidence of a deliberate separate high-throughput path (v0.30.32, 2026-08-18)
+
+Theme: client · closed 0.30.32 · 2026-08-18
+
+
+- **Trigger:** xoluman team request, plus a direct answer to that team's own open question (is ts write-access deliberately excluded from the public client, or just unbuilt?). Checked directly: `pkg/server/server.go`'s own `/ts` route sub-tree registers `POST /ts/events` (`HandleTSAppend`) and `POST /ts/events/batch` (`HandleTSBatchAppend`) in the exact same router as `tl/list`, `tl/{id}`, and the other already-wrapped read routes -- no separate path prefix, no different auth, nothing suggesting a deliberate architectural split. The evidence points to "not yet wrapped," not "intentionally excluded."
+- **Scope:** two methods on `pkg/client/ts.go` (`TSAppend`, `TSBatchAppend`) plus their request types in `types_ts.go`, matching the already-shipped read methods' own shape exactly.
+- **Delivered:** `TSAppend`/`TSBatchAppend`, reusing the existing `TSEvent` type for both request shapes rather than duplicating a near-identical struct. New `TSBatchAppendResult`.
+- **A wrong assumption caught and corrected before shipping, not after:** `TSBatchAppendResult`'s own first draft claimed partial-batch acceptance ("atomic per-event admission, not all-or-nothing") purely from the response shape's own apparent implication. Checked directly against `pkg/timeseries`'s own `AppendBatch` before trusting that claim: every failure path returns `(0, err)` before any event is written, and the only success path returns `(len(events), nil)` -- there is currently no code path producing `Accepted < Total`. The doc comment was corrected to state the real, confirmed behaviour instead.
+- **Verified:** `TestIntegration_TSWriteFlow` -- a single append, a two-event batch append, confirming both are readable back through the already-verified `TSQueryRange` (proving the new write path and the existing read path agree on the same real data, not just that each returns 2xx in isolation), and a malformed batch (dims-count mismatch) correctly refused rather than partially accepted. Green under `-race`.
+
+Cross-ref: CHANGELOG 0.30.32.
+
+## [0.30.32] XOT211 — loc: typed pkg/client write methods -- def/list/get/patch/delete/report/move (fences split out to XOT214, filed the same session) -- the server-side routes already exist and work (confirmed: GET /loc/list already used directly by xoluman via raw for its own emptiness check), only the typed client wrapper was missing (v0.30.32, 2026-08-18)
+
+Theme: client · closed 0.30.32 · 2026-08-18
+
+
+- **Trigger:** xoluman team request, verified directly -- `pkg/client` has no `loc.go` at all, confirmed by file listing; the server side is real and already working (`v2_loc_handlers.go`'s full route table read directly, `GET /loc/list` returns `{"locations": [...]}` exactly as xoluman's own document claimed).
+- **Scope, narrowed from the original filing:** `pkg/client/loc.go` + `pkg/client/types_loc.go`, the core set only -- `/loc/def`, `/loc/list`, `/loc/{id}` get/patch/delete, `/loc/report`, `/loc/move`. Fences (`/loc/fences/*`) split out to XOT214 rather than silently delivered as done without being built.
+- **Delivered:** all seven core methods, matching `bal.go`/`cal.go`'s own established shape. `LocPatchRequest.Capacity` uses a double pointer (`**int64`) to correctly express the server's own tri-state patch semantics (omit = unchanged, explicit null = clear, explicit value = set) -- verified directly by patching a location's capacity to a new value, then clearing it entirely, and confirming both round-trip correctly.
+- **Real finding while testing, not a bug:** `LocDelete`'s own `force=true` flag does NOT override an occupied-location refusal (`XOLU-LOC012`) -- a first draft of the integration test assumed otherwise, corrected once the real server said no. Intentional safety behaviour, asserted directly in the test as the expected outcome, not routed around.
+- **Verified:** `TestIntegration_LocCoreFlow` -- 13 real HTTP requests against a live server (list both filtered and unfiltered, get, patch twice including the capacity-clearing case, move, report, delete both the unoccupied-succeeds and occupied-refuses cases) -- green, including under `-race`.
+
+Cross-ref: CHANGELOG 0.30.32.
+
+## [0.30.32] XOT210 — obj: typed pkg/client write methods, matching the bal/cal/dxp pattern -- attach/detach/move/report/position/retire/capacity-patch/contents/promote/demote, all confirmed already working server-side via raw (v0.30.32, 2026-08-18)
+
+Theme: client · closed 0.30.32 · 2026-08-18
+
+
+- **Trigger:** xoluman team request. Not blocking anything today -- xoluman can already write obj data via `raw`, confirmed working -- but typed coverage is what lets xoluman offer real obj seed steps instead of only an untyped passthrough, matching every other primitive's own client-library shape.
+- **Scope:** `pkg/client/obj.go` + `pkg/client/types_obj.go`, mirroring `loc.go`/`types_loc.go`'s own eventual shape (see the sibling item below) and `bal.go`/`cal.go`'s already-shipped pattern -- one typed request/response pair per route.
+- **Delivered:** all 12 methods -- attach, list, get, detach, move, report, position, retire, capacity-patch, contents, promote, demote.
+- **Two real server-type mismatches caught and fixed while writing the integration tests, not assumed correct from `gofmt`'s own syntax validation alone:** `ObjPromoteResult.TxnID` and `.CommittedThrough` were both drafted as `string`; the real server types (`pkg/server/v2_dxp_def_handlers.go`, `pkg/server/v2_dxp_dispatch.go`) are `int64` and `int` respectively. Neither mismatch was visible from reading the handler's own JSON construction alone (a `map[string]interface{}` doesn't reveal the underlying Go type); both were only found by running the tests against a real server and reading the actual unmarshal error.
+- **Verified:** `TestIntegration_ObjFullFlow` (14 real HTTP requests: attach x2, list, move to a real `loc_leaf`, move into containment, report, position resolution through the containment chain, capacity patch, contents both direct and transitive, retire, get-after-retire) and `TestIntegration_ObjPromoteDemote` (the full promote -> get -> demote round trip, including a real `bal` transfer both directions) -- both green under `-race`.
+
+Cross-ref: CHANGELOG 0.30.32.
+
+## [0.30.32] XOT209 — obj: REST-level enumeration endpoint -- every registered obj route is a per-id lookup or write (attach/promote/demote), confirmed by reading the full route table directly; no way exists to list/enumerate a tenant's own obj data at all, blocking xoluman's own tenant-emptiness safety check permanently for this one primitive (v0.30.32, 2026-08-18)
+
+Theme: obj · closed 0.30.32 · 2026-08-18
+
+
+- **Trigger:** xoluman team request, verified directly against xolu's own source before being accepted -- read `pkg/server/v2_obj_handlers.go`'s complete route table (11 routes: `attach`, `{kind}/{key}` get/delete/move/report/position/retire/capacity-patch/contents, `promote`, `demote`) and confirmed none of them enumerate; every one requires an already-known id or is a write.
+- **Scope:** a minimal REST route (e.g. `GET /obj/list`, matching `loc`'s own already-shipped `GET /loc/list` pattern exactly) returning enough to enumerate a tenant's own obj records -- ids and kinds are sufficient for the emptiness-check use case that motivated this; a richer shape can follow if a real consumer needs more.
+- **Not in scope here:** typed `pkg/client` write methods for `obj` (writes already work via `raw`, confirmed directly -- `POST .../obj/attach` and `POST .../obj/promote` both observed succeeding against a live server during xolu's own test suite) -- filed separately, lower urgency, since nothing is actually blocked on it.
+- **Delivered:** `pkg/obj/store.go`'s own `List` method (a single JOIN against `obj_subjects`/`obj_position`, ordered by subject_ref -- not N+1 queries), `pkg/server/v2_obj_handlers.go`'s `handleObjList`, and the `GET /obj/list` route registration, placed alongside the other single-segment static routes matching `loc`'s own established convention.
+- **Verified:** two real HTTP-level tests against a live server -- an empty tenant returns an empty array (not an error, not `null`), and a populated tenant correctly returns both an unassigned and a `loc_leaf`-placed subject with the right `position_kind`/`loc_leaf_id` fields.
+
+Cross-ref: CHANGELOG 0.30.32.
+
+## [0.30.30] XOT208 — migrated xolu's own scripts/{ed,roles,register,guards,syncver,wave_progress,add_wave,str_replace_extended}.py to repoman's own generalised versions -- config.py and doctor.py added -- release.py deliberately kept as this project's own, per T-56's own readiness assessment (v0.30.30, 2026-08-17)
+
+Theme: tooling · closed 0.30.30 · 2026-08-17
+
+
+- **Trigger:** direct instruction, following T-56's own 2026-08-17 readiness assessment: make this project's own tooling use repoman's versions wherever genuinely ready, to begin reducing duplicated surface, rather than waiting for every piece (specifically release.py) to be ready before moving anything.
+- **Swapped in, verified identical or upgraded, not just compiled:**
+  - `ed.py` — byte-identical already; own 9-path selftest green.
+  - `roles.py` — strict upgrade, gains JavaScript/TypeScript/CSS/HTML classification this project's own copy never had.
+  - `str_replace_extended.py` — strict upgrade, same four formats, plus its own 24-path selftest green.
+  - `guards.py` — output verified identical against the pre-migration copy (`list`, `stale`) on this project's real `docs/KNOWN_ISSUES.md`.
+  - `register.py` — output verified identical (`list`, `check`) on this project's real, current 58-item register.
+  - `syncver.py` — `check()`/`set_version()`/`VERSION_RE`, the exact three touchpoints `release.py` imports and calls, individually verified working before trusting the swap. CLI *text* differs cosmetically (`show`'s own wording, capitalisation in `check`'s message) -- a disclosed, accepted consequence of adopting a shared tool's own conventions, not a functional regression; nothing parses that text.
+  - `wave_progress.py`/`add_wave.py` — `--show` output verified byte-identical against the pre-migration copy once `wave_short_names`/`wave_themes` were migrated into `.repoman.json` (see below); `add_wave.py --dry-run` computed the identical wave/item numbers a fresh run of the old copy would have.
+- **New: `config.py`, `doctor.py`.** `config.py` is required by every swapped tool above. `doctor.py` is a genuine addition (this project had no equivalent) -- environment diagnostic, informational only, never a pass/fail gate.
+- **`.repoman.json` populated with every key the swap needed**, built programmatically from the previously-hardcoded data rather than hand-transcribed: `id_separator`/`legacy_id_prefix`/`legacy_id_separator` (the T-/XOT- dual-format rule, already documented at length elsewhere in this project, now actually read rather than just referenced), `version_targets` (pointing at `pkg/version/version.go`'s real regex shape, tested by an actual `set`+`check` round-trip before trusting it), `wave_tracking`/`wave_plan`/`wave_short_names`/`wave_themes` (the 15 + 9 entries formerly hardcoded in `wave_progress.py`'s own source, migrated verbatim), `wave_visibility` (empty -- nothing is currently hidden in this tree for real).
+- **`release.py` deliberately NOT swapped or wrapped**, matching T-56's own readiness assessment precisely: its 12-step pipeline (sharded testing, `c04dcheck`, `critrepro`, generate, consistency, gate) has no equivalent in `relcore.py`'s own two generic builtins, and re-expressing it as a manifest is real, separately-scoped work. `release.py` itself is unchanged; it now imports the swapped `syncver.py` as a module and invokes the swapped `wave_progress.py` as a subprocess, both confirmed working through a full real release run (this one) before this item was closed.
+- **The full, real release pipeline is the actual proof this works, not a separate claim:** build, all 6 test shards, lint, `c04dcheck`, `critrepro`, and generate all passed clean against the swapped tools before this item was written up -- not a synthetic scratch-copy test, the real thing.
+- **Pre-migration `scripts/` backed up** to `scripts.pre-migration-backup/` for the duration of this session, on top of the checkpoint history already covering this tree.
+- Not started -- filed as closed on landing, the migration itself is the whole scope of this item.
+
+Cross-ref: CHANGELOG 0.30.30.
+
+## [0.30.29] XOT207 — wave_progress.py/add_wave.py: persisted per-wave visibility -- --hide/--unhide ID, --include-hidden, backed by a new docs/WAVE_VISIBILITY.json sidecar, ported from repoman's own generalised version (v0.30.29, 2026-08-17)
+
+Theme: tooling · closed 0.30.29 · 2026-08-17
+
+
+- **Trigger:** direct request. A prior session had built an in-chat, ephemeral HTML widget with per-wave show/hide checkboxes -- found, on inspection this session, to have been genuinely lost: its own toggle state was never persisted anywhere (claude.ai widgets cannot use localStorage), and even the *documentation* of the pattern that was meant to survive (`docs/TOOLING.md` §1c) turned out, on direct inspection, to only cover the plain terminal tool, not the toggle widget at all. Direct instruction, once the gap was found: wave visibility must be persisted as real DATA, the same way wave name/progress/pills already are, with ASCII and HTML rendering treated as display only.
+- **Design:** a new `docs/WAVE_VISIBILITY.json` sidecar (wave_id -> bool; absent = visible, the default). Deliberately NOT injected into `wave_progress.py`'s own source the way `SHORT_NAMES` is -- that mechanism suits something set once per wave and rarely touched again; visibility gets toggled back and forth repeatedly over a wave's whole lifetime, and repeatedly patching Python source for that is the wrong tool. A plain JSON file a script can safely read-modify-write isn't.
+- **`is_visible(wave_id)`** is the only place either renderer consults visibility -- `render_table` (ASCII) and, once ported, `render_html` both filter through it, so the two display forms cannot independently drift on what's currently shown.
+- **`wave_progress.py --hide ID` / `--unhide ID`**: single-purpose mutations, persist and confirm, warn (but still proceed) if the id isn't a wave found in the current document.
+- **`--include-hidden`**: renders everything for one invocation without touching persisted state.
+- **`Overall` always reflects every wave, hidden or not** -- a deliberate choice: visibility is a display concern, hiding a wave from view doesn't mean its work stops counting toward the real total. Verified directly, not assumed: the `Overall` line is byte-identical before and after hiding a wave.
+- **`add_wave.py`** now writes an explicit `visible: true` entry for every newly created wave, matching `SHORT_NAMES`'s own existing precedent of an explicit record per wave.
+- **Ported from, and kept in sync with, repoman's own generalised version (0.7.0)** -- same design, same behaviour, the persistence mechanism is the only deliberate difference, justified above.
+- **Verified end to end against real data**, not just compiled: hide/unhide/include-hidden/the-Overall-invariant/the-unrecognised-id-warning/add_wave's-own-default-write all tested in an isolated scratch copy against this project's actual current wave data before landing here.
+- Not started -- filed as closed on landing, the port itself is the whole scope of this item.
+
+Cross-ref: CHANGELOG 0.30.29.
+
+## [0.30.28] XOT206 — add_wave.py's insert_tracking_section depended on a hardcoded '## 3.' section-number anchor in SUBSTRATE_TRACKING.md -- fragile, would break silently if the document's own numbering ever changed -- fixed by finding the last existing wave section and inserting after it instead, no anchor needed (v0.30.28, 2026-08-17)
+
+Theme: tooling · closed 0.30.28 · 2026-08-17
+
+
+- **Trigger:** found while auditing xolu's own usage of repoman for T-56's correction -- repoman's own generalised add_wave.py (0.2.0) had already fixed this exact fragility when it was ported and generalised from this project's own copy, but the fix was never backported here.
+- **The bug:** `insert_tracking_section` searched for a literal `"## 3."` substring in SUBSTRATE_TRACKING.md to know where to insert a new wave's own section, relying on that document's own section numbering staying stable. It currently works only because `## 3. Verification discipline` still happens to be the next section after the wave-detail list -- it would fail or, worse, insert in the wrong place without warning if the document were ever restructured.
+- **The fix, ported directly from repoman's own already-tested version:** find the LAST existing `### Wave N` heading, then find where the next `### `, `## `, or a trailing `---` begins (whichever comes first), and insert immediately before that -- no dependency on any specific section number or heading text existing anywhere in the document. Falls back to appending at the end of the document if there are no existing wave headings at all (the first-wave case).
+- **Verified:** re-ran `add_wave.py --dry-run` for a hypothetical wave 15 both before and after the fix -- identical computed wave number, item numbers, and section content in both cases; the only change is HOW the insertion point is found, not the result on this document's own current, unrestructured state.
+- Not started -- filed as closed on landing, since the fix itself is the whole scope of this item.
+
+Cross-ref: CHANGELOG 0.30.28.
+
+## [0.30.27] XOT205 — wave_progress.py's all_wave_tnums exclusion set only recognised T-NNN ids, never XOT NNN -- XOT-format items formally assigned to one wave leaked into another wave's theme-matched debt line (v0.30.27, 2026-08-17)
+
+Theme: tooling · closed 0.30.27 · 2026-08-17
+
+
+- **Trigger:** found immediately after creating wave 14 (`iolu physical backup + restore`, items XOT203/XOT204) -- `wave_progress.py --show` listed both as wave 6's own "debt", even though they are formally wave 14's items, because wave 6 and wave 14 share the `iolu` theme in `WAVE_THEMES`.
+- **Root cause:** `all_wave_tnums`'s own `TNUM_RE = re.compile(r"T-(\d+)")` never matched the newer `XOT<n>` id format (added T-163/v0.27.2) at all -- so no XOT-format item was ever excluded from theme-based debt matching, for any wave, regardless of whether it was formally assigned elsewhere. Invisible until two waves shared a theme with at least one XOT-format item involved; wave 13's own `cron` theme is unique to it, so this never manifested until wave 14 reused `iolu`.
+- **Fix:** `TNUM_RE` widened to `(T-\d+|XOT\d+)` with a single capture group returning the whole id; the exclusion-set loop simplified from `result.add(f"T-{n}")` to `result.add(n)` accordingly (the old f-string would have double-prefixed a whole-string XOT match, e.g. producing `T-XOT203`, had the regex alone been widened without this second fix).
+- **Verified:** wave 6's debt line correctly returned to `T-68` only (XOT203/XOT204 excluded, now correctly counted under wave 14 instead); wave 8's own debt/blockers lines (a pre-existing, unaffected case) unchanged, confirming no regression.
+
+Cross-ref: CHANGELOG 0.30.27.
+
+## [0.30.25] XOT193 — pkg/timeseries: RangeAggregate and RangeFullAggregate share XOT192's own check-then-scan race (confirmed 4/100 and 2/100 under -race on sandbox against the reverted code) -- fixed, covered by new tests plus an extended cmd/critrepro ts-delete-fence scenario, and confirmed on real multi-core hardware (2000/2000, Horacio's own run) (v0.30.25, 2026-08-14)
+
+Theme: storage · closed 0.30.25 · 2026-08-14
+
+
+- **Trigger:** the crashed-sandbox handover from XOT192's own session flagged, as an unverified suspicion, that `RangeAggregate` and `RangeFullAggregate` (`pkg/timeseries/store.go`) might share the exact same check-then-scan gap as `QueryRange`/`Latest`/`Aggregate` — the sandbox failed before this could actually be checked. Investigated fresh this session, not taken on the handover's word: read both functions' code directly first.
+- **Confirmed a real, distinct gap, same shape:** both functions call `s.reg.get(q.Timeline)` once at the top, scan Pebble, and return with no re-check — identical to XOT192's own root cause. `DeleteTimeline` marks the timeline deleting first (from which point `get()` reports not-found), then runs its wider multi-step teardown (rollups, then `deleteDataRange` — an actual `DeleteRange` over the same key range these two functions scan). No lock spans "check registry → scan Pebble" as one unit for either function.
+- **Precise reproduction, not assumed:** two new tests written first, matching `TestLatest_DeletingMarker_ConcurrentReader`'s own established pattern — `TestRangeAggregate_DeletingMarker_ConcurrentReader` and `TestRangeFullAggregate_DeletingMarker_ConcurrentReader`. Run against the *reverted* (unfixed) code under `go test -race -count=100` on this project's own single-core sandbox: **`RangeFullAggregate` failed 4/100, `RangeAggregate` failed 2/100.** `-race` itself never fired — the same logic-level ordering gap classification as XOT192, not a Go memory-model data race.
+- **Fix:** both functions now re-check `s.reg.get(q.Timeline)` a second time immediately before returning their own scan results, returning XOLU-TS004 instead of the scan's own (potentially stale) results if the timeline is no longer visible. Same fix, same reasoning, same comment lineage as XOT192's own three.
+- **Verification so far:** fix restored, both new tests clean at `-count=500` (0/500). Full `pkg/timeseries` package suite clean under `-race`. Whole-tree `go build ./...`, `go vet ./...`, and `go test ./...` (41 packages) all clean. `c04dcheck` clean (invoked exactly as CI does: `tools/c04dcheck` built standalone, run from repo root against `./...`). `golangci-lint` clean (0 issues) -- installed via `go install .../golangci-lint@v2.12.2`, matching the CI pin exactly, after an initial session hiccup with the official install script's own checksum verification (not bypassed; worked around by using the project's own already-documented `docs/TOOLING.md` §0 approach instead).
+- **`cmd/critrepro/ts_delete_fence.go` extended**, not written fresh: the existing scenario already raced `QueryRange`/`Latest`/`Aggregate` against a concurrent `DeleteTimeline` on real hardware for XOT192's own closure. Two more goroutines added racing `RangeAggregate`/`RangeFullAggregate` the same way, on the same shared store, same iteration. No separate registration needed — already wired into `scripts/release.py`'s own `critrepro` step (200 iterations) and `.github/workflows/ci.yml`'s own `critrepro` step (100 iterations), both of which re-exercise every registered scenario including this extension going forward. Ran locally at `-n 300` on this sandbox: builds clean, runs clean, no crash or deadlock (single-core sandbox pass rate is not itself evidence for this defect class — recorded per this project's own established convention, not claimed as proof).
+- **Real-hardware confirmation, the decisive step, matching XOT192's own standard exactly:** single-core sandbox evidence was explicitly treated as insufficient for a race of this shape — closure required the same real multi-core run XOT192's own closure did. `go run ./cmd/critrepro -scenario ts-delete-fence -n 2000` on Horacio's own hardware: **2000/2000 pass, 0 fail.** Closing this item.
+
+Cross-ref: CHANGELOG 0.30.25.
+
+Cross-ref: CHANGELOG 0.30.25.
+
+## [0.30.25] XOT195 — scripts/release.py: ZIP_SOURCES still named the now-removed examples/ directory as a mandatory archive source (examples/crm was removed entirely in v0.30.0, xoluman now maintains it) -- every checkpoint zip since v0.30.0 would have failed on this, first actually exercised this session (v0.30.25, 2026-08-14)
+
+Theme: tooling · closed 0.30.25 · 2026-08-14
+
+
+- **Trigger:** every checkpoint zip attempted this session (v0.30.24, three separate builds) failed at `release.py`'s own `step_zip` with `zip source missing: examples`. Worked around each time by packaging the zip manually with `examples` omitted from the source list -- flagged twice to Horacio as a real gap rather than assumed to be a mistake on this session's own part. Confirmed by Horacio: deliberate, dated, already on record.
+- **Root cause:** `scripts/release.py`'s own `ZIP_SOURCES` list still named `"examples"` as a mandatory archive source. `examples/crm` was removed from the repository entirely in **v0.30.0** (`CHANGELOG.md`, 2026-08-07) -- xoluman took ownership of the CRM demo and maintains it as xolu's canonical end-user example, specifically to stop two independent copies of the same demo drifting apart. `ZIP_SOURCES` was never updated to match at the time, so every checkpoint zip attempted since v0.30.0 would have hit this exact failure -- not a new regression, a week-old latent one, first actually exercised by this session's own checkpoint work.
+- **Fix:** `"examples"` removed from `ZIP_SOURCES`, with an inline comment recording why and cross-referencing the v0.30.0 CHANGELOG entry, so a future reader doesn't wonder whether its absence is itself the bug.
+- **Verification:** `ast.parse` confirms the edited file is still valid Python. The real proof is `step_zip` completing end to end for the first time this session once this fix and XOT193's own closure were both in place -- see the v0.30.25 checkpoint.
+
+Cross-ref: CHANGELOG 0.30.25.
+
+## [0.30.24] XOT194 — scripts/release.py: a step returning {"skipped": True} (--no-lint, --no-zip) was journaled as status "ok" unconditionally, indistinguishable from a genuine pass -- a later --resume without the skip flag would silently never re-run that step -- found and fixed while redoing XOT193's own release pass (v0.30.24, 2026-08-14)
+
+Theme: tooling · closed 0.30.24 · 2026-08-14
+
+
+- **Trigger:** found while redoing XOT193's own release pass after fixing the golangci-lint install problem. The first `release.py --no-lint 0.30.24` run journaled `lint` at `status: "ok"` even though it never actually ran (`step_lint` returns `{"skipped": True}` under `--no-lint`). A later `--resume`, run *without* `--no-lint`, would have silently trusted that stale `"ok"` and skipped a real lint pass entirely — caught only because the earlier `golangci-lint` install failure made the skip visible in the same session; a session where the installer had simply worked would never have noticed lint wasn't actually being verified.
+- **Root cause:** `scripts/release.py`'s main loop (`main()`, around line 466 pre-fix) unconditionally called `ctx.journal.record(name, "ok", ...)` after any non-exception return from a step function, regardless of what that function's own return value said. `journal.green(step)` only checks `status == "ok"` to decide whether `--resume` can skip a step — so "genuinely passed" and "was skipped via a flag" were indistinguishable in the journal. The same bug applies identically to `step_zip`/`--no-zip`, the only other step that can return `{"skipped": True}`.
+- **Fix:** the loop now checks `meta.get("skipped")` and records `status: "skipped"` instead of `"ok"` when true, so `journal.green()` correctly returns `False` and a later `--resume` genuinely re-runs the step.
+- **Verified, not assumed:** an isolated, non-destructive test (Journal class exercised directly with `STATE_FILE` monkeypatched to a scratch path, real `.release-state.json` never touched) reproduced the exact pre-fix bug (`green("lint")` returns `True` after a simulated `--no-lint` run), confirmed the fix closes it (`green("lint")` returns `False` after the same simulated skip), and confirmed a genuine pass is unaffected (`green("lint")` still returns `True` for a real `{}` return). Full file re-parsed as valid Python (`ast.parse`) and `release.py --help` confirmed the module still loads and the CLI still parses correctly end to end.
+- **This session's actual v0.30.24 journal was affected and manually repaired** (the stale `lint: ok` entry from the `--no-lint` run was deleted by hand before re-running `--resume` with lint genuinely enabled) — not touched by the isolated test above, confirmed separately.
+
+Cross-ref: CHANGELOG 0.30.24.
+
 ## [0.30.23] XOT192 — pkg/timeseries: fixed a real, reproducible check-then-scan race across QueryRange, Latest, and Aggregate -- confirmed clean on real multi-core hardware (2000/2000 via cmd/critrepro's own ts-delete-fence scenario, plus a clean full whole-tree suite run) after being found via a flaky test initially misjudged as sandbox noise and reproduced precisely at 3/100 under -race on this project's own single-core sandbox (v0.30.23, 2026-08-13)
 
 Theme: storage · closed 0.30.23 · 2026-08-13

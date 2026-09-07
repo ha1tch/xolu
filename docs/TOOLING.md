@@ -212,6 +212,57 @@ already treat as something written deliberately each time, not
 generated; the tool places it correctly and consistently, it doesn't
 compose it.
 
+## 1e. Wave visibility (`docs/WAVE_VISIBILITY.json`)
+
+**History worth recording plainly, so this doesn't get lost a second
+time:** a prior session built a working "hide completed waves" view —
+an in-chat HTML widget with a checkbox per wave and show-all/hide-all
+buttons — and was asked to persist that pattern for future sessions to
+reuse. What actually got written down (`TOOLING.md`, this section's
+own prior content) only documented the plain terminal tool, never the
+toggle behaviour itself — and the toggle *state* was never persisted
+anywhere at all, since claude.ai widgets cannot use `localStorage`.
+The widget's checkboxes lived exactly as long as that one chat turn.
+Found and corrected 2026-08-17 (XOT207): visibility is now real DATA,
+not a rendering-layer afterthought.
+
+**`docs/WAVE_VISIBILITY.json`** — a small sidecar, `{"wave_id":
+bool}`, absent entry = visible (the default; a repository that never
+touches this file behaves exactly as before this feature existed).
+Deliberately NOT injected into `wave_progress.py`'s own source the way
+`SHORT_NAMES` is (§1c) — that mechanism suits something set once per
+wave and rarely revisited; visibility gets toggled back and forth
+repeatedly over a wave's whole working life, and repeatedly patching
+Python source for that is the wrong tool. A plain JSON file a script
+can safely read-modify-write isn't.
+
+    python3 scripts/wave_progress.py --hide 6            # persist wave 6 as hidden
+    python3 scripts/wave_progress.py --unhide 6          # persist wave 6 as visible again
+    python3 scripts/wave_progress.py --show --include-hidden   # render everything anyway, this once
+
+`is_visible(wave_id)` is the only place `wave_progress.py`'s own ASCII
+renderer consults this file — so the terminal output always reflects
+whatever `--hide`/`--unhide` last set, never a separately-tracked
+notion of what's shown.
+
+**`Overall` always reflects every wave, hidden or not** — a
+deliberate choice, not an oversight: visibility is a display concern,
+and hiding a wave from view doesn't mean its own work stops counting
+toward the real total. Verified directly when this was built, not
+assumed: the `Overall` line is byte-identical before and after hiding
+a wave.
+
+**`add_wave.py`** writes an explicit `visible: true` entry for every
+newly created wave, matching `SHORT_NAMES`'s own existing precedent of
+an explicit record per wave rather than relying on the absent-means-
+visible fallback alone.
+
+**Ported from, and kept in sync with, repoman's own generalised
+version** (`wave_progress.py --hide`/`--unhide`, repoman 0.7.0) — same
+design, same behaviour; the persistence mechanism (a JSON sidecar here
+vs. a `.repoman.json` key there) is the one deliberate difference,
+justified above by how this project's own tooling is structured.
+
 ## 2. During work: the live register
 
 `docs/TRACKING.md` holds open actionable items only; closed items live
@@ -319,7 +370,8 @@ After a green run, commit and tag:
 | `scripts/regrun.py` | Mid-session regression: is the tree green after an edit, ahead of the next release |
 | `scripts/runtests.py` | The canonical test runner -- coverage, category classification, colour output, threshold gate, HTML/charts. `run_tests.sh` and `make test`/`test-v`/`test-race`/`coverage*` are thin wrappers around this, not separate implementations (T-139) |
 | `scripts/ed.py` | Journaled handle-based editing: find/apply/sub/undo (`--help`, `selftest`) |
-| `scripts/roles.py` | Syntactic-role auditor for occurrences (mass-substitution rule, mechanized) |
+| `scripts/roles.py` | Syntactic-role auditor for occurrences (mass-substitution rule, mechanized); extended 2026-08-14 with python/json/yaml/shell classifiers alongside the original go/md ones |
+| `scripts/str_replace_extended.py` | Format-aware, journaled, base64-payload substitution (`apply`, `selftest`) -- the preferred edit tool per the working agreement's tool-precedence ladder, above `ed.py` for substitutions. Content never touches a shell: search/replace text travels as base64-encoded UTF-8 inside a JSON payload, never as a CLI argument. Refuses (writes nothing) on a match-count mismatch, a role census outside the caller's asserted roles, a delimiter-integrity break (an unescaped quote/backtick/etc. that exits an enclosing string or comment -- catches `` `+expr+` `` -class injections even when balanced, not just unbalanced ones), or a post-apply syntax-validator failure (`gofmt -e`, `ast.parse`, `json.loads`, a YAML/Markdown structural lint, or `bash -n`, per format). Journals through `ed.py`'s own WAL -- one undo history for both tools |
 | `scripts/syncver.py` | VERSION ↔ version.go sync (imported by release.py; CLI too) |
 | `scripts/release_gate.py` | Release-readiness checks (invoked by release.py) |
 | `scripts/wave_progress.py` | Regenerates `docs/SUBSTRATE_TRACKING.md`'s progress-at-a-glance summary (bars + a per-wave debt subtitle from open register items sharing that wave's theme + a blockers subtitle when a wave's own items or debt are waiting on a currently-open prerequisite) from each wave's own per-item status table -- run standalone after editing a wave table, or automatically every release (wired into `release.py`'s generate step) |

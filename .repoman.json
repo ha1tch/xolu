@@ -1,4 +1,74 @@
 {
   "id_prefix": "XOT",
-  "_comment": "id_prefix: forward-only project prefix for new register items, decided 2026-08-04. Existing items (T-1 through T-163) keep their original unprefixed form permanently -- this project's own 'IDs are never reused and never renumbered' rule treats the full id string as fixed once assigned. Only T-164 onward uses the new 'XOT<n>' shape (no hyphen). Motivated by a real cross-project collision found while syncing repoman upstream: a closure narrative in a different project's own register (seam-ui) was confused by xolu's own bare 'T-160'/'T-161' mentioned in prose, corrupting their id sequence. Sibling projects use their own prefixes for the same reason: xoluman='XMT', seam='SET'. scripts/register.py hardcodes this value directly (NEW_PREFIX) rather than reading this file -- matching this project's own existing style of hardcoded paths/values throughout its in-repo tooling, not the generic repoman config.py system. This file exists as a discoverable, documented anchor point, not a mechanism register.py actually reads."
+  "id_separator": "",
+  "legacy_id_prefix": "T",
+  "legacy_id_separator": "-",
+  "tracking": "docs/TRACKING.md",
+  "resolved": "docs/RESOLVED.md",
+  "known_issues": "docs/KNOWN_ISSUES.md",
+  "changelog": "CHANGELOG.md",
+  "version_file": "VERSION",
+  "version_targets": [
+    {
+      "file": "pkg/version/version.go",
+      "match": "const Version = \"([^\"]+)\""
+    }
+  ],
+  "wave_tracking": "docs/SUBSTRATE_TRACKING.md",
+  "wave_plan": "docs/SUBSTRATE_DEVELOPMENT_PLAN.md",
+  "wave_short_names": {
+    "14": "iolu physical backup + restore",
+    "13": "/cron",
+    "12": "pkg/client blob support",
+    "0": "Process foundation",
+    "1": "ID widening + sysmask",
+    "2": "Referential integrity",
+    "3": "Chronicle substrate",
+    "4": "bal",
+    "5": "dxp",
+    "6": "iolu operations",
+    "7": "Events + system stores",
+    "8": "OQL primitive queries",
+    "9": "/loc",
+    "9b": "/loc — bring to spec",
+    "10": "/obj",
+    "15": "Wave of Mutilation",
+    "16": "Client Completeness"
+  },
+  "wave_themes": {
+    "3": [
+      "chronicle"
+    ],
+    "4": [
+      "bal"
+    ],
+    "5": [
+      "dxp"
+    ],
+    "6": [
+      "iolu"
+    ],
+    "7": [
+      "events",
+      "system-stores"
+    ],
+    "8": [
+      "oql"
+    ],
+    "10": [
+      "obj"
+    ],
+    "12": [
+      "client"
+    ],
+    "13": [
+      "cron"
+    ]
+  },
+  "wave_visibility": {
+    "15": true,
+    "16": true
+  },
+  "wave_html_title": "xolu wave progress",
+  "_comment": "Migrated 2026-08-17 (XOT-next): this project's own tooling now reads this file directly via repoman's config.py -- scripts/{ed,roles,register,guards,syncver,wave_progress,add_wave,str_replace_extended}.py are repoman's own generalised versions, not hand-forked copies. id_prefix/id_separator/legacy_id_prefix/legacy_id_separator encode the same T-/XOT- dual-format rule documented at length in this project's own TRACKING.md and RESOLVED.md; wave_short_names/wave_themes were migrated verbatim from wave_progress.py's own former hardcoded dicts. release.py remains this project's own -- its 12-step pipeline (sharded testing, c04dcheck, critrepro, generate, consistency, gate) has no equivalent in relcore.py's own two generic builtins, and wrapping it is real, separately-scoped work, not done here."
 }

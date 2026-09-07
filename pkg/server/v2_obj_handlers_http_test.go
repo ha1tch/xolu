@@ -43,6 +43,85 @@ func TestObjAPI_Attach_GetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestObjAPI_List_EmptyTenant_ReturnsEmptyArray: XOT209 (wave 15) --
+// exactly the case xoluman's own tenant-emptiness check needs. Not
+// just "the endpoint exists," but that a genuinely empty tenant gets
+// an empty array back, not an error and not a nil that would encode
+// as JSON null instead of [].
+func TestObjAPI_List_EmptyTenant_ReturnsEmptyArray(t *testing.T) {
+	env := newMetaServer(t)
+	status, resp := doJSONRequest(t, "GET", objURL(env, "/list"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("list on empty tenant: want 200, got %d %v", status, resp)
+	}
+	subjects, ok := resp["subjects"].([]interface{})
+	if !ok {
+		t.Fatalf("subjects: want an array, got %T (%v)", resp["subjects"], resp["subjects"])
+	}
+	if len(subjects) != 0 {
+		t.Errorf("empty tenant: want 0 subjects, got %d: %v", len(subjects), subjects)
+	}
+}
+
+// TestObjAPI_List_ReturnsAttachedSubjects: the enumeration this
+// primitive never had (XOT209, wave 15) -- found missing by reading
+// the full route table directly, every other route a per-id lookup
+// or a write. Attaches two, moves one to a real loc_leaf so the list
+// response's own position_kind/loc_leaf_id fields are exercised for
+// something other than the always-unassigned freshly-attached case.
+func TestObjAPI_List_ReturnsAttachedSubjects(t *testing.T) {
+	env := newMetaServer(t)
+	leafID := "root/shelf-A1"
+	defineLocRoot(t, env, "root")
+	defineLocLeaf(t, env, leafID, "root", 500.0)
+
+	status, _ := doJSONRequest(t, "POST", objURL(env, "/attach"), map[string]interface{}{"subject": "vehicles:47"})
+	if status != http.StatusCreated {
+		t.Fatalf("attach vehicles:47: want 201, got %d", status)
+	}
+	status, _ = doJSONRequest(t, "POST", objURL(env, "/attach"), map[string]interface{}{"subject": "pallets:9"})
+	if status != http.StatusCreated {
+		t.Fatalf("attach pallets:9: want 201, got %d", status)
+	}
+	status, moveResp := doJSONRequest(t, "PUT", objURL(env, "/pallets/9/move"), map[string]interface{}{
+		"to": map[string]interface{}{"kind": "loc_leaf", "location_id": leafID},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("move pallets:9 to loc_leaf: want 200, got %d %v", status, moveResp)
+	}
+
+	status, resp := doJSONRequest(t, "GET", objURL(env, "/list"), nil)
+	if status != http.StatusOK {
+		t.Fatalf("list: want 200, got %d %v", status, resp)
+	}
+	subjects, ok := resp["subjects"].([]interface{})
+	if !ok || len(subjects) != 2 {
+		t.Fatalf("want 2 subjects, got %v", resp["subjects"])
+	}
+	byRef := map[string]map[string]interface{}{}
+	for _, s := range subjects {
+		m := s.(map[string]interface{})
+		byRef[m["subject"].(string)] = m
+	}
+	veh, ok := byRef["vehicles:47"]
+	if !ok {
+		t.Fatalf("vehicles:47 missing from list: %v", subjects)
+	}
+	if veh["position_kind"] != "" {
+		t.Errorf("vehicles:47 should still be unassigned, got position_kind=%v", veh["position_kind"])
+	}
+	pal, ok := byRef["pallets:9"]
+	if !ok {
+		t.Fatalf("pallets:9 missing from list: %v", subjects)
+	}
+	if pal["position_kind"] != "loc_leaf" {
+		t.Errorf("pallets:9: want position_kind=loc_leaf, got %v", pal["position_kind"])
+	}
+	if pal["loc_leaf_id"] != leafID {
+		t.Errorf("pallets:9: want loc_leaf_id=%v, got %v", leafID, pal["loc_leaf_id"])
+	}
+}
+
 func TestObjAPI_Attach_Duplicate_Returns409(t *testing.T) {
 	env := newMetaServer(t)
 	status, _ := doJSONRequest(t, "POST", objURL(env, "/attach"), map[string]interface{}{"subject": "vehicles:1"})

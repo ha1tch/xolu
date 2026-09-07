@@ -8,6 +8,23 @@ precisely specified and repeatedly hand-executed — which is exactly
 where hand-editing mistakes live. This tool makes the procedure's
 violations unmakeable rather than detected after the fact.
 
+Diverges from upstream (github.com/ha1tch/repoman), not yet synced back:
+[RESOLVED 2026-08-17, downstream in xolu] cmd_list's sort key was
+hardcoded int(t[2:]), assuming a one-character id_prefix -- and
+next_id() checked only TRACKING.md, never RESOLVED.md. Both fixed
+independently in xolu (T-163 and an earlier session) before this note
+was reconciled against xolu's actual current state, which had drifted
+ahead of what this docstring described. Both fixes are now upstream
+here too, generalized further: id_prefix, id_separator, and an
+optional legacy_id_prefix/legacy_id_separator pair (config.py) replace
+every hardcoded separator-plus-digits pattern and len(_P)+1 assumption
+and an _id_num() helper -- additive, opt-in, byte-identical default
+behaviour for any consumer that doesn't set the new keys. Motivated by
+xolu's own real, permanent need: a mid-project id-prefix migration
+(T-1..T-163 frozen in "T-NNN" shape forever; T-164 onward forward-only
+in a new, unhyphenated "XOTNNN" shape) that this project's original
+single-format model could not express at all.
+
 Commands:
 
     list                       one line per open item
@@ -40,53 +57,58 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-TRACKING = ROOT / "docs" / "TRACKING.md"
-RESOLVED = ROOT / "docs" / "RESOLVED.md"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config as _config
 
-# NEW_PREFIX: forward-only project prefix for new register items, added
-# 2026-08-04 -- Horacio's own decision, directly motivated by a real
-# collision found while syncing repoman upstream (T-163): a closure
-# narrative in a DIFFERENT project's own register (seam-ui) was
-# confused by xolu's own bare "T-160"/"T-161" mentioned in prose,
-# jumping their own next_id() sequence. A per-project prefix
-# (xolu="XOT", xoluman="XMT", seam="SET") makes that structurally
-# impossible instead of merely unlikely -- an ID from another project
-# can never collide with or be mistaken for one of xolu's own,
-# regardless of what free-form prose quotes it.
-#
-# Deliberately forward-only, not retroactive: this project's own "IDs
-# are never reused and never renumbered" rule treats a full ID string
-# as permanent once assigned. T-1 through T-163 keep their original,
-# unprefixed form forever, exactly as filed; only T-164 onward uses the
-# new "XOT<n>" shape (no hyphen, matching the literal example given
-# when this was decided). Both shapes are matched throughout this file
-# so the existing history and new items are read, sorted, and
-# cross-checked together -- neither format is ever assumed exclusively.
-NEW_PREFIX = "XOT"
+_ROOT, _CFG = _config.load()
+TRACKING = _ROOT / _CFG["tracking"]
+RESOLVED = _ROOT / _CFG["resolved"]
+_P = _CFG["id_prefix"]
+_SEP = _CFG.get("id_separator", "-")
+_LEGACY_P = _CFG.get("legacy_id_prefix", "")
+_LEGACY_SEP = _CFG.get("legacy_id_separator", "-")
 
-STATUS_SYMBOLS = {"✓", "◐", "☐", "✗"}
-_ID_ALT = r"(?:T-|" + re.escape(NEW_PREFIX) + r")\d+"
-ID_RE = re.compile(_ID_ALT)
-ROW_RE = re.compile(r"^\| (" + _ID_ALT + r") \|")
-HEAD_RE = re.compile(r"^### (" + _ID_ALT + r")\. (.*)$")
-FIELD_RE = re.compile(
-    r"^Theme: (\S+) · Priority: \*{0,2}(P\d)\*{0,2} · Status: (\S+)(?: · Blocks/after: (.*))?$",
-    re.M)
+# _ID_ALT: the id shape as a regex fragment (not compiled -- used in
+# string concatenation throughout, matching this project's own
+# existing style of building patterns from configured pieces). With
+# no legacy prefix configured (the default), this is exactly
+# re.escape(_P) + re.escape(_SEP) + r"\d+" -- identical to every
+# consumer's existing, only-ever-tested behaviour. A legacy prefix
+# adds a second alternative so ids from BEFORE a mid-project prefix
+# migration are still recognised everywhere an id can appear, without
+# ever being GENERATED again (next_id() always issues the primary
+# shape; see next_id's own doc comment).
+if _LEGACY_P:
+    _ID_ALT = (r"(?:" + re.escape(_P) + re.escape(_SEP) + r"|"
+               + re.escape(_LEGACY_P) + re.escape(_LEGACY_SEP) + r")\d+")
+else:
+    _ID_ALT = re.escape(_P) + re.escape(_SEP) + r"\d+"
 
 
 def _id_num(tid: str) -> int:
-    """The numeric portion of an id, old ("T-NNN") or new ("XOTNNN")
-    format -- the two prefixes differ in length (2 chars vs. 3, and
-    only one carries a hyphen), so a fixed-offset slice like the old
-    t[2:] is wrong for one of them. Raises ValueError on anything
-    matching neither shape, rather than silently returning a wrong
-    number."""
-    if tid.startswith("T-"):
-        return int(tid[2:])
-    if tid.startswith(NEW_PREFIX):
-        return int(tid[len(NEW_PREFIX):])
+    """The numeric portion of an id, primary or legacy shape -- the
+    two may differ in both prefix and separator (xolu: "XOT194" vs.
+    "T-71"), so a fixed-offset slice is wrong for one of them whenever
+    a legacy format is configured. Raises ValueError on anything
+    matching neither configured shape, rather than silently returning
+    a wrong number."""
+    primary = _P + _SEP
+    if tid.startswith(primary):
+        return int(tid[len(primary):])
+    if _LEGACY_P:
+        legacy = _LEGACY_P + _LEGACY_SEP
+        if tid.startswith(legacy):
+            return int(tid[len(legacy):])
     raise ValueError(f"unrecognized id format: {tid!r}")
+
+
+STATUS_SYMBOLS = {"✓", "◐", "☐", "✗"}
+ID_RE = re.compile(_ID_ALT)
+ROW_RE = re.compile(r"^\| (" + _ID_ALT + r") \|")
+HEAD_RE = re.compile(r"^### (" + _ID_ALT + r")\. (.*)$", re.M)
+FIELD_RE = re.compile(
+    r"^Theme: (\S+) · Priority: \*{0,2}(P\d)\*{0,2} · Status: (\S+)(?: · Blocks/after: (.*))?$",
+    re.M)
 
 
 class Item:
@@ -122,7 +144,7 @@ class Register:
             self.rows[m.group(1)] = (m.group(3).strip(),
                                      m.group(4).strip().strip('*'),
                                      m.group(5).strip(), m.group(0))
-        heads = list(re.finditer(r"^### (" + _ID_ALT + r")\. (.*)$", self.text, re.M))
+        heads = list(HEAD_RE.finditer(self.text))
         for i, h in enumerate(heads):
             start = h.start()
             # section ends at the next ### / ## heading or trailing ---
@@ -140,30 +162,39 @@ class Register:
             self.spans[h.group(1)] = (start, end)
 
     def next_id(self) -> str:
+        """Next free id, considering both TRACKING.md (open items) and
+        RESOLVED.md (closed items) -- an id closed earlier in the same
+        session must not be reissued. Found 2026-08-03 in seam-ui: a
+        just-closed T-45 (release.sh fix) was silently reassigned to a
+        new, unrelated item, since this method previously scanned only
+        self.rows/self.items (TRACKING.md). RESOLVED.md may not exist
+        yet (a brand-new register); that is not an error here.
+
+        RESOLVED.md's own scan is deliberately anchored to the closure
+        header's structured position ("## [version] T-nn -- ..."), not
+        a bare id-shaped substring anywhere in the entry's free-form
+        prose. Found 2026-08-04 in seam-ui: a closure narrative quoting
+        another project's own internal tracking IDs verbatim (xolu's
+        CHANGELOG mentioning its own "T-160"/"T-161") was misread as a
+        real id in THIS repository's own sequence, jumping next_id()
+        from T-70 to T-161. TRACKING.md's own rows/items were already
+        immune (parsed from structured table rows and detail headers,
+        never a raw full-text scan) -- this fix brings RESOLVED.md's
+        scan to the same standard, not a new one.
+        """
         ids = [_id_num(t) for t in set(self.rows) | set(self.items)]
-        # BUGFIX (found 2026-07-29): IDs must never be reused, including
-        # a closed item's — but this only ever scanned TRACKING.md's
-        # currently-open items. Closing an item removes it from
-        # TRACKING.md entirely, so the very next `add` after a `close`
-        # in the same session would compute max() over a set missing
-        # the ID just freed by that closure, and hand it straight back
-        # out — a real collision with RESOLVED.md's permanent record,
-        # not a theoretical one (T-82 was assigned to two different
-        # items this way). RESOLVED.md is append-only and never purged,
-        # so it must be included in the max() every single time.
-        #
-        # Scans both id formats (old "T-NNN", new "XOTNNN") to find the
-        # true maximum regardless of which shape produced it, but always
-        # ISSUES the new one -- T-164 never gets assigned even if for
-        # some reason only "T-" entries existed; forward-only means
-        # forward from here, not "whichever format was seen last."
         if RESOLVED.exists():
-            ids += [int(t) for t in re.findall(
-                r"^## \[.*?\] T-(\d+)\s", RESOLVED.read_text(), re.M)]
-            ids += [int(t) for t in re.findall(
-                r"^## \[.*?\] " + re.escape(NEW_PREFIX) + r"(\d+)\s",
-                RESOLVED.read_text(), re.M)]
-        return f"{NEW_PREFIX}{(max(ids) + 1) if ids else 1}"
+            resolved_text = RESOLVED.read_text()
+            header_re = re.compile(r"^## \[.*?\]\s+(" + _ID_ALT + r")\s", re.MULTILINE)
+            ids += [_id_num(m.group(1)) for m in header_re.finditer(resolved_text)]
+        # Always issues the PRIMARY shape -- forward-only. A legacy
+        # id's own numeric range is never reused as a collision check
+        # here (both are unioned into one `ids` list above), but new
+        # ids are never minted in the legacy shape regardless of which
+        # format happened to hold the current maximum.
+        next_n = (max(ids) + 1) if ids else 1
+        digits = f"{next_n:02d}" if next_n < 100 else f"{next_n}"
+        return f"{_P}{_SEP}{digits}"
 
     def check(self, r) -> None:
         """A1–A3 plus symbol validity. `r` needs .err(section, msg) and

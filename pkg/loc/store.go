@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"modernc.org/sqlite"
@@ -519,6 +520,15 @@ func (s *Store) Patch(ctx context.Context, locationID string, p PatchParams) err
 		}
 		var ceilingVal interface{}
 		if *p.Ceiling != nil {
+			// A negative ceiling has no physical meaning -- found by an
+			// unsolicited adversarial test (TestAdversarial_LocPatchTriStateEdges)
+			// confirming no guard existed here, unlike the sibling check
+			// geometry.go already has for a circle fence's own radius
+			// (ValidationError, reused directly here rather than a new
+			// typed error -- same shape, same reasoning).
+			if **p.Ceiling < 0 {
+				return &ValidationError{Detail: fmt.Sprintf("capacity ceiling must be >= 0, got %d", **p.Ceiling)}
+			}
 			ceilingVal = **p.Ceiling
 		}
 		if _, err := tx.ExecContext(ctx,

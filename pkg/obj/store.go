@@ -261,6 +261,96 @@ func getQ(ctx context.Context, q queryer, subjectRef string) (*Subject, error) {
 	return &sub, nil
 }
 
+// List returns every subject currently attached in this tenant --
+// XOT209 (wave 15): the enumeration this package never had, found
+// missing by reading the full HTTP route table directly (every
+// registered /obj route is a per-id lookup or a write; nothing
+// enumerates). Mirrors Get's own two-query shape (obj_subjects for
+// capacity/retired/created, obj_position for placement) but as a
+// single JOIN rather than N+1 queries, ordered by subject_ref for a
+// stable, diffable result. INNER JOIN deliberately, matching Get's
+// own documented invariant that Attach always creates the position
+// row in the same transaction -- a subject missing its position row
+// would be a bug to surface by omission, not paper over with a LEFT
+// JOIN and a nil check.
+func (s *Store) List(ctx context.Context) ([]Subject, error) {
+	// LEFT JOIN (not INNER), and every position column scanned as
+	// nullable -- corrected after TestObjAdversarial_SubjectWithNoPositionRow
+	// (pkg/server/v2_obj_adversarial_test.go) found the INNER JOIN's
+	// own documented invariant (Attach always creates the position
+	// row in the same tx) does not actually hold under a real,
+	// manufactured violation: a subject row with no matching position
+	// row was silently absent from the result entirely, not merely
+	// mis-rendered -- meaning a tenant in that data shape would
+	// under-report its own subject count, and XOT213's tenant-summary
+	// would report Empty=true for a tenant that is not empty if this
+	// were its only subject. A position-less subject now surfaces
+	// with PositionKind "" (unassigned) -- the same state a subject
+	// has immediately after Attach, before any Move -- rather than
+	// vanishing.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.subject_ref, s.max_weight_kg, s.max_volume_m3, s.max_count,
+		       s.cur_weight_kg, s.cur_volume_m3, s.cur_count, s.retired_at, s.created_at,
+		       p.kind, p.loc_leaf_id, p.contains_ref, p.updated_at
+		FROM obj_subjects s
+		LEFT JOIN obj_position p ON p.subject_ref = s.subject_ref
+		ORDER BY s.subject_ref`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Subject
+	for rows.Next() {
+		var sub Subject
+		var maxW, maxV sql.NullFloat64
+		var maxC sql.NullInt64
+		var retiredAt sql.NullTime
+		var kind sql.NullString
+		var locLeafID, containsRef sql.NullString
+		var positionUpdatedAt sql.NullTime
+		if err := rows.Scan(&sub.Ref, &maxW, &maxV, &maxC,
+			&sub.Capacity.CurWeightKg, &sub.Capacity.CurVolumeM3, &sub.Capacity.CurCount,
+			&retiredAt, &sub.CreatedAt,
+			&kind, &locLeafID, &containsRef, &positionUpdatedAt); err != nil {
+			return nil, err
+		}
+		if retiredAt.Valid {
+			v := retiredAt.Time
+			sub.RetiredAt = &v
+		}
+		if maxW.Valid {
+			v := maxW.Float64
+			sub.Capacity.MaxWeightKg = &v
+		}
+		if maxV.Valid {
+			v := maxV.Float64
+			sub.Capacity.MaxVolumeM3 = &v
+		}
+		if maxC.Valid {
+			v := maxC.Int64
+			sub.Capacity.MaxCount = &v
+		}
+		if kind.Valid {
+			sub.Position.Kind = PositionKind(kind.String)
+		} // else: no position row at all -- leave Kind at its zero value "" (unassigned)
+		if positionUpdatedAt.Valid {
+			sub.Position.UpdatedAt = positionUpdatedAt.Time
+		} // else: zero time.Time -- honest, not a fabricated timestamp
+		if locLeafID.Valid {
+			sub.Position.LocLeafID = locLeafID.String
+		}
+		if containsRef.Valid {
+			sub.Position.ContainedBy = containsRef.String
+		}
+		out = append(out, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Detach removes obj capability entirely (obj-01-rest-api.md §1) —
 // bookkeeping cleanup, not the lifecycle retire operation (§6).
 // XOLU-OBJ007 if the subject is positioned anywhere other than

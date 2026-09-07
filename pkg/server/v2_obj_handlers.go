@@ -263,6 +263,31 @@ func (s *Server) handleObjAttach(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, subjectResponse(sub))
 }
 
+// handleObjList: XOT209 (wave 15) -- the enumeration this primitive
+// never had. Found missing by reading the full route table directly:
+// every other registered /obj route is a per-id lookup or a write.
+// Mirrors handleLocList's own shape (loc's list handler, the closest
+// existing precedent) and reuses subjectResponse per row rather than
+// inventing a second response shape for the same data Get already
+// returns one-at-a-time.
+func (s *Server) handleObjList(w http.ResponseWriter, r *http.Request) {
+	st, err := s.objStore(r)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, err.Error())
+		return
+	}
+	all, err := st.List(r.Context())
+	if err != nil {
+		s.writeObjError(w, err)
+		return
+	}
+	out := make([]objSubjectResponse, 0, len(all))
+	for i := range all {
+		out = append(out, subjectResponse(&all[i]))
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"subjects": out})
+}
+
 func (s *Server) handleObjGet(w http.ResponseWriter, r *http.Request) {
 	subjectRef, err := resolveObjSubjectRef(r)
 	if err != nil {
@@ -523,6 +548,7 @@ func (s *Server) handleObjContents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setupV2ObjRoutes(r chi.Router) {
 	r.Post("/obj/attach", s.handleObjAttach)
+	r.Get("/obj/list", s.handleObjList) // XOT209 (wave 15)
 	r.Get("/obj/{kind}/{key}", s.handleObjGet)
 	r.Delete("/obj/{kind}/{key}", s.handleObjDetach)
 	r.Put("/obj/{kind}/{key}/move", s.handleObjMove)
