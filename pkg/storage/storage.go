@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -133,12 +134,24 @@ type Store interface {
 // v1-only deployments that accidentally receive a v2 request body fail
 // cleanly rather than silently discarding the walk.
 type CommitRequest struct {
-	Update     CommitUpdate    `json:"update"`
+	Update CommitUpdate `json:"update"`
+	// Delete is the alternative to Update: the commit removes an entity instead
+	// of writing one. Exactly one of the two is set (XOT233).
+	Delete     *CommitDelete   `json:"delete,omitempty"`
 	Append     []CommitAppend  `json:"append"`
 	Timeseries []CommitTSEvent `json:"timeseries,omitempty"`
 	// FsmWalk is set when a state machine walk must be atomic with the
 	// entity write. Populated only when API v2 is enabled. Nil otherwise.
 	FsmWalk *CommitFsmWalk `json:"fsm_walk,omitempty"`
+	// Templates makes the strings $now, $commit_seq, $update.version,
+	// $update.data, $previous.data and $previous.version, used as a whole value
+	// in update.data and append[].data, stand for what the commit computes (see
+	// commit_templates.go). Without it nothing is interpreted (XOT234, XOT235).
+	Templates bool `json:"templates,omitempty"`
+	// Now is the commit instant ($now). The server sets it once per request so
+	// the rows and the timeseries event times share it; a direct caller of the
+	// store may leave it empty and the store takes the next instant.
+	Now string `json:"-"`
 }
 
 // CommitTSEvent is one timeseries event carried inside a CommitRequest.
@@ -150,6 +163,55 @@ type CommitTSEvent struct {
 	Time     time.Time `json:"time"`
 	Nums     []float64 `json:"nums,omitempty"`
 	Payload  []byte    `json:"payload,omitempty"`
+	// TimeNow is set when the request gave "$now" as the time: the server fills
+	// Time with the commit instant, so the event shares it with the rows (XOT235).
+	TimeNow bool `json:"-"`
+}
+
+// UnmarshalJSON accepts the string "$now" as the time besides a timestamp.
+func (e *CommitTSEvent) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Timeline int64           `json:"timeline"`
+		Dims     []uint64        `json:"dims"`
+		Time     json.RawMessage `json:"time"`
+		Nums     []float64       `json:"nums"`
+		Payload  []byte          `json:"payload"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*e = CommitTSEvent{Timeline: raw.Timeline, Dims: raw.Dims, Nums: raw.Nums, Payload: raw.Payload}
+	if string(raw.Time) == `"$now"` {
+		e.TimeNow = true
+		return nil
+	}
+	if len(raw.Time) > 0 {
+		if err := json.Unmarshal(raw.Time, &e.Time); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CommitDelete describes the entity to remove in a Commit operation. If
+// Version is non-nil the delete is conditional: it proceeds only if the entity
+// exists and its stored _version equals *Version, and an absent entity is a
+// conflict (the caller's version describes a row that is not there). With no
+// Version an absent entity is ErrNotFound. RestrictedBy is filled in by the
+// server, never by the client.
+type CommitDelete struct {
+	Entity       string   `json:"entity"`
+	ID           int      `json:"id"`
+	Version      *int     `json:"version,omitempty"`
+	RestrictedBy []string `json:"-"`
+}
+
+// CommitDeleteResult describes the outcome of the delete in a Commit. Version
+// is the _version the entity had when it was deleted.
+type CommitDeleteResult struct {
+	Entity  string `json:"entity"`
+	ID      int    `json:"id"`
+	Version int    `json:"version"`
 }
 
 // CommitUpdate describes the entity to upsert in a Commit operation.
@@ -170,6 +232,10 @@ type CommitAppend struct {
 	Entity string                 `json:"entity"`
 	ID     *int                   `json:"id,omitempty"`
 	Data   map[string]interface{} `json:"data"`
+	// OnConflict, "ignore", makes an append with an explicit ID skip the row,
+	// without an error, when a row with that ID already exists. A unique-index
+	// violation (XOT236) is still an error. The result reports it as skipped.
+	OnConflict string `json:"on_conflict,omitempty"`
 }
 
 // CommitFsmWalk describes an FSM walk to execute atomically with the commit.
@@ -181,13 +247,23 @@ type CommitFsmWalk struct {
 	Machine int                    `json:"machine"`
 	Input   string                 `json:"input"`
 	Payload map[string]interface{} `json:"payload,omitempty"`
+	// StrictRef makes the commit refuse the walk unless the machine's ref is
+	// "<entity>:<id>" of the entity the commit updates or deletes. Without it
+	// xolu does not check that the machine belongs to the entity, so a commit
+	// can move a machine bound to a different entity (XOT238). A machine with
+	// no ref fails the check.
+	StrictRef bool `json:"strict_ref,omitempty"`
 }
 
 // CommitResult is returned on a successful Commit.
 type CommitResult struct {
-	Update     CommitUpdateResult   `json:"update"`
+	Update CommitUpdateResult `json:"update"`
+	// Delete is set instead of a meaningful Update when the commit carried a delete.
+	Delete     *CommitDeleteResult  `json:"delete,omitempty"`
 	Appended   []CommitAppendResult `json:"appended"`
 	TSAccepted int                  `json:"ts_accepted,omitempty"`
+	// Clock is set when the commit used templates.
+	Clock *CommitClock `json:"clock,omitempty"`
 	// FsmWalk is populated when the commit included an fsm_walk field and
 	// API v2 is enabled. Nil otherwise.
 	FsmWalk *CommitFsmWalkResult `json:"fsm_walk,omitempty"`
@@ -220,6 +296,14 @@ type CommitUpdateResult struct {
 type CommitAppendResult struct {
 	Entity string `json:"entity"`
 	ID     int    `json:"id"`
+	// Skipped is true when on_conflict "ignore" found the row already there.
+	Skipped bool `json:"skipped,omitempty"`
+}
+
+// CommitClock reports the values a commit's templates used.
+type CommitClock struct {
+	Now       string `json:"now"`
+	CommitSeq int64  `json:"commit_seq,omitempty"`
 }
 
 // IDGenerator defines interface for ID generation strategies

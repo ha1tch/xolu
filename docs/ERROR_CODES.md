@@ -75,7 +75,8 @@ satellite product reserves its area prefix here before allocating codes.
 | `XOLU-ST006` | 500 | Storage backend failure |
 | `XOLU-ST007` | 413 | Entity document exceeds `XOLU_MAX_ENTITY_SIZE` |
 | `XOLU-ST008` | 404 | Schema not found for entity type |
-| `XOLU-ST009` | 500 | Schema load failed |
+| `XOLU-ST009` | 400 / 500 | Schema load failed (500); a malformed index keyword in a schema, `x-xolu-unique` or `x-xolu-indexes` (400) |
+| `XOLU-ST012` | 409 | A write would give two rows the same key of a unique index declared in the schema, or adding such an index was refused because existing rows violate it |
 
 ---
 
@@ -172,6 +173,9 @@ These codes are specific to `POST /api/v1/commit`.
 | `XOLU-CM014` | 413 | Timeseries batch exceeds maximum size |
 | `XOLU-CM015` | 500 | Timeseries write failed |
 | `XOLU-CM016` | 500 | Timeseries write failed after SQLite commit succeeded (partial write; see `docs/COMMIT_ENDPOINT.md`) |
+| `XOLU-CM017` | 400 | `/commit` carries both `update` and `delete`; send one |
+| `XOLU-CM018` | 400 | `/commit` `delete` refused while `XOLU_CASCADING_DELETE` is enabled (the cascade cannot be atomic with the commit) |
+| `XOLU-CM019` | 400 | `/commit` template unknown or unavailable where used, `$now` as a timeseries time without `templates`, or an invalid `on_conflict` |
 
 ---
 
@@ -205,6 +209,9 @@ These codes are specific to `POST /api/v1/commit`.
 | `XOLU-TS024` | 400 | Rollup definition would exceed `ts.rollup_max_depth` |
 | `XOLU-TS025` | 404 | Rollup definition not found |
 | `XOLU-TS026` | 400/409 | Destination timeline already targeted by another rollup (400 on define); definition has descendants and cascade delete is disabled (409 on delete) |
+| `XOLU-TS028` | 409 | `POST /ts/tl/def` for an existing timeline would change its name or retention; use `PATCH /ts/tl/{id}` |
+| `XOLU-TS029` | 404 | `DELETE /ts/events`: no event at that timeline, dims and time |
+| `XOLU-TS030` | 400 | A latest-events `cursor` that this timeline and dimension prefix did not issue, or that is not base64url |
 
 ---
 

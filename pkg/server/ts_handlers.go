@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -76,6 +77,9 @@ type tsEventResponse struct {
 type tsRangeResponse struct {
 	Count  uint64            `json:"count"`
 	Events []tsEventResponse `json:"events"`
+	// NextCursor is set by /events/latest when more events match than n. Pass it
+	// back as ?cursor= to continue (XOT240).
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 // Aggregate
@@ -149,7 +153,9 @@ func (s *Server) tsStore(w http.ResponseWriter, r *http.Request, tenantIDStr str
 		return nil
 	}
 	tid := getTenantIDNumeric(r.Context())
-	if tid == 0 {
+	// An unscoped route (no tenant_id in the URL) is the default store, tenant 0.
+	// A tenant route whose tenant resolved to 0 is still "not found".
+	if tid == 0 && tenantIDStr != "" {
 		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not found", tenantIDStr))
 		return nil
 	}
@@ -296,6 +302,7 @@ func classifyTSError(err error) string {
 		xoluerr.ErrTSInternal, xoluerr.ErrTSRetentionFailed, xoluerr.ErrTSProvisionFailed,
 		xoluerr.ErrTSDimsImmutable, xoluerr.ErrTSNaNValue, xoluerr.ErrTSReservedID,
 		xoluerr.ErrTSBucketLimit, xoluerr.ErrTSSystemScopeID,
+		xoluerr.ErrTSDefinitionConflict, xoluerr.ErrTSEventNotFound, xoluerr.ErrTSInvalidCursor,
 	} {
 		if strings.Contains(msg, string(code)) {
 			return string(code)
@@ -385,9 +392,14 @@ func (s *Server) HandleTSProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID := chi.URLParam(r, "tenant_id")
 	tid := getTenantIDNumeric(r.Context())
-	if tid == 0 {
+	if tid == 0 && tenantID != "" {
 		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not found", tenantID))
 		return
+	}
+	if tenantID == "" {
+		// The default store has no tenant name. "_default" cannot collide with a
+		// registered tenant, and it is the scope its dynamic config is kept under.
+		tenantID = "_default"
 	}
 	if err := s.tsManager.Provision(r.Context(), tid, tenantID); err != nil {
 		s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS015"), err.Error())
@@ -552,6 +564,66 @@ func (s *Server) HandleTSAppend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+// tsDeleteEventRequest names one event by its full key.
+type tsDeleteEventRequest struct {
+	Timeline int64    `json:"timeline"`
+	Dims     []uint64 `json:"dims"`
+	Time     string   `json:"time"`
+}
+
+// HandleTSDeleteEvent removes one event by its exact timeline, dimensions and
+// time. It exists so a client can repair a single stray or duplicate event
+// without a time-range purge, which cannot tell one event from its neighbours
+// (XOT240).
+//
+//	DELETE /api/v1/tenant/{tenant_id}/ts/events
+//	{"timeline": 7, "dims": [42, 3], "time": "2026-01-01T00:00:00.000000000Z"}
+//
+// 200 {"deleted": true}; 404 XOLU-TS029 when no event is at that key.
+func (s *Server) HandleTSDeleteEvent(w http.ResponseWriter, r *http.Request) {
+	store := s.tsStore(w, r, chi.URLParam(r, "tenant_id"))
+	if store == nil {
+		return
+	}
+	var req tsDeleteEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS013"), "invalid request body")
+		return
+	}
+	tlID, tlErr := timeseries.TimelineIDFromJSON(req.Timeline)
+	if tlErr != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSReservedID, tlErr.Error())
+		return
+	}
+	ts, err := parseTSTime(req.Time)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code("XOLU-TS005"), err.Error())
+		return
+	}
+	e := timeseries.Event{Timeline: tlID, Dims: req.Dims, Time: ts}
+	has, ok := store.(interface {
+		Has(context.Context, timeseries.Event) (bool, error)
+	})
+	if !ok {
+		s.writeError(w, http.StatusNotImplemented, xoluerr.ErrTSNotAvailable, "this timeseries backend cannot delete a single event")
+		return
+	}
+	exists, err := has.Has(r.Context(), e)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.Code(classifyTSError(err)), err.Error())
+		return
+	}
+	if !exists {
+		s.writeError(w, http.StatusNotFound, xoluerr.ErrTSEventNotFound, "no event at that timeline, dims and time")
+		return
+	}
+	if err := store.Delete(r.Context(), e); err != nil {
+		s.writeError(w, http.StatusInternalServerError, xoluerr.Code(classifyTSError(err)), err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": true})
 }
 
 // HandleTSBatchAppend appends a batch of events atomically.
@@ -847,6 +919,16 @@ func (s *Server) HandleTSLatest(w http.ResponseWriter, r *http.Request) {
 			lq.To = t
 		}
 	}
+	if cs := q.Get("cursor"); cs != "" {
+		raw, derr := base64.RawURLEncoding.DecodeString(cs)
+		if derr != nil || len(raw) == 0 {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrTSInvalidCursor, "cursor is not a cursor this server issued")
+			return
+		}
+		lq.Cursor = raw
+	}
+	var next []byte
+	lq.NextCursor = &next
 	events, err := store.Latest(ctx, lq)
 	if err != nil {
 		code := classifyTSError(err)
@@ -861,6 +943,9 @@ func (s *Server) HandleTSLatest(w http.ResponseWriter, r *http.Request) {
 	resp := tsRangeResponse{Count: uint64(len(events)), Events: make([]tsEventResponse, len(events))}
 	for i, e := range events {
 		resp.Events[i] = eventToResponse(e)
+	}
+	if len(next) > 0 {
+		resp.NextCursor = base64.RawURLEncoding.EncodeToString(next)
 	}
 	s.tsWriteJSON(w, http.StatusOK, resp, limits.maxRespBytes)
 }

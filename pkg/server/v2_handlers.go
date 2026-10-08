@@ -58,6 +58,13 @@ func (s *Server) setupV2Routes(r chi.Router) {
 		// Unscoped v2 routes (tenant 0), disabled in strict mode.
 		if !s.config.Tenancy().Has(config.TenantRequireRoute) {
 			s.setupV2TenantRoutes(v2)
+			// /ts for the default store (tenant 0): provision, define timelines,
+			// append and query without leaving the data that /api/v1/commit
+			// writes, so a commit's timeseries events can ride with an entity
+			// in the default store (XOT239).
+			if s.tsManager != nil {
+				v2.Route("/ts", s.mountTSRoutes)
+			}
 		}
 	})
 }

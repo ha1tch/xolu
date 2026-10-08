@@ -47,7 +47,7 @@ Wave 6   iolu operations             ░░░░░░░░░░░░░░�
 Wave 7   Events + system stores      ░░░░░░░░░░░░░░░░░░░░     0%  (0/2 items)
                                      debt: T-20
 Wave 8   OQL primitive queries       ░░░░░░░░░░░░░░░░░░░░     0%  (0/6 items)
-                                     debt: T-137
+                                     debt: T-137, XOT241, XOT242, XOT246
                                      blockers: T-70 blocks T-81; T-76 blocks T-77, T-78, T-79, T-80
 Wave 9   /loc                        ████████████████████   100%  (4/4 items)
 Wave 9b  /loc — bring to spec        ████████████████████   100%  (6/6 items)

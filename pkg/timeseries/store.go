@@ -5,6 +5,7 @@
 package timeseries
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -447,6 +448,32 @@ func (s *PebbleStore) Delete(ctx context.Context, e Event) error {
 	return nil
 }
 
+// Has reports whether an event exists at exactly (timeline, dims, time). It is
+// the existence check behind DELETE /ts/events, kept off the Store interface so
+// other backends are not forced to implement it (XOT240).
+func (s *PebbleStore) Has(ctx context.Context, e Event) (bool, error) {
+	cfg, ok := s.reg.get(e.Timeline)
+	if !ok {
+		return false, fmt.Errorf("ts: timeline %d not defined (XOLU-TS004)", e.Timeline)
+	}
+	if len(e.Dims) != int(cfg.Dims) {
+		return false, fmt.Errorf("ts: timeline %d expects %d dims, got %d (XOLU-TS007)", e.Timeline, cfg.Dims, len(e.Dims))
+	}
+	key, err := EncodeKey(e.Timeline, cfg.Dims, e.Dims, e.Time)
+	if err != nil {
+		return false, err
+	}
+	_, closer, err := s.db.Get(key)
+	if err == pebble.ErrNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("ts: pebble get: %w", err)
+	}
+	_ = closer.Close()
+	return true, nil
+}
+
 // DeleteKeys removes events by their pre-encoded Pebble keys. Keys must have
 // been produced by EncodeKey; passing arbitrary byte slices is undefined
 // behaviour. All deletes are issued in a single Pebble batch committed with
@@ -625,8 +652,16 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 
 	hasBounds := !q.From.IsZero() || !q.To.IsZero()
 
+	valid := iter.Last()
+	if len(q.Cursor) > 0 {
+		if bytes.Compare(q.Cursor, startKey) < 0 || bytes.Compare(q.Cursor, endKey) >= 0 {
+			return nil, fmt.Errorf("ts: invalid cursor for this timeline and dimension prefix (%s)", xoluerr.ErrTSInvalidCursor)
+		}
+		valid = iter.SeekLT(q.Cursor)
+	}
 	var results []Event
-	for iter.Last(); iter.Valid() && len(results) < n; iter.Prev() {
+	var lastKey []byte
+	for ; valid && len(results) < n; valid = iter.Prev() {
 		if err := ctx.Err(); err != nil {
 			return results, err
 		}
@@ -643,6 +678,25 @@ func (s *PebbleStore) Latest(ctx context.Context, q LatestQuery) ([]Event, error
 			}
 		}
 		results = append(results, e)
+		lastKey = append(lastKey[:0], iter.Key()...)
+	}
+	// Is there a further matching event? Then the page is full and the cursor
+	// names its last key.
+	if q.NextCursor != nil {
+		*q.NextCursor = nil
+		if len(results) == n {
+			for ; valid; valid = iter.Prev() {
+				e, err := s.decodeEntry(iter.Key(), iter.Value(), cfg.Dims)
+				if err != nil {
+					return nil, err
+				}
+				if (!q.From.IsZero() && e.Time.Before(q.From)) || (!q.To.IsZero() && e.Time.After(q.To)) {
+					continue
+				}
+				*q.NextCursor = append([]byte(nil), lastKey...)
+				break
+			}
+		}
 	}
 	if err := iter.Error(); err != nil {
 		return nil, fmt.Errorf("ts: iter: %w", err)

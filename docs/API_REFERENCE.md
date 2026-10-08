@@ -66,12 +66,24 @@ Readiness probe. Same check as `/health`; intended for Kubernetes readiness gate
 
 ### `GET /version`
 
-Returns the server version string.
+Returns the server version string and the list of capabilities this build has.
 
 **Response 200 OK:**
 ```json
-{"version": "0.9.9"}
+{"version": "0.9.9", "capabilities": ["commit.cas-missing-conflict", "commit.delete", "commit.templates", "oql.tenant-entities", "schema.unique-index"]}
 ```
+
+A capability names a behaviour a client may depend on and can test for
+without probing: `commit.templates` (`"templates": true` and `append` `on_conflict`, see COMMIT_ENDPOINT.md 5.3a), `commit.delete` (`/commit` takes a `delete` instead of an `update`, atomic with its appends; see COMMIT_ENDPOINT.md 5.1a), `commit.cas-missing-conflict` (a `/commit` whose
+`update.version` names an entity that does not exist answers 409, not a create),
+`commit.oversize-413` (an oversize `/commit` body answers 413),
+`oql.adapted-select` (a filtered row-returning SELECT on an adapted entity is
+correct at any table size and uses its indexes, `id` and `_version` included),
+`oql.tenant-entities` (OQL on tenant routes sees the tenant's own entity
+types), `schema.unique-index` (`x-xolu-unique` and `x-xolu-indexes` in a schema, enforced with `409 XOLU-ST012`; see ADAPTED_TABLES_DESIGN.md 10.3). Capabilities are named for behaviours, not versions, so a build that
+carries a fix advertises it before the fix has a release number. A build that
+predates this field returns no `capabilities` key, which clients should read as
+"none".
 
 ---
 
@@ -689,11 +701,33 @@ Retrieve a completed Sulpher job result.
 
 ## Timeseries
 
-Pebble-backed append-optimised event storage. Available only in
-`XOLU_TENANT_MODE=strict` with `XOLU_TIMESERIES_ENABLED=true`. All routes are
-tenant-scoped: `/api/v1/tenant/{tenant_id}/ts/...`.
+Pebble-backed append-optimised event storage. Available when
+`XOLU_TIMESERIES_ENABLED=true`, in any tenant mode (verified in the default `path`
+mode and in `strict`). The routes are tenant-scoped,
+`/api/v1/tenant/{tenant_id}/ts/...`, and, for the default store, unscoped at
+`/api/v2/ts/...` (see below). The earlier statement that /ts needed strict tenancy
+described the first implementation; the implementation is the better side of that
+disagreement, and the document is corrected, not the code.
 
 See [TIMESERIES_DESIGN_V3.md](TIMESERIES_DESIGN_V3.md) for the storage design.
+
+### The default store: `/api/v2/ts/...`
+
+Every `/ts` route below is also served for the default store (tenant 0, the data
+on the ordinary `/api/v1/{entity}` routes) at `/api/v2/ts/...`, with the same
+request and response shapes and no `tenant/{tenant_id}` segment. It follows the
+v2 convention that a primitive is available on the tenant routes and on the
+unscoped ones: it needs `XOLU_API_V2_ENABLED=true`, and it is absent in strict
+tenancy, which disables every unscoped route. The default store's timeseries is a
+store of its own: a timeline defined there is not visible to any tenant, and the
+other way round. `POST /api/v2/ts/provision` provisions it (`201`, with
+`tenant_id` `"_default"`); until then every route answers `404 XOLU-TS003`, as for
+an unprovisioned tenant.
+
+What it is for: `POST /api/v1/commit` writes its `timeseries` events to the store
+of the route it is called on, so a client that keeps its entities on the ordinary
+routes can write an entity and its `/ts` events in one commit, without moving to
+tenant routes (where OQL did not work before XOT229).
 
 ### `POST /api/v1/tenant/{tenant_id}/ts/provision`
 
@@ -715,7 +749,16 @@ Define a new timeline. `dims` is immutable after the first write.
 {"id": 1, "name": "temperature", "dims": 2, "retention_days": 90}
 ```
 
-`retention_days`: 0 = inherit store default; negative = no expiry.
+`retention_days`: 0 = inherit store default; negative = no expiry (`-1` is the
+canonical spelling, and every negative value means the same). A timeline at `0`
+follows the store-level default, so changing that default can start expiring it;
+one at `-1` cannot be touched by retention.
+
+Defining a timeline that already exists is idempotent when the definition
+matches. One that would change the `name` (when given) or the `retention_days`
+is `409 XOLU-TS028` and changes nothing: it used to overwrite both silently, so a
+caller that only meant "make sure this timeline exists" could change how long its
+events live. Change them with `PATCH /ts/tl/{timeline_id}`.
 
 **Response 201 Created:**
 ```json
@@ -840,10 +883,36 @@ with GET, or for queries with many dimension values.
 
 ### `GET /api/v1/tenant/{tenant_id}/ts/events/latest`
 
-Latest N events for a dimension prefix, in reverse-chronological order.
+Latest N events for a dimension prefix. Events are returned last key first,
+and a key is the dimensions followed by the time, so within one full set of
+dimensions the order is reverse-chronological, but across several values of a
+later dimension it is by dimension first.
 
 **Query parameters:** `timeline`, `dims` (required); `n` (default 10, capped
-by `XOLU_TS_MAX_QUERY_EVENTS`).
+by `XOLU_TS_MAX_QUERY_EVENTS`); `from`, `to` (optional time bounds);
+`cursor` (optional, see below).
+
+**Paging.** When more events match than `n`, the response carries
+`"next_cursor": "<opaque>"`. Pass it back as `?cursor=` with the same
+`timeline`, `dims` and bounds to get the next page. A page with no
+`next_cursor` is the last one. Pages together are exactly what one call with a
+large enough `n` would return, each event once. A cursor that this timeline and
+dimension prefix did not issue, or that is not base64url, is `400 XOLU-TS030`.
+Without a cursor an entity with more than `XOLU_TS_MAX_QUERY_EVENTS` events
+could not be read completely.
+
+---
+
+### `DELETE /api/v1/tenant/{tenant_id}/ts/events`
+
+Remove one event by its exact `timeline`, `dims` (all of them) and `time`.
+
+**Request:** `{"timeline": 7, "dims": [42, 3], "time": "2026-01-01T00:00:00.000000000Z"}`
+
+**Response 200 OK:** `{"deleted": true}`. **404 `XOLU-TS029`** when no event
+is at that key; **400 `XOLU-TS007`** for the wrong number of dims. A time-range
+purge (`POST /tl/{id}/data/purge`) cannot tell one event from its neighbours, so
+until this route a stray or duplicate event could not be removed on its own.
 
 ---
 

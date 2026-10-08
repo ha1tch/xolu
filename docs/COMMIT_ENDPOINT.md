@@ -137,17 +137,53 @@ the other.
 
 ## 5. Field Reference
 
-### 5.1 `update` object (required)
+### 5.1 `update` object (required unless `delete` is given)
 
 | Field     | Type    | Required | Description |
 |-----------|---------|----------|-------------|
 | `entity`  | string  | yes      | Entity type. Any type valid for `save/{id}`. |
 | `id`      | integer | yes      | Entity ID. Must be a positive integer. |
 | `data`    | object  | yes      | Full document to write. Replaces the existing document if the entity exists. |
-| `version` | integer | no       | CAS check. Write proceeds only if stored `_version` equals this value. Omitting `version` is an unconditional upsert. |
+| `version` | integer | no       | CAS check. Write proceeds only if the entity exists and its stored `_version` equals this value. If the entity does not exist (never created, or deleted) the commit conflicts with `409 XOLU-CM001` and creates nothing. Omitting `version` is an unconditional upsert. |
 
 `id` is a positive integer, not a string. xolu's entity ID space is `int64`;
 14-digit numeric strings fit without loss.
+
+### 5.1a `delete` object (instead of `update`)
+
+A commit removes an entity instead of writing one when it carries `delete` and
+no `update`. Exactly one of the two is allowed; both is `400 XOLU-CM017`.
+
+```json
+{
+  "delete": { "entity": "order", "id": 42, "version": 7 },
+  "append": [ { "entity": "order_version", "id": 42000008, "data": { "change_kind": "delete" } } ]
+}
+```
+
+| Field     | Type    | Required | Description |
+|-----------|---------|----------|-------------|
+| `entity`  | string  | yes      | Entity type. |
+| `id`      | integer | yes      | Entity ID. Must be a positive integer. |
+| `version` | integer | no       | CAS check. The delete proceeds only if the entity exists and its stored `_version` equals this value. If the entity does not exist the commit conflicts (`409 XOLU-CM001`, `current_version: -1`), as for an update. Omitting `version` is an unconditional delete. |
+
+The delete runs in the same SQLite transaction as `append` and `fsm_walk`, and
+the `timeseries` events are written first and tombstoned on failure, exactly as
+for an update. It removes what a plain `DELETE` removes (the row, graph edges,
+full-text rows, entity metadata) and applies the same `restrict` policies inside
+the transaction; a refused restrict is `409 XOLU-RI001` and nothing is written.
+An unconditional delete of an entity that does not exist is `404`, and nothing
+is written.
+
+A delete in `/commit` does not cascade. While `XOLU_CASCADING_DELETE` is enabled
+it is refused with `400 XOLU-CM018`: the cascade deletes other entities in
+transactions of its own, so it cannot be atomic with this commit, and ignoring
+it would leave referrers behind. Use `DELETE` for a cascading delete.
+
+The response carries `delete` (`entity`, `id`, and the `version` the entity had
+when it was deleted) in place of `update`, with `appended`, `ts_accepted` and
+`fsm_walk` as for an update. Servers that support it advertise the capability
+`commit.delete` at `GET /version`.
 
 ### 5.2 `append` array (optional)
 
@@ -175,6 +211,68 @@ The timeline must be pre-defined for the tenant via `POST /ts/tl/def`.
 Maximum `XOLU_TS_MAX_BATCH_SIZE` entries (default 5000). Requests exceeding
 this are rejected with XOLU-CM014.
 
+### 5.3a Templates and `on_conflict`
+
+A request that sets `"templates": true` may use these strings, each as a whole
+value, anywhere inside `update.data` and `append[].data`, and `"$now"` as a
+`timeseries[].time`:
+
+| Template | Stands for |
+|----------|------------|
+| `$now` | The commit's instant: UTC, fixed-width nanoseconds (`2026-10-04T19:02:10.424134479Z`, so it sorts as text). Taken once per request, before either store is written, so every row and every timeseries event time of the request carries the same value |
+| `$commit_seq` | A per-tenant counter. Durable, allocated inside the commit's transaction, so it has no gaps and a rolled-back commit does not consume one. Costs one extra row write, and only for commits that use it |
+| `$update.version` | The `_version` the update leaves the entity at |
+| `$update.data` | The document the update wrote, without `id` and `_version` |
+| `$previous.data` | The document the commit replaced or deleted, read inside the transaction, or `null` if the entity did not exist |
+| `$previous.version` | The `_version` it had, or `0` |
+
+`$update.*` is not available in a `delete` commit, and `$update.*` cannot appear
+inside `update.data` itself; the commit is refused (`400 XOLU-CM019`) and nothing
+is written. `$now` is monotonic: strictly increasing across requests in one xolu
+process, so for any two commits where one completes before the other starts the
+later has the later instant. Concurrent commits may take either order, and across
+a restart it relies on the wall clock not having stepped back by more than the
+restart took. An object or array template value (`$update.data`,
+`$previous.data`) is copied into each place it is used.
+
+Only the exact forms above are templates. A string that starts with `$$` loses one
+`$` (`"$$now"` stores `"$now"`). A string that looks like a template (a `$`,
+lowercase letters and underscores, optionally one `.name`) and is not one is
+`400 XOLU-CM019`, to catch a typo; any other string, such as `"$100"`, is data.
+Without `"templates": true` nothing is interpreted, so existing requests are
+unchanged. Under `XOLU_STRICT_COMMIT` the schema check sees a value of the right
+type in place of each template (an object for `$update.data`, an integer for the
+version, a string for `$now`), so a schema that says "snapshot is an object"
+accepts the request and a real violation is still refused.
+
+An `append` entry with an explicit `id` may set `"on_conflict": "ignore"`: if a row
+with that id already exists the entry is skipped without an error and reported as
+`"skipped": true`. It does not hide a unique-index violation (`XOLU-ST012`), only
+an existing id. `ignore` needs an explicit `id`; any other value is
+`400 XOLU-CM019`.
+
+Together these let a client write an entity and a history row of it in one
+request that sends the document once, without reading the entity or its history
+first:
+
+```json
+{
+  "templates": true,
+  "update": {"entity": "order", "id": 42, "version": 7, "data": {"state": "paid"}},
+  "append": [
+    {"entity": "order_version", "id": 42000007, "on_conflict": "ignore",
+     "data": {"entity_id": 42, "version": "$previous.version", "snapshot": "$previous.data", "saved_at": "$now"}},
+    {"entity": "order_version", "id": 42000008,
+     "data": {"entity_id": 42, "version": "$update.version", "snapshot": "$update.data", "saved_at": "$now"}}
+  ],
+  "timeseries": [{"timeline": 7, "dims": [42, 8], "time": "$now", "nums": [0]}]
+}
+```
+
+The response carries `"clock": {"now": "...", "commit_seq": N}` (`commit_seq`
+only if used) when `templates` was set. Servers that support all of this
+advertise the capability `commit.templates`.
+
 ### 5.4 Empty-array rule
 
 At least one of `append`, `timeseries`, or `fsm_walk` must carry work. A
@@ -186,6 +284,17 @@ directly.
 When v2 is disabled, a non-nil `fsm_walk` is rejected with XOLU-CM009 rather
 than silently ignored, so that callers receive a clear error rather than
 appearing to succeed while the walk is discarded.
+
+`fsm_walk` takes an optional `strict_ref: true`. xolu does not otherwise check
+that the machine belongs to the entity the commit writes: a commit that updates
+entity A can walk a machine bound to entity B, and succeeds. With `strict_ref`
+the walk is refused unless the machine's `ref` is exactly `<entity>:<id>` of the
+entity the commit updates (or deletes, for a `delete` commit). A machine bound to
+another entity, and a machine with no `ref` at all, answer `409 XOLU-FSM014`; the
+commit rolls back, document write included. A machine that does not exist is
+reported by the walk as before (`XOLU-FSM002`). The check is opt-in because
+existing callers may legitimately walk a machine bound to a different entity (an
+aggregate's machine, say); a caller that wants the guarantee asks for it.
 
 ---
 
@@ -312,6 +421,19 @@ surface through other monitoring channels first.
 
 No partial writes occur on a `409`. Re-read the entity, recompute the
 transition, and retry with the new version.
+
+When `update.version` is given and the entity does not exist, the commit
+conflicts too (the caller's version describes a row that is not there), and
+`current_version` is `-1`. Re-reading will answer 404: the entity was deleted
+or never existed, and a commit without `version` is the way to create it.
+Before XOT230 such a commit silently created the entity.
+
+### 7.3 Request body too large — `413 Request Entity Too Large`
+
+A body larger than `XOLU_MAX_ENTITY_SIZE` (default 1 MiB) is refused with
+`413 XOLU-ST007`. The limit applies to the whole request, so a commit that
+carries an entity plus appended rows counts all of them. Before XOT231 this
+answered `400 XOLU-VL002`, the code for malformed JSON.
 
 ---
 
@@ -447,6 +569,10 @@ regardless of this setting.
 | XOLU-CM007 | 409  | An `append` entry specifies an explicit `id` that already exists. |
 | XOLU-CM008 | 500  | SQLite transaction failed. All changes rolled back. |
 | XOLU-CM009 | 501  | `/commit` not available on current backend. |
+| XOLU-CM017 | 400  | Both `update` and `delete` given. |
+| XOLU-CM018 | 400  | `delete` refused because `XOLU_CASCADING_DELETE` is enabled. |
+| XOLU-CM019 | 400  | A template in a request with `templates: true` is unknown or not available where it is used, `$now` is used as a timeseries time without `templates`, or `on_conflict` is not `ignore` or has no explicit `id`. Nothing was written. |
+| XOLU-ST012 | 409  | An update or an `append` entry would give two rows the same key of a unique index declared in the schema (`x-xolu-unique`, `x-xolu-indexes`). The commit rolled back. |
 
 ### Timeseries path
 

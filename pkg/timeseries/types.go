@@ -13,6 +13,13 @@ import (
 	"github.com/ha1tch/xolu/pkg/tenant"
 )
 
+// RetentionForever is the explicit "never expire" value of
+// TimelineConfig.RetentionDays. A timeline with 0 follows the store-level
+// default, so a later change of that default can start expiring it; one with
+// RetentionForever (or any negative value, which has always meant the same)
+// cannot be touched by retention at all (XOT240).
+const RetentionForever = -1
+
 // ErrDeleteNotSupported is returned by Store implementations that do not
 // support event deletion. Callers must not assume the targeted event was
 // removed when this error is received.
@@ -67,7 +74,7 @@ const (
 type TimelineConfig struct {
 	Name          string // optional, human-readable label
 	Dims          uint8  // 1–5, immutable after FirstWriteAt is set
-	RetentionDays int    // 0 = use store-level default
+	RetentionDays int    // 0 = use store-level default; any negative = never expire, RetentionForever (-1) being the canonical spelling
 	CreatedAt     time.Time
 	FirstWriteAt  time.Time // zero until first event written; Dims locks here
 }
@@ -109,6 +116,16 @@ type LatestQuery struct {
 	N        int       // default 10, max 10000
 	From     time.Time // optional lower bound (zero = unbounded)
 	To       time.Time // optional upper bound (zero = unbounded)
+
+	// Cursor, when set, continues a previous query: the result starts at the
+	// event just before the key it names. It is the NextCursor a previous call
+	// returned, unchanged. A cursor from another timeline or dimension prefix
+	// is an error (XOLU-TS030).
+	Cursor []byte
+	// NextCursor, when non-nil, receives the cursor for the next page, or nil
+	// when there are no more events than N. Events come back in key order
+	// (dimensions, then time), last first, not in time order (XOT240).
+	NextCursor *[]byte
 }
 
 // AggregateQuery computes an aggregate over a numeric field for all events

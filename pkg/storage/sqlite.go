@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -1929,12 +1930,23 @@ func (s *SQLiteStore) DeleteWithRestrict(ctx context.Context, entity string, id 
 }
 
 func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int, restrictedBy []string) error {
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := s.deleteInTx(ctx, tx, entity, id, restrictedBy); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteInTx removes an entity and everything that hangs off it (graph edges,
+// FTS rows, entity metadata) inside a caller-owned transaction. deleteInner
+// wraps it in its own transaction; a Commit runs it inside the commit's (XOT233).
+func (s *SQLiteStore) deleteInTx(ctx context.Context, tx *sql.Tx, entity string, id int, restrictedBy []string) error {
+	var err error
 
 	// In-transaction restrict check (G-12). Runs before the row delete so a
 	// refused delete does no work; under the same tx so no concurrent
@@ -2003,7 +2015,7 @@ func (s *SQLiteStore) deleteInner(ctx context.Context, entity string, id int, re
 		`DELETE FROM entity_meta WHERE tenant_id=? AND subject_kind=? AND subject_key=?`,
 		s.config.TenantID, sub.Kind, sub.Key)
 
-	return tx.Commit()
+	return nil
 }
 
 // Save creates an entity with a specific ID (fails if exists)
@@ -2308,19 +2320,110 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := s.checkDxpEntityHold(s.config.TenantID, req.Update.Entity, req.Update.ID); err != nil {
-		return CommitResult{}, err
+	var updateResult CommitUpdateResult
+	var deleteResult *CommitDeleteResult
+
+	// Templates (XOT234, XOT235). Everything below works on copies, so a retry of
+	// this attempt (SQLITE_BUSY) starts from the request as it was sent.
+	updateData := req.Update.Data
+	var tv TemplateValues
+	var clock *CommitClock
+	if req.Templates {
+		used := map[string]bool{}
+		for _, part := range append([]interface{}{req.Update.Data}, appendDataParts(req.Append)...) {
+			u, terr := TemplateTokensIn(part)
+			if terr != nil {
+				return CommitResult{}, terr
+			}
+			for k := range u {
+				used[k] = true
+			}
+		}
+		now := req.Now
+		if now == "" {
+			now = NextCommitInstant()
+		}
+		tv.Now, tv.HasNow = now, true
+		clock = &CommitClock{Now: now}
+		if used["$commit_seq"] {
+			seq, serr := s.nextCommitSeq(ctx, tx)
+			if serr != nil {
+				return CommitResult{}, serr
+			}
+			tv.CommitSeq, tv.HasCommitSeq = seq, true
+			clock.CommitSeq = seq
+		}
+		if used["$previous.data"] || used["$previous.version"] {
+			target, tid := req.Update.Entity, req.Update.ID
+			if req.Delete != nil {
+				target, tid = req.Delete.Entity, req.Delete.ID
+			}
+			prev, ver, _, perr := s.previousForTemplates(ctx, tx, target, tid)
+			if perr != nil {
+				return CommitResult{}, perr
+			}
+			tv.PreviousData, tv.PreviousVersion, tv.HasPrevious = prev, ver, true
+		}
+		if req.Delete == nil {
+			r, terr := ResolveTemplates(req.Update.Data, tv, true)
+			if terr != nil {
+				return CommitResult{}, terr
+			}
+			updateData, _ = r.(map[string]interface{})
+		}
 	}
 
-	updateResult, err := s.saveInTx(ctx, tx, req.Update)
-	if err != nil {
-		return CommitResult{}, err
+	if req.Delete != nil {
+		if err := s.checkDxpEntityHold(s.config.TenantID, req.Delete.Entity, req.Delete.ID); err != nil {
+			return CommitResult{}, err
+		}
+		dr, err := s.deleteForCommit(ctx, tx, *req.Delete)
+		if err != nil {
+			return CommitResult{}, err
+		}
+		deleteResult = &dr
+	} else {
+		if err := s.checkDxpEntityHold(s.config.TenantID, req.Update.Entity, req.Update.ID); err != nil {
+			return CommitResult{}, err
+		}
+		u := req.Update
+		u.Data = updateData
+		ur, err := s.saveInTx(ctx, tx, u)
+		if err != nil {
+			return CommitResult{}, err
+		}
+		updateResult = ur
+		if req.Templates {
+			written := make(map[string]interface{}, len(updateData))
+			for k, v := range updateData {
+				if k != "id" && k != "_version" {
+					written[k] = v
+				}
+			}
+			tv.UpdateVersion, tv.HasUpdateVersion = ur.Version, true
+			tv.UpdateData, tv.HasUpdateData = written, true
+		}
 	}
 
 	appended := make([]CommitAppendResult, 0, len(req.Append))
 	for _, a := range req.Append {
+		if a.OnConflict != "" && (a.OnConflict != "ignore" || a.ID == nil) {
+			return CommitResult{}, &TemplateError{Message: fmt.Sprintf(
+				"append on_conflict %q is not valid: the only value is \"ignore\", and it needs an explicit id", a.OnConflict)}
+		}
+		if req.Templates {
+			r, terr := ResolveTemplates(a.Data, tv, true)
+			if terr != nil {
+				return CommitResult{}, terr
+			}
+			a.Data, _ = r.(map[string]interface{})
+		}
 		id, err := s.createInTx(ctx, tx, a)
 		if err != nil {
+			if a.OnConflict == "ignore" && errors.Is(err, ErrAlreadyExists) {
+				appended = append(appended, CommitAppendResult{Entity: a.Entity, ID: *a.ID, Skipped: true})
+				continue
+			}
 			return CommitResult{}, err
 		}
 		appended = append(appended, CommitAppendResult{Entity: a.Entity, ID: id})
@@ -2333,6 +2436,28 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 	// XOLU-FSM008.
 	var fsmResult *CommitFsmWalkResult
 	if req.FsmWalk != nil {
+		if req.FsmWalk.StrictRef {
+			target := fmt.Sprintf("%s:%d", req.Update.Entity, req.Update.ID)
+			if req.Delete != nil {
+				target = fmt.Sprintf("%s:%d", req.Delete.Entity, req.Delete.ID)
+			}
+			var ref sql.NullString
+			err := tx.QueryRowContext(ctx,
+				`SELECT ref FROM fsm_machines WHERE tenant_id = ? AND id = ?`,
+				s.config.TenantID, req.FsmWalk.Machine).Scan(&ref)
+			// A missing machine falls through to the walk, which reports it as it always did.
+			if err == nil && (!ref.Valid || ref.String != target) {
+				bound := "has no ref"
+				if ref.Valid {
+					bound = fmt.Sprintf("is bound to %q", ref.String)
+				}
+				return CommitResult{}, &FsmWalkError{Code: "XOLU-FSM014",
+					Message: fmt.Sprintf("machine %d %s, not %q; strict_ref refused the walk", req.FsmWalk.Machine, bound, target)}
+			}
+			if err != nil && err != sql.ErrNoRows {
+				return CommitResult{}, fmt.Errorf("commit: read machine ref: %w", err)
+			}
+		}
 		wr, werr := s.FsmWalkInTx(ctx, tx, s.config.TenantID,
 			int64(req.FsmWalk.Machine), req.FsmWalk.Input, req.FsmWalk.Payload, nil)
 		if werr != nil {
@@ -2353,7 +2478,42 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 		return CommitResult{}, fmt.Errorf("commit transaction failed: %w", err)
 	}
 
-	return CommitResult{Update: updateResult, Appended: appended, FsmWalk: fsmResult}, nil
+	return CommitResult{Update: updateResult, Delete: deleteResult, Appended: appended, FsmWalk: fsmResult, Clock: clock}, nil
+}
+
+// deleteForCommit performs the delete half of a Commit inside an existing
+// transaction (XOT233). It reads the entity's stored _version, applies the
+// compare-and-set, then runs the same removal a plain Delete does, including the
+// in-transaction restrict check. Absent entity: ErrConflict when the caller gave
+// a version (the version describes a row that is not there, as for an update,
+// XOT230), ErrNotFound when it did not.
+func (s *SQLiteStore) deleteForCommit(ctx context.Context, tx *sql.Tx, d CommitDelete) (CommitDeleteResult, error) {
+	var current int
+	var err error
+	if spec := s.adapted.Get(d.Entity); spec != nil {
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT _version FROM %s WHERE id = ?", spec.TableName()), d.ID).Scan(&current)
+	} else {
+		err = tx.QueryRowContext(ctx,
+			`SELECT _version FROM `+s.nodesTable()+` WHERE entity_type = ? AND id = ?`,
+			d.Entity, d.ID).Scan(&current)
+	}
+	if err == sql.ErrNoRows {
+		if d.Version != nil {
+			return CommitDeleteResult{}, ErrConflict
+		}
+		return CommitDeleteResult{}, ErrNotFound
+	}
+	if err != nil {
+		return CommitDeleteResult{}, fmt.Errorf("deleteForCommit: read version: %w", err)
+	}
+	if d.Version != nil && *d.Version != current {
+		return CommitDeleteResult{}, ErrConflict
+	}
+	if err := s.deleteInTx(ctx, tx, d.Entity, d.ID, d.RestrictedBy); err != nil {
+		return CommitDeleteResult{}, err
+	}
+	return CommitDeleteResult{Entity: d.Entity, ID: d.ID, Version: current}, nil
 }
 
 // saveInTx performs the upsert half of a Commit inside an existing transaction.
@@ -2430,6 +2590,14 @@ func (s *SQLiteStore) saveInTx(ctx context.Context, tx *sql.Tx, u CommitUpdate) 
 		}
 		created = false
 	} else {
+		// A compare-and-set against an entity that does not exist cannot
+		// succeed: the caller's version describes a row that is not there.
+		// Creating it here would turn a stale write (for example one that lost a
+		// race with a delete) into a silent resurrection (XOT230).
+		if u.Version != nil {
+			return CommitUpdateResult{}, ErrConflict
+		}
+
 		// Create path — update sequence, then insert.
 		var seqErr error
 

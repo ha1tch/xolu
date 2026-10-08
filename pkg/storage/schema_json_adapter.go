@@ -20,6 +20,7 @@ type jsonSchemaAdapter struct {
 	properties map[string]interface{}
 	required   map[string]bool
 	allowExtra bool
+	indexes    interface{} // the root-level x-xolu-indexes value, parsed on demand
 }
 
 // NewJSONSchemaIntrospector wraps a parsed JSON Schema document.
@@ -50,7 +51,13 @@ func NewJSONSchemaIntrospector(schema map[string]interface{}) SchemaIntrospector
 		properties: props,
 		required:   reqSet,
 		allowExtra: allowExtra,
+		indexes:    schema["x-xolu-indexes"],
 	}
+}
+
+// DeclaredIndexes implements IndexDeclarer.
+func (a *jsonSchemaAdapter) DeclaredIndexes() ([]DeclaredIndex, error) {
+	return parseDeclaredIndexes(a.indexes)
 }
 
 func (a *jsonSchemaAdapter) FieldNames() []string {

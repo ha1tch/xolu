@@ -722,20 +722,48 @@ When present, `x-xolu-index` overrides the automatic heuristics.
 
 ### 10.3 Composite Indexes
 
-Composite indexes (multi-column) are not generated automatically. They can
-be declared with a table-level `x-xolu-indexes` extension:
+Composite indexes (multi-column) are not generated automatically. They are
+declared with a table-level `x-xolu-indexes` extension, and a unique index
+(XOT236) is declared the same way or, for one column, on the property:
 
 ```json
 {
+  "properties": {
+    "sku":       {"type": "string", "x-xolu-unique": true},
+    "entity_id": {"type": "integer"},
+    "version":   {"type": "integer"},
+    "status":    {"type": "string"},
+    "saved_at":  {"type": "string"}
+  },
   "x-xolu-indexes": [
-    {"columns": ["tenant_id", "status", "created_at"]}
+    {"columns": ["entity_id", "version"], "unique": true},
+    {"columns": ["status", "saved_at"]}
   ]
 }
 ```
 
+| Keyword | Where | Meaning |
+|---|---|---|
+| `x-xolu-unique: true` | property | A unique index on that column |
+| `x-xolu-indexes[].columns` | schema root | The properties of the index, in order. Each must be a declared property, not `id` (the primary key) and not a REF field (index a REF with `x-xolu-index` on the property) |
+| `x-xolu-indexes[].unique` | schema root | `true` makes it a unique index. Default `false` |
+
+A unique index makes xolu itself refuse a second row with the same key: the
+write answers `409 XOLU-ST012` and, inside a `/commit`, the whole commit rolls
+back. A duplicate primary key on an adapted table answers like a blob entity
+does (`ErrAlreadyExists`, `409 XOLU-CM007` in a commit). When a unique index and
+a plain one name the same columns, the unique one is kept.
+
+A malformed keyword (not an array, an unknown or repeated column, an unknown key)
+is `400 XOLU-ST009` at `POST /schema/{entity}`, before anything is persisted.
+Re-posting a schema that adds an index creates it on the existing table, and for
+a unique index fails with `409 XOLU-ST012` if existing rows already violate it;
+the table is not changed. The schema document itself is saved before the table is
+migrated, so after that 409 fix the rows and POST the same schema again.
+
 This is a power-user feature. The automatic single-column indexes cover
 most cases; composite indexes are for specific query patterns that profiling
-identifies.
+identifies, and unique ones are for keys the data model needs enforced.
 
 
 ## 11. Configuration

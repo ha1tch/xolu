@@ -68,6 +68,11 @@ func translateScalarExpr(
 	case *ast.Identifier:
 		// Plain field reference — map to native column
 		colName, _, _, ok := store.AdaptedColumnInfo(entity, e.Value)
+		if !ok && isAdaptedSystemColumn(e.Value) {
+			// id and _version are real columns of every adapted table, though
+			// the schema does not declare them (XOT228 follow-up).
+			return e.Value, nil
+		}
 		if !ok {
 			// Could be an aggregate alias or a literal like TRUE/FALSE
 			upper := strings.ToUpper(e.Value)
@@ -202,6 +207,15 @@ func isFullyTranslatable(
 	return true
 }
 
+// isAdaptedSystemColumn reports whether name is a column that every adapted
+// table has but no schema declares: the entity id and its version. A query that
+// selects or filters on one of them used to count as untranslatable, so it never
+// reached the table's indexes (XOT228 follow-up). tenant_id is not listed: the
+// SQLite table name encodes the tenant and has no such column.
+func isAdaptedSystemColumn(name string) bool {
+	return name == "id" || name == "_version"
+}
+
 // dummyAddArg is a no-op placeholder generator used only during
 // translatability checks (we don't need actual placeholders).
 func dummyAddArg(_ interface{}) string { return "?" }
@@ -253,7 +267,7 @@ func isAdaptedField(expr ast.Expression, entity string, store storage.AggregateQ
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		_, _, _, ok := store.AdaptedColumnInfo(entity, e.Value)
-		return ok
+		return ok || isAdaptedSystemColumn(e.Value)
 	case *ast.QualifiedIdentifier:
 		_, _, _, ok := store.AdaptedColumnInfo(entity, e.String())
 		return ok

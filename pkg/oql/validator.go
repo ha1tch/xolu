@@ -25,6 +25,7 @@ type Validator struct {
 	schemaDir     string
 	entities      map[string]bool // Cached entity names
 	entityChecker EntityChecker   // Optional store-based checker
+	extra         EntityChecker   // Consulted last: the store a query runs on (see forStore)
 }
 
 // NewValidator creates a new validator that checks the filesystem
@@ -99,6 +100,27 @@ func (v *Validator) RefreshEntities() {
 	v.loadEntitiesFromDisk()
 }
 
+// forStore returns a validator that, besides everything this one already
+// accepts (its own store's entity types and the schemas on disk), also accepts
+// the entity types of the given store. A store that cannot list its entities,
+// or is the store this validator already uses, gets this validator back
+// unchanged. The returned value is a copy, so nothing is shared or locked.
+//
+// XOT229: names used to be checked only against the engine's default store, so
+// every tenant query for a type that exists only in that tenant's store failed
+// with "entity does not exist". The default store and the disk are still
+// consulted first, so a query that validated before still validates; only the
+// tenant's own store is new, and it is read only on a miss.
+func (v *Validator) forStore(store interface{}) *Validator {
+	checker, ok := store.(EntityChecker)
+	if !ok || checker == v.entityChecker {
+		return v
+	}
+	nv := *v
+	nv.extra = checker
+	return &nv
+}
+
 // EntityExists checks if an entity exists.
 // If the entity is not in the cache, it automatically refreshes
 // before returning false. This ensures newly created entity types are
@@ -115,7 +137,22 @@ func (v *Validator) EntityExists(name string) bool {
 	// Entity not in cache - refresh and retry
 	// This handles dynamically created entity types
 	v.RefreshEntities()
-	return v.entities[name]
+	if v.entities[name] {
+		return true
+	}
+	// Last resort: the store the query runs on (XOT229).
+	if v.extra != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if names, err := v.extra.ListEntities(ctx); err == nil {
+			for _, n := range names {
+				if n == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Validate validates an AST statement

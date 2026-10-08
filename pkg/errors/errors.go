@@ -69,6 +69,12 @@ const (
 	// .../entities/promote/status/{ticket} names a ticket that was never
 	// issued.
 	ErrPromoteTicketNotFound Code = "XOLU-ST011"
+
+	// ErrUniqueViolation is returned (409) when a write would give two rows of
+	// an entity the same key of a unique index declared in its schema
+	// (x-xolu-unique, or a unique entry of x-xolu-indexes), and when adding such
+	// an index to a schema is refused because existing rows already violate it.
+	ErrUniqueViolation Code = "XOLU-ST012"
 )
 
 // ---------------------------------------------------------------------------
@@ -215,6 +221,21 @@ const (
 	// call also failed. Entity state is unchanged; the timeseries store may
 	// contain an orphaned entry. Manual remediation is required.
 	ErrCMTSRollbackFailed Code = "XOLU-CM016"
+
+	// ErrCMUpdateDeleteBoth is returned when a /commit request carries both an
+	// update and a delete. A commit has exactly one primary operation (XOT233).
+	ErrCMUpdateDeleteBoth Code = "XOLU-CM017"
+
+	// ErrCMDeleteNotAvailable is returned for a /commit delete while
+	// XOLU_CASCADING_DELETE is enabled: the cascade runs in several
+	// transactions, so a delete that cascades cannot be atomic with the rest of
+	// the commit, and a delete that silently did not cascade would be wrong.
+	ErrCMDeleteNotAvailable Code = "XOLU-CM018"
+
+	// ErrCMTemplateInvalid is returned (400) for a /commit template that cannot be
+	// used: an unknown token, one that is not available where it appears, or an
+	// invalid on_conflict (XOT234, XOT235).
+	ErrCMTemplateInvalid Code = "XOLU-CM019"
 )
 
 // ---------------------------------------------------------------------------
@@ -326,6 +347,21 @@ const (
 	// region under the store's sysmask width (@S §8). System ids are
 	// mintable only via the system-internal path.
 	ErrTSSystemScopeID Code = "XOLU-TS027"
+
+	// ErrTSDefinitionConflict is returned (409) when POST /ts/tl/def names a
+	// timeline that already exists with a different name or retention. A
+	// definition that matches is idempotent; changing the settings is
+	// PATCH /ts/tl/{id} (XOT240).
+	ErrTSDefinitionConflict Code = "XOLU-TS028"
+
+	// ErrTSEventNotFound is returned (404) by DELETE /ts/events when no event
+	// exists at the given timeline, dimensions and time (XOT240).
+	ErrTSEventNotFound Code = "XOLU-TS029"
+
+	// ErrTSInvalidCursor is returned (400) when a latest-events cursor does not
+	// belong to the query's timeline and dimension prefix, or is not a cursor
+	// this server issued (XOT240).
+	ErrTSInvalidCursor Code = "XOLU-TS030"
 )
 
 const (
@@ -517,6 +553,11 @@ const (
 	// ErrFSMOverrideUnknownInput is returned when an override block references
 	// a transition input not present in the definition.
 	ErrFSMOverrideUnknownInput Code = "XOLU-FSM013"
+
+	// ErrFSMRefMismatch is returned (409) when a /commit fsm_walk with
+	// strict_ref names a machine whose ref is not the entity the commit updates
+	// or deletes (or that has no ref). The commit rolled back (XOT238).
+	ErrFSMRefMismatch Code = "XOLU-FSM014"
 
 	// ─── CAL family — calendar subsystem HTTP surface ────────────────────
 	// Introduced with T-18 (v0.14.7): xolu's cal subsystem exposed via

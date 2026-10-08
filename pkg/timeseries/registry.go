@@ -133,10 +133,17 @@ func (r *registry) define(id TimelineID, cfg TimelineConfig) error {
 		if !existing.FirstWriteAt.IsZero() && existing.Dims != cfg.Dims {
 			return fmt.Errorf("timeseries: timeline %d: dims are immutable after first write (%s)", id, xoluerr.ErrTSDimsImmutable)
 		}
-		// Allow re-definition to update name/retention before first write.
-		existing.Name = cfg.Name
-		existing.RetentionDays = cfg.RetentionDays
-		return r.save()
+		// A re-definition is idempotent when it matches. It used to overwrite
+		// the name and the retention whatever they were, so a caller that only
+		// meant "make sure this timeline exists" could silently change how long
+		// its events live (XOT240). Changing them is PATCH /ts/tl/{id}. An
+		// empty requested name means "no opinion" and does not conflict.
+		if normalizedRetention(cfg.RetentionDays) != normalizedRetention(existing.RetentionDays) || (cfg.Name != "" && cfg.Name != existing.Name) {
+			return fmt.Errorf("timeseries: timeline %d already exists with name %q and retention_days %d; "+
+				"the definition asks for %q and %d: change them with PATCH /ts/tl/%d (%s)",
+				id, existing.Name, existing.RetentionDays, cfg.Name, cfg.RetentionDays, id, xoluerr.ErrTSDefinitionConflict)
+		}
+		return nil
 	}
 
 	c := cfg
@@ -145,6 +152,16 @@ func (r *registry) define(id TimelineID, cfg TimelineConfig) error {
 	}
 	r.timelines[id] = &c
 	return r.save()
+}
+
+// normalizedRetention folds every negative retention into RetentionForever. They
+// have always meant the same thing (no expiry, see effectiveRetention), so a
+// definition that spells it -1 and one that spells it -30 are the same definition.
+func normalizedRetention(days int) int {
+	if days < 0 {
+		return RetentionForever
+	}
+	return days
 }
 
 // update changes the mutable fields (Name, RetentionDays) of an existing timeline.

@@ -196,6 +196,13 @@ SELECT name FROM deals EXCEPT SELECT name FROM archived_deals
 SELECT name FROM deals UNION SELECT name FROM archived_deals ORDER BY name ASC
 ```
 
+On an adapted entity (one with a registered schema) a SELECT is translated to
+a single SQL statement on the entity's own table when every column and filter
+it names is a schema field or one of the two system columns, `id` and
+`_version`; declared `x-xolu-index` fields then use their SQLite indexes.
+`SELECT *` is not translated and runs in Go, which is correct but reads the
+whole table.
+
 Each branch executes independently through the same query path any other
 SELECT uses — full tenant scoping, decimal formatting, adapted/blob
 resolution — then the branches are combined in Go (not pushed down to
@@ -542,6 +549,12 @@ SELECT name FROM (
   "error": "entity 'nonexistent' does not exist"
 }
 ```
+
+An entity type is "found" if the store the query runs on holds it, or the
+default store does, or a schema for it is on disk. On a tenant route the tenant's
+own store counts: before XOT229 only the default store and the disk were
+consulted, so a type that existed only under a tenant answered this error for
+every OQL query on that tenant's route.
 
 **404 Not Found** - Query ID not found:
 ```json

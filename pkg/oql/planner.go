@@ -287,8 +287,15 @@ func (p *Planner) Plan(ctx context.Context, s *ast.SelectStatement, store storag
 					Msg("Query planner")
 				return plan
 			}
-			// Adapted entity but not translatable — fall through to blob logic.
-			// (The adapted entity still has a blob row in the entities table.)
+			// Adapted entity but not translatable: stay in Go. The blob push-down
+			// below runs SQL against the entities table, and an adapted entity keeps
+			// its rows only in its own adapted table, so a pushed WHERE would run
+			// against no rows and return nothing (XOT228). The Go path reads the
+			// adapted table through store.List and is correct.
+			return QueryPlan{
+				Push:   []PushDecision{PushNone},
+				Reason: fmt.Sprintf("adapted entity %q: not fully translatable, using the Go path", entity),
+			}
 		}
 	}
 

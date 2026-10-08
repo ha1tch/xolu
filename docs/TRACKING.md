@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.30.36
-Last reviewed: 2026-08-19
+Version: 0.30.41
+Last reviewed: 2026-10-06
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -90,6 +90,17 @@ item's Trigger line.
 | XOT203 | iolu db backup: physical/raw-file single-instance backup -- SQLite online-backup API per database file plus Pebble checkpoints for ts, cal, and bal's rollup index (all three, corrected from T-71's original cal-only scope) -- split out of T-71 when T-71 was rescoped to reuse pkg/tenantexport's logical export instead | iolu | P4 | ☐ | After: none. Related: T-71 (the logical-export path this complements, not replaces), T-72 (db verify, unaffected by this split). |
 | XOT204 | iolu db restore -- documented manual procedure only today (T-71/T-72's own stated initial boundary: 'copy back onto a stopped server'); never filed as its own trackable item until now | iolu | P4 | ☐ | After: XOT203 (physical backup) for full restore-by-copy; can restore from tenantexport's logical export independently once that path exists, at reduced guarantee (see scope note). |
 | XOT215 | roles.py's Go block-comment detection (_go_role) is a naive substring count of '/*'/'*/' across the whole file, not comment/string-aware -- a literal '/*' inside an ordinary // line comment (e.g. a URL pattern like /api/v2/cal/*) is misread as an unclosed block comment, misclassifying every line after it as go-comment for the rest of the file | tooling | P3 | ☐ | After: none. |
+| XOT232 | JSON numbers pass through float64: integers above 2^53 change on store and read (UseNumber is used only by bal and dxp) | storage-config | P3 | ☐ | After: none. |
+| XOT237 | A per-type commit-only write policy: refuse plain POST/PUT/PATCH/DELETE and OQL data statements on a managed type | storage-config | P4 | ☐ | After: X3, X6. |
+| XOT241 | OQL answers XOLU-QL004 for an entity type that has no rows, though types are created implicitly on first write | oql | P3 | ☐ | After: none. |
+| XOT242 | `SELECT *` on an adapted table is not translated to SQL, so it always takes the Go path and reads the whole table | oql | P4 | ☐ | After: XOT228. |
+| XOT243 | `POST /schema/{entity}` saves the schema document before it migrates the table, so a refused migration leaves the saved schema ahead of the table | storage-config | P3 | ☐ | After: none. |
+| XOT244 | Registering a schema for an entity type that already has rows (blob storage) hides those rows: lists, queries and reads by id stop finding them | storage-config | P2 | ☐ | After: none. |
+| XOT245 | `/commit` `delete` does not cascade: it is refused while XOLU_CASCADING_DELETE is on | storage-config | P4 | ☐ | After: XOT233. |
+| XOT246 | The OQL push-down thresholds are calibrated at start, so the same build pushed filters at 30 rows on one start and above 100 on another | oql | P4 | ☐ | After: none. |
+| XOT247 | `$now` is not persisted across a restart, and `committed_at` is returned only when a commit sets `templates` | storage-config | P4 | ☐ | After: none. |
+| XOT248 | The default store's /ts must be provisioned by a client call; there is no start-up or lazy provisioning | ts | P4 | ☐ | After: none. |
+| XOT249 | The /ts leg of /commit is not atomic with the SQLite transaction: a failed undo leaves an orphan event (XOLU-CM016) | ts | P3 | ☐ | After: none. |
 
 ---
 
@@ -1071,6 +1082,30 @@ Theme: oql · Priority: P3 · Status: ☐ · Blocks/after: After: none. Relevant
 - **Scope:** any OQL query relying on chained access after a primitive method call (`@FSM.state(1).name`, and presumably the same shape for `@BAL`/`@CAL`/`@TS` once those exist) silently loses the base expression rather than erroring. Not scoped to any wave-8 item today -- none of T-76/77/78/79/80 use chained access in their own filed scope -- filed so whoever eventually wants it doesn't have to rediscover this.
 - **Exit:** either tsqlparser is fixed upstream (github.com/ha1tch/tsqlparser) to preserve the call through a trailing member access, or the OQL layer documents chained access as unsupported and refuses it explicitly rather than silently mis-parsing.
 
+### XOT241. OQL answers XOLU-QL004 for an entity type that has no rows, though types are created implicitly on first write
+
+Theme: oql · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** a type that was never written, or whose rows were all deleted, is not in the store's entity list, so `SELECT ... FROM <type>` is `400 XOLU-QL004 entity does not exist` instead of an empty result. Types are implicit, so "does not exist" and "has no rows" are the same state. It showed up as a regression in the first XOT229 fix (`TestExecuteWithStore_UpdateDelete`: a tenant emptied a type and queried it) and clients must treat the error as "no rows" in some places and as "cannot query" in others (a xolu without XOT229).
+- **Fix to decide:** return an empty result for a name that passes identifier validation, or keep QL004 only for names with a registered schema or a known history of rows. Either is a behaviour change for clients that rely on QL004 to catch typos.
+- **Source:** found while implementing XOT229; not in the original proposal's numbered items.
+
+### XOT242. `SELECT *` on an adapted table is not translated to SQL, so it always takes the Go path and reads the whole table
+
+Theme: oql · Priority: P4 · Status: ☐ · Blocks/after: After: XOT228.
+
+- **Trigger:** `isFullyTranslatable` returns false for a star projection on an adapted entity (`unsupported expression type`), so `SELECT * FROM t WHERE <indexed column> = ?` scans in Go even with an index. Row queries naming columns, `id` and `_version` included, are pushed down since XOT228.
+- **Fix:** expand `*` to the table's columns in the planner for an adapted entity, and rebuild each row from them (columns plus the overflow column) the way the Go path does.
+- **Source:** left open under XOT228.
+
+### XOT246. The OQL push-down thresholds are calibrated at start, so the same build pushed filters at 30 rows on one start and above 100 on another
+
+Theme: oql · Priority: P4 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** the planner logs `profile=calibrated ... blobThreshold=54 nonCoveringThreshold=160` after measuring Go and SQL per-row costs at start-up; a defect that appeared only above the threshold (XOT228) therefore appeared at different table sizes on different starts and was hard to reproduce. Not a defect in itself.
+- **Fix to decide:** expose the calibrated thresholds (`/health` or `/version`), allow pinning them through configuration for tests, and log them at INFO instead of debug.
+- **Source:** observed while reproducing XOT228.
+
 ## validation
 
 ### T-91. pkg/validation.JSONSchemaValidator's own doc comment claims Loose mode by default, but its actual code uses queryfy.Strict -- a real, pre-existing discrepancy found while adversarial-testing dxp/txn's bindings validation, not this session's to fix
@@ -1195,5 +1230,73 @@ Theme: cron · Priority: P2 · Status: ☐ · Blocks/after: After: items XOT197,
 - **Scope:** per-def retention as the third mandatory policy; `~trim` job honouring the sweep horizon (§15.4: a tick with pending reclamation is unprunable); five reclamation classes on the def; Reclaimer interface in the dxp Participant mold; `/blob` Reclaimer for `staged` and `attributed` (v1: /blob only); `~sweep` job(s); `~` system jobs arm themselves at instance startup, disabling is an explicit recorded act; the dxp janitor (T-54's Janitor) AND `pkg/gc`'s four existing Sweepers (blob GC, ts retention, fsm v2 collection, event delivery log v2 cleanup -- found 2026-08-17, cron-primitive.md §13.10) migrated onto /cron as `~` jobs, "closer to a rename than new work" per that section's own framing; REST + client + molu + docs; every dormant guard this wave creates registered in the same session (Part 3 §8).
 - **Deferral lever:** if scoped down, §15 (reclamation) is the natural v1.1 deferral (≈ 2.75 ideal days saved -- cron-primitive.md §16.4 lever 2); the rest of this item stays.
 - **Estimate:** 0.75 + 2.0 + 1.25 + 1.5 = 5.5 ideal days (was 5.25; dogfooding row revised 1.0 -> 1.25 for covering four gc consumers plus the janitor, not the janitor alone -- cron-primitive.md §16.2 rows 8-11).
+
+## storage-config
+
+### XOT232. JSON numbers pass through float64: integers above 2^53 change on store and read (UseNumber is used only by bal and dxp)
+
+Theme: storage-config · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** `9007199254740993` is stored and returned as `9007199254740992`; OQL returns ids as float64. 33 `json.NewDecoder(r.Body)` sites in the server and 33 `json.Unmarshal` sites in storage.
+- **Fix:** decode with `UseNumber` (or keep raw JSON) through the entity paths, marshal `json.Number`, and return integer columns as integers in OQL results. Start with entity create, update and `/commit`.
+- **Source:** `docs/proposals/versioning-00-substrate-changes.md` X5. Not started.
+
+### XOT237. A per-type commit-only write policy: refuse plain POST/PUT/PATCH/DELETE and OQL data statements on a managed type
+
+Theme: storage-config · Priority: P4 · Status: ☐ · Blocks/after: After: X3, X6.
+
+- **Trigger:** nothing stops a plain write bypassing a client-maintained history; the client needs detectors for gaps, missing rows and untracked deletes.
+- **Fix:** a per-type flag enforced at a store-level choke point (77 write route registrations plus OQL INSERT/UPDATE/DELETE).
+- **Source:** `docs/proposals/versioning-00-substrate-changes.md` X10. Not started.
+
+### XOT243. `POST /schema/{entity}` saves the schema document before it migrates the table, so a refused migration leaves the saved schema ahead of the table
+
+Theme: storage-config · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** adding a unique index over rows that already violate it (XOT236) is refused with 409 and the table is unchanged, but the schema document had already been saved and loaded into the validator; the registry's hash and the table disagree until the schema is posted again or the old one restored. Any migration failure has the same shape.
+- **Fix:** run the table registration or migration first and save the document only after it succeeds, or roll the saved document back when the migration fails.
+- **Source:** noted under XOT236.
+
+### XOT244. Registering a schema for an entity type that already has rows (blob storage) hides those rows: lists, queries and reads by id stop finding them
+
+Theme: storage-config · Priority: P2 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** verified with a 5-row type: after `POST /schema/<type>` a query returned 0 rows and `GET` by id returned 404, while the rows were still in the blob table. The strict promotion route (`POST /entities/promote/strict/<type>`) migrates them, so the data is recoverable, but the registration itself succeeds silently.
+- **Fix:** refuse the registration (409, naming the promotion route) when the type already holds blob rows, or migrate them as part of it.
+- **Source:** found while building a client's history-schema helper, which refuses to register over existing rows for this reason.
+
+### XOT245. `/commit` `delete` does not cascade: it is refused while XOLU_CASCADING_DELETE is on
+
+Theme: storage-config · Priority: P4 · Status: ☐ · Blocks/after: After: XOT233.
+
+- **Trigger:** the cascade deletes referrers in transactions of its own, so a delete in a commit that cascaded could not be atomic, and ignoring it would leave referrers behind. XOT233 refuses with `XOLU-CM018` instead.
+- **Fix:** run the cascade inside the commit's transaction (the referrer set is known from the schema registry), or document that cascading deletes stay on `DELETE`. Decide the cap that applies to a cascade inside a commit.
+- **Source:** deviation recorded under XOT233.
+
+### XOT247. `$now` is not persisted across a restart, and `committed_at` is returned only when a commit sets `templates`
+
+Theme: storage-config · Priority: P4 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** the commit-instant generator (`storage.NextCommitInstant`) is in memory: strictly increasing within a process, but after a restart it starts from the wall clock, so if the clock stepped back by more than the restart took, a later commit can get an earlier `$now`. `$commit_seq` is durable and has no such limit. `committed_at` and `commit_seq` are in the response only when `templates` was set.
+- **Fix to decide:** persist the last issued instant (alongside `commit_seq`) and start the generator from `max(wall clock, last + 1)`; return `committed_at` on every commit, not only templated ones, at the cost of one more field in every commit response.
+- **Source:** the part of XOT235 not done in 0.30.40; closed with that item in 0.30.41.
+
+## ts
+
+### XOT248. The default store's /ts must be provisioned by a client call; there is no start-up or lazy provisioning
+
+Theme: ts · Priority: P4 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** `/api/v2/ts/...` serves the default store (XOT239), but every route answers `404 XOLU-TS003` until a client has called `POST /api/v2/ts/provision`, as for a tenant. A deployment that wants /ts for the default store has to remember a one-off call.
+- **Fix to decide:** a start-up setting that provisions the default store when `XOLU_TIMESERIES_ENABLED` is on, or lazy provisioning on first use. Either changes what an unprovisioned default store means, so it should be a decision, not a default.
+- **Source:** the part of XOT239 not done in 0.30.40; closed with that item in 0.30.41.
+
+### XOT249. The /ts leg of /commit is not atomic with the SQLite transaction: a failed undo leaves an orphan event (XOLU-CM016)
+
+Theme: ts · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** the Pebble events are written first and the SQLite transaction runs after; if SQLite fails the events are deleted by key to undo the write, and if that delete fails too the commit answers `500 XOLU-CM016` with an orphan event in /ts. A client that keeps an index in /ts (a version index) then has an event for a row that was never written; it can find and repair it (`DELETE /ts/events`, XOT240) but xolu cannot prevent it. The window is narrow (two failures in a row) and was never observed in testing.
+- **Fix:** an outbox: write the events as a row in the SQLite transaction, apply them to Pebble after the commit, idempotently, and replay the outbox at start. That changes the commit's failure model (events appear shortly after the commit, not before it), so it needs a design note and a decision on how a reader sees an event that is committed but not yet applied.
+- **Source:** the part of XOT240 not done in 0.30.40 (the proposal's X13c); closed with that item in 0.30.41.
 
 ---

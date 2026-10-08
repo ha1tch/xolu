@@ -356,6 +356,12 @@ func DeriveAdaptedTableSpecFrom(entity string, schema SchemaIntrospector, dialec
 		}
 	}
 
+	explicit, err := explicitIndexDefs(entity, schema, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("entity %q: %w", entity, err)
+	}
+	indexes = append(indexes, explicit...)
+
 	return &AdaptedTableSpec{
 		Entity:     entity,
 		TenantID:   tenantID,
@@ -398,16 +404,23 @@ func canonicalSchemaHash(schema map[string]interface{}) (string, error) {
 	return fmt.Sprintf("%x", hash), nil
 }
 
-// deduplicateIndexes removes duplicate index definitions (same columns).
+// deduplicateIndexes removes duplicate index definitions (same columns). When a
+// unique and a plain index name the same columns, the unique one is kept: it
+// serves every lookup the plain one would, and dropping it would silently lose
+// the constraint.
 func deduplicateIndexes(indexes []IndexDef) []IndexDef {
-	seen := make(map[string]bool)
+	at := make(map[string]int)
 	var result []IndexDef
 	for _, idx := range indexes {
 		key := strings.Join(idx.Columns, ",")
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, idx)
+		if i, seen := at[key]; seen {
+			if idx.Unique && !result[i].Unique {
+				result[i] = idx
+			}
+			continue
 		}
+		at[key] = len(result)
+		result = append(result, idx)
 	}
 	return result
 }

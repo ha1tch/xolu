@@ -1035,66 +1035,7 @@ func (s *Server) setupRoutes() {
 
 			// Tenant-scoped timeseries routes
 			if s.tsManager != nil {
-				tr.Route("/ts", func(tsr chi.Router) {
-					tsr.Post("/provision", s.HandleTSProvision)
-					// Timeline management
-					// DEPRECATED plural "timelines" shape — commented out in
-					// favour of the "tl/def" / "tl/list" / "tl/{id}" form below.
-					// Restore from the v0.13.1 baseline if these must come back.
-					// tsr.Post("/timelines", s.HandleTSDefineTimeline)
-					// tsr.Get("/timelines", s.HandleTSListTimelines)
-					// tsr.Get("/timelines/{timeline_id}", s.HandleTSGetTimeline)
-					// tsr.Patch("/timelines/{timeline_id}", s.HandleTSUpdateTimeline)
-					// tsr.Get("/timelines/{timeline_id}/sync", s.HandleTSSyncGet)
-					// tsr.Post("/timelines/{timeline_id}/sync/on", s.HandleTSSyncOn)
-					// tsr.Post("/timelines/{timeline_id}/sync/off", s.HandleTSSyncOff)
-					tsr.Post("/tl/def", s.HandleTSDefineTimeline)
-					tsr.Get("/tl/list", s.HandleTSListTimelines)
-					tsr.Get("/tl/{timeline_id}", s.HandleTSGetTimeline)
-					tsr.Patch("/tl/{timeline_id}", s.HandleTSUpdateTimeline)
-					tsr.Delete("/tl/{timeline_id}", s.HandleTSDeleteTimeline)
-					tsr.Get("/tl/{timeline_id}/sync", s.HandleTSSyncGet)
-					tsr.Post("/tl/{timeline_id}/sync/on", s.HandleTSSyncOn)
-					tsr.Post("/tl/{timeline_id}/sync/off", s.HandleTSSyncOff)
-					// Events
-					tsr.Post("/events", s.HandleTSAppend)
-					tsr.Post("/events/batch", s.HandleTSBatchAppend)
-					tsr.Get("/events", s.HandleTSQueryRange)
-					tsr.Post("/query/range", s.HandleTSQueryRangePost)
-					tsr.Get("/events/latest", s.HandleTSLatest)
-					// Aggregate
-					tsr.Post("/aggregate", s.HandleTSAggregate)
-					tsr.Post("/range_aggregate", s.HandleTSRangeAggregate)
-					tsr.Post("/full_aggregate", s.HandleTSFullAggregate)
-					// Rollup management
-					// DEPRECATED plural "timelines" shape — see note above.
-					// tsr.Post("/timelines/{timeline_id}/rollup/def", s.HandleTSDefineRollup)
-					// tsr.Get("/timelines/{timeline_id}/rollup/list", s.HandleTSListRollups)
-					// tsr.Get("/timelines/{timeline_id}/rollup/parent", s.HandleTSRollupParent)
-					// tsr.Get("/timelines/{timeline_id}/rollup/{rollup_id}", s.HandleTSGetRollup)
-					// tsr.Delete("/timelines/{timeline_id}/rollup/{rollup_id}", s.HandleTSDeleteRollup)
-					// tsr.Post("/timelines/{timeline_id}/rollup/{rollup_id}/run", s.HandleTSRunRollup)
-					// tsr.Get("/timelines/{timeline_id}/rollup/{rollup_id}/status", s.HandleTSRollupStatus)
-					tsr.Post("/tl/{timeline_id}/rollup/def", s.HandleTSDefineRollup)
-					tsr.Get("/tl/{timeline_id}/rollup/list", s.HandleTSListRollups)
-					tsr.Get("/tl/{timeline_id}/rollup/parent", s.HandleTSRollupParent)
-					tsr.Get("/tl/{timeline_id}/rollup/{rollup_id}", s.HandleTSGetRollup)
-					tsr.Delete("/tl/{timeline_id}/rollup/{rollup_id}", s.HandleTSDeleteRollup)
-					tsr.Post("/tl/{timeline_id}/rollup/{rollup_id}/run", s.HandleTSRunRollup)
-					tsr.Get("/tl/{timeline_id}/rollup/{rollup_id}/status", s.HandleTSRollupStatus)
-					tsr.Get("/rollup/tree", s.HandleTSRollupTree)
-					// Timeline data deletion
-					// DEPRECATED plural "timelines" shape — see note above.
-					// tsr.Delete("/timelines/{timeline_id}/data", s.HandleTSDeleteTimelineData)
-					// tsr.Post("/timelines/{timeline_id}/data/purge", s.HandleTSPurgeTimelineRange)
-					tsr.Delete("/tl/{timeline_id}/data", s.HandleTSDeleteTimelineData)
-					tsr.Post("/tl/{timeline_id}/data/purge", s.HandleTSPurgeTimelineRange)
-					// Retention + stats
-					tsr.Get("/retention", s.HandleTSGetRetention)
-					tsr.Patch("/retention", s.HandleTSPatchRetention)
-					tsr.Get("/stats", s.HandleTSStats)
-					tsr.Get("/stats/{timeline_id}", s.HandleTSTimelineStats)
-				})
+				tr.Route("/ts", s.mountTSRoutes)
 			}
 
 			// Tenant-scoped blob routes.
@@ -1496,10 +1437,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleVersion returns server version
+// Capabilities is the list of behaviours a client can test for without probing
+// the server. A capability is named for the behaviour, never for a version, so a
+// build that carries a fix advertises it before the fix has a release number.
+// Add a name when a behaviour a client may depend on arrives or is corrected;
+// never remove one while the behaviour exists.
+var Capabilities = []string{
+	"commit.cas-missing-conflict", // XOT230: update.version on a missing entity answers 409, not a create
+	"commit.delete",               // XOT233: /commit takes a delete instead of an update, atomic with its appends and fsm_walk
+	"commit.templates",            // XOT234, XOT235: "templates": true, $now, $commit_seq, $update.*, $previous.*, and append on_conflict "ignore"
+	"commit.oversize-413",         // XOT231: an oversize /commit body answers 413 XOLU-ST007
+	"oql.adapted-select",          // XOT228: filtered row-returning SELECTs on an adapted entity are correct at any size and use its indexes, id and _version included
+	"oql.tenant-entities",         // XOT229: OQL on tenant routes sees the tenant's own entity types
+	"schema.unique-index",         // XOT236: x-xolu-unique and x-xolu-indexes in a schema, enforced by xolu (409 XOLU-ST012)
+}
+
+// handleVersion returns the server version and its capabilities.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, map[string]string{
-		"version": version.Version,
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"version":      version.Version,
+		"capabilities": Capabilities,
 	})
 }
 
@@ -1639,6 +1596,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		var rtm *storage.RefTargetMissingError
 		if errors.As(err, &rtm) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrRIValidateTarget, rtm.Error())
+			return
+		}
+		if s.writeUniqueViolation(w, err) {
 			return
 		}
 		s.logger.Error().Err(err).Msg("Failed to create entity")
@@ -2013,6 +1973,9 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
+			return
+		}
+		if s.writeUniqueViolation(w, err) {
 			return
 		}
 		s.logger.Error().Err(err).Msg("Failed to update entity")

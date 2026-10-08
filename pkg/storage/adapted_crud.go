@@ -258,7 +258,7 @@ func adaptedCreate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 
 	_, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("adapted insert into %s failed: %w", spec.TableName(), err)
+		return mapAdaptedWriteError(spec, "insert into", err)
 	}
 	return nil
 }
@@ -377,7 +377,7 @@ func adaptedUpdate(ctx context.Context, tx *sql.Tx, spec *AdaptedTableSpec, dial
 
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("adapted update on %s failed: %w", spec.TableName(), err)
+		return mapAdaptedWriteError(spec, "update on", err)
 	}
 
 	rows, err := result.RowsAffected()

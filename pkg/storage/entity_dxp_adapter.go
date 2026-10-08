@@ -348,7 +348,7 @@ func (a *EntityAdapter) Execute(ctx context.Context, store dxp.ParticipantStore,
 			return nil, err
 		}
 	case EntityAppendParams:
-		if _, err := a.store.createInTx(ctx, s.Tx, CommitAppend(tp)); err != nil {
+		if _, err := a.store.createInTx(ctx, s.Tx, CommitAppend{Entity: tp.Entity, ID: tp.ID, Data: tp.Data}); err != nil {
 			return nil, err
 		}
 	default:

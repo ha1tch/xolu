@@ -147,7 +147,9 @@ func (e *Engine) ExecuteWithStore(ctx context.Context, sql string, store storage
 		return nil, err
 	}
 
-	if err := e.validator.Validate(stmt); err != nil {
+	// The store is scoped to the target tenant, so names are validated against
+	// it and not against the engine's default store (XOT229).
+	if err := e.validator.forStore(store).Validate(stmt); err != nil {
 		return nil, err
 	}
 

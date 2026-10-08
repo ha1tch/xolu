@@ -157,6 +157,9 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
 			return
 		}
+		if s.writeUniqueViolation(w, err) {
+			return
+		}
 		s.logger.Error().Err(err).Msg("Failed to patch entity")
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed, "Failed to patch entity")
 		return
@@ -274,6 +277,17 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeUniqueViolation answers a *storage.UniqueViolationError as 409
+// XOLU-ST012 and reports whether it did (XOT236).
+func (s *Server) writeUniqueViolation(w http.ResponseWriter, err error) bool {
+	var uv *storage.UniqueViolationError
+	if !errors.As(err, &uv) {
+		return false
+	}
+	s.writeError(w, http.StatusConflict, xoluerr.ErrUniqueViolation, uv.Error())
+	return true
+}
+
 // fetchCurrentVersion retrieves the _version of an entity for inclusion in
 // version-conflict 409 responses. Returns -1 if the entity cannot be read.
 func (s *Server) fetchCurrentVersion(ctx context.Context, entity string, id int) int {
@@ -371,6 +385,9 @@ func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, models.ErrDuplicateEdgeTarget) {
 			s.writeError(w, http.StatusBadRequest, xoluerr.ErrDuplicateEdgeRef, err.Error())
+			return
+		}
+		if s.writeUniqueViolation(w, err) {
 			return
 		}
 		s.logger.Error().Err(err).Msg("Failed to save entity")
@@ -1331,6 +1348,12 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, err.Error())
 		return
 	}
+	// Index keywords (x-xolu-unique, x-xolu-indexes) are checked before anything is
+	// persisted, so a malformed one is a clean 400 (XOT236).
+	if err := storage.ValidateSchemaIndexes(schema); err != nil {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrSchemaLoadFailed, err.Error())
+		return
+	}
 
 	if err := s.validator.LoadSchema(entity, schema); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to load schema")
@@ -1358,6 +1381,14 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 	// own doc comment (XOT178) for why this matters.
 	if err := s.registerAdaptedEverywhere(r.Context(), entity, schema); err != nil {
 		s.logger.Error().Err(err).Str("entity", entity).Msg("Failed to register adapted table")
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			// Adding a unique index to a type that already has rows: they violate it.
+			// The schema document was saved before this step and the table was not
+			// changed; fix the rows and POST the same schema again to retry.
+			s.writeError(w, http.StatusConflict, xoluerr.ErrUniqueViolation,
+				"existing rows of "+entity+" violate a unique index in this schema, so the table was not changed; remove the duplicates and POST the schema again")
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
 			"Schema loaded but adapted table registration failed")
 		return
@@ -2327,26 +2358,112 @@ func (s *Server) handleGraphRebuild(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 	var req storage.CommitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidJSON, "Invalid JSON in request body")
+	// decodeJSON answers 413 for an oversize body and 400 for malformed JSON
+	// (XOT231: this handler used to answer 400 for both).
+	if !s.decodeJSON(w, r, &req) {
 		return
 	}
 
 	// --- Structural validation (always, regardless of strict mode) ----------
 
-	if req.Update.Entity == "" {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMUpdateMissing, "update object is required")
+	// A commit has one primary operation: an update (an upsert) or a delete
+	// (XOT233). Exactly one is allowed.
+	if req.Delete != nil && (req.Update.Entity != "" || req.Update.ID != 0 || req.Update.Data != nil || req.Update.Version != nil) {
+		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMUpdateDeleteBoth,
+			"update and delete are mutually exclusive; send one")
 		return
 	}
-	if err := validateEntityName(req.Update.Entity); err != nil {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMInvalidUpdateEntity,
-			fmt.Sprintf("invalid update entity: %s", err.Error()))
-		return
+	if req.Delete != nil {
+		// The cascade (XOLU_CASCADING_DELETE) deletes other entities in
+		// transactions of their own, so it cannot be atomic with this commit,
+		// and ignoring it would leave referrers behind. Refuse instead.
+		if s.config.CascadingDelete {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMDeleteNotAvailable,
+				"delete in /commit does not cascade and is not available while XOLU_CASCADING_DELETE is enabled")
+			return
+		}
+		if req.Delete.Entity == "" {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity, "delete.entity is required")
+			return
+		}
+		if err := validateEntityName(req.Delete.Entity); err != nil {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidEntity,
+				fmt.Sprintf("invalid delete entity: %s", err.Error()))
+			return
+		}
+		if req.Delete.ID <= 0 {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "delete.id must be a positive integer")
+			return
+		}
+		// The restrict policies that apply to this entity, checked inside the
+		// commit's own transaction exactly as a plain DELETE checks them.
+		req.Delete.RestrictedBy = s.restrictingEntities(req.Delete.Entity)
+	} else {
+		if req.Update.Entity == "" {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMUpdateMissing, "update object is required")
+			return
+		}
+		if err := validateEntityName(req.Update.Entity); err != nil {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMInvalidUpdateEntity,
+				fmt.Sprintf("invalid update entity: %s", err.Error()))
+			return
+		}
+		if req.Update.ID <= 0 {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "update.id must be a positive integer")
+			return
+		}
 	}
-	if req.Update.ID <= 0 {
-		s.writeError(w, http.StatusBadRequest, xoluerr.ErrInvalidID, "update.id must be a positive integer")
-		return
+
+	// --- Templates (XOT234, XOT235) ------------------------------------------
+	//
+	// With "templates": true the commit instant is taken once, here, before
+	// either store is written, so the rows and the timeseries event times share
+	// it. The tokens that need the transaction ($update.*, $previous.*,
+	// $commit_seq) are resolved by the store; a typo is a 400 before any write.
+	if !req.Templates {
+		for i, ev := range req.Timeseries {
+			if ev.TimeNow {
+				s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMTemplateInvalid,
+					fmt.Sprintf("timeseries[%d].time is \"$now\": set \"templates\": true to use it", i))
+				return
+			}
+		}
+	} else {
+		req.Now = storage.NextCommitInstant()
+		nowTime, _ := time.Parse(storage.CommitInstantLayout, req.Now)
+		for i := range req.Timeseries {
+			if req.Timeseries[i].TimeNow {
+				req.Timeseries[i].Time = nowTime
+			}
+		}
+		parts := []interface{}{req.Update.Data}
+		for _, a := range req.Append {
+			parts = append(parts, a.Data)
+		}
+		for _, p := range parts {
+			if _, terr := storage.TemplateTokensIn(p); terr != nil {
+				s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMTemplateInvalid, terr.Error())
+				return
+			}
+		}
 	}
+	// What strict validation sees in place of a template: a value of the type the
+	// real one will have, so a schema that says "snapshot is an object" or
+	// "version is an integer" accepts the request.
+	valData := func(m map[string]interface{}, updateData map[string]interface{}) map[string]interface{} {
+		if !req.Templates {
+			return m
+		}
+		tv := storage.TemplatePlaceholders(updateData)
+		tv.Now, tv.HasNow = req.Now, true
+		r, rerr := storage.ResolveTemplates(m, tv, false)
+		if rerr != nil {
+			return m
+		}
+		out, _ := r.(map[string]interface{})
+		return out
+	}
+	valUpdate := valData(req.Update.Data, map[string]interface{}{})
 
 	// At least one of append, timeseries, or fsm_walk must carry work.
 	// A request with all three absent or empty is rejected with XOLU-CM003.
@@ -2488,9 +2605,9 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 	// --- Strict mode: schema validation + graph cycle prechecks --------------
 
-	if s.config.StrictCommit {
+	if s.config.StrictCommit && req.Delete == nil {
 		updateData := make(map[string]interface{}, len(req.Update.Data)+1)
-		for k, v := range req.Update.Data {
+		for k, v := range valUpdate {
 			updateData[k] = v
 		}
 		updateData["id"] = req.Update.ID
@@ -2516,9 +2633,12 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+	}
+	if s.config.StrictCommit {
 		for i, a := range req.Append {
+			valAppend := valData(a.Data, valUpdate)
 			appendData := make(map[string]interface{}, len(a.Data)+1)
-			for k, v := range a.Data {
+			for k, v := range valAppend {
 				appendData[k] = v
 			}
 			if a.ID != nil {
@@ -2599,16 +2719,40 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 					"See XOLU-CM009.")
 			return
 		}
+		var tmplErr *storage.TemplateError
+		if errors.As(err, &tmplErr) {
+			s.writeError(w, http.StatusBadRequest, xoluerr.ErrCMTemplateInvalid, tmplErr.Error()+"; commit rolled back")
+			return
+		}
+		if req.Delete != nil && errors.Is(err, storage.ErrNotFound) {
+			s.writeError(w, http.StatusNotFound, xoluerr.ErrEntityNotFound,
+				fmt.Sprintf("Resource of entity %s with id %d not found; commit rolled back", req.Delete.Entity, req.Delete.ID))
+			return
+		}
+		var rve *storage.RestrictViolationError
+		if req.Delete != nil && errors.As(err, &rve) {
+			s.writeError(w, http.StatusConflict, xoluerr.ErrRIRestrictViolation,
+				fmt.Sprintf("cannot delete %s:%d — it is referenced by: %s; commit rolled back",
+					req.Delete.Entity, req.Delete.ID, strings.Join(rve.Referrers, ", ")))
+			return
+		}
 		if errors.Is(err, storage.ErrConflict) {
-			currentVer := s.fetchCurrentVersion(r.Context(), req.Update.Entity, req.Update.ID)
+			targetEntity, targetID := req.Update.Entity, req.Update.ID
+			if req.Delete != nil {
+				targetEntity, targetID = req.Delete.Entity, req.Delete.ID
+			}
+			currentVer := s.fetchCurrentVersion(r.Context(), targetEntity, targetID)
 			s.writeJSON(w, http.StatusConflict, map[string]interface{}{
 				"error": map[string]interface{}{
 					"code":    string(xoluerr.ErrCMVersionConflict),
-					"message": fmt.Sprintf("Version conflict: %s id %d has been modified", req.Update.Entity, req.Update.ID),
+					"message": fmt.Sprintf("Version conflict: %s id %d has been modified", targetEntity, targetID),
 					"status":  http.StatusConflict,
 				},
 				"current_version": currentVer,
 			})
+			return
+		}
+		if s.writeUniqueViolation(w, err) {
 			return
 		}
 		if errors.Is(err, storage.ErrAlreadyExists) {
@@ -2620,6 +2764,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		// rolled back (document write included). Surface as XOLU-FSM008 with the
 		// underlying walk reason, per the spec's commit-conflict semantics.
 		var walkErr *storage.FsmWalkError
+		if errors.As(err, &walkErr) && walkErr.Code == string(xoluerr.ErrFSMRefMismatch) {
+			s.writeError(w, http.StatusConflict, xoluerr.ErrFSMRefMismatch, walkErr.Message+"; commit rolled back")
+			return
+		}
 		if errors.As(err, &walkErr) {
 			s.writeError(w, http.StatusConflict, xoluerr.ErrFSMCommitConflict,
 				"fsm_walk failed; commit rolled back: "+walkErr.Message)
@@ -2637,7 +2785,9 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	// Unconditional (not gated on strict mode): a stale FlatGraph after a
 	// successful write is a correctness bug, not a "relax guarantees" choice.
 
-	if merged, err := entityStore.Get(r.Context(), req.Update.Entity, result.Update.ID); err == nil {
+	if req.Delete != nil {
+		s.removeGraph(r.Context(), req.Delete.Entity, req.Delete.ID)
+	} else if merged, err := entityStore.Get(r.Context(), req.Update.Entity, result.Update.ID); err == nil {
 		s.updateGraph(r.Context(), req.Update.Entity, result.Update.ID, merged)
 	} else {
 		s.logger.Warn().Err(err).
@@ -2654,7 +2804,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.invalidateCacheForID(r.Context(), req.Update.Entity, req.Update.ID)
+	if req.Delete != nil {
+		s.invalidateCacheForID(r.Context(), req.Delete.Entity, req.Delete.ID)
+	} else {
+		s.invalidateCacheForID(r.Context(), req.Update.Entity, req.Update.ID)
+	}
 	for _, a := range result.Appended {
 		s.invalidateCacheForID(r.Context(), a.Entity, a.ID)
 	}
@@ -2669,15 +2823,27 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	if s.v2Enabled() {
 		// Build the affected-entity REF set: the update plus every append.
 		affected := make([]map[string]interface{}, 0, 1+len(result.Appended))
-		affected = append(affected, map[string]interface{}{
-			"ref": map[string]interface{}{
-				"type":   models.RefTypeValue,
-				"entity": result.Update.Entity,
-				"id":     int64(result.Update.ID),
-			},
-			"created": result.Update.Created,
-			"version": result.Update.Version,
-		})
+		if req.Delete != nil {
+			affected = append(affected, map[string]interface{}{
+				"ref": map[string]interface{}{
+					"type":   models.RefTypeValue,
+					"entity": result.Delete.Entity,
+					"id":     int64(result.Delete.ID),
+				},
+				"deleted": true,
+				"version": result.Delete.Version,
+			})
+		} else {
+			affected = append(affected, map[string]interface{}{
+				"ref": map[string]interface{}{
+					"type":   models.RefTypeValue,
+					"entity": result.Update.Entity,
+					"id":     int64(result.Update.ID),
+				},
+				"created": result.Update.Created,
+				"version": result.Update.Version,
+			})
+		}
 		for _, a := range result.Appended {
 			affected = append(affected, map[string]interface{}{
 				"ref": map[string]interface{}{
@@ -2703,6 +2869,23 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			s.fireFSMStepEvent(r, mid, walkInput, result.FsmWalk.Previous, result.FsmWalk.Current,
 				result.FsmWalk.Terminal, result.FsmWalk.Vars, affected, result.FsmWalk.Definition)
 		}
+	}
+
+	if req.Delete != nil {
+		// A plain DELETE fires entity.deleted; a commit that deletes does too.
+		s.fireEntityEvent(r, "entity.deleted", req.Delete.Entity, req.Delete.ID, nil)
+		resp := map[string]interface{}{"delete": result.Delete, "appended": result.Appended}
+		if result.Clock != nil {
+			resp["clock"] = result.Clock
+		}
+		if result.TSAccepted > 0 {
+			resp["ts_accepted"] = result.TSAccepted
+		}
+		if result.FsmWalk != nil {
+			resp["fsm_walk"] = result.FsmWalk
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return
 	}
 
 	s.writeJSON(w, http.StatusOK, result)
