@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.30.43-pre1_fixes01
-Last reviewed: 2026-10-06
+Version: 0.30.44
+Last reviewed: 2026-10-22
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
@@ -594,13 +594,13 @@ correctness envelope over parser/validator input space.
   probe of the exact `at > ?` pattern worked correctly), and wall-clock
   non-monotonicity (a direct 2,000,000-iteration probe of
   `time.Now().UTC()` — the exact call `xolutime.Now()` makes — found
-  zero backward jumps on the same M1). Horacio's own hypothesis, that
+  zero backward jumps on the same M1). our team's own hypothesis, that
   `go test`'s own repeated-invocation harness was the actual source of
   the failures rather than the application code, was the one that
   resolved it: the identical scenario, same fix, same hardware, driven
   by `cmd/critrepro`'s own bare `func main()` loop instead of
   `go test -count=500`, ran 500/500 clean. Not investigated further —
-  "totally looks like a Go bug" in Horacio's own words, and this
+  "totally looks like a Go bug" in our team's own words, and this
   project does not have the budget to dig into the toolchain itself;
   production traffic never goes through `go test` regardless, so the
   fix's own correctness (now confirmed) is what actually matters.
@@ -613,7 +613,7 @@ correctness envelope over parser/validator input space.
   Pass condition: 500/500, zero `XOLU-BAL006` rejections.
 - **Environment contract:** WAL + busy_timeout (house defaults) only.
 - **Last exercised:** 2026-08-07 env:m1 (real Apple M1 silicon,
-  Horacio's own run) — `go run ./cmd/critrepro -n 500` (default,
+  our team's own run) — `go run ./cmd/critrepro -n 500` (default,
   all registered scenarios) — **PASS, 500/500, zero failures.** Against
   the pre-fix `go test -count=500` log's ~170-215 failures on the
   identical hardware. Both the harness hypothesis and the underlying

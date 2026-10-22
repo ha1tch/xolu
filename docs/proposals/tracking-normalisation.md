@@ -180,7 +180,7 @@ No code changes. CHANGELOG entry under 0.15.x documenting the reshape.
    hygiene script) verifies: TRACKING contains no ✓ items, RESOLVED is
    append-only since the last tag, release-coupled headers match VERSION.
 
-## 6. Open decisions (for Horatio)
+## 6. Open decisions (for our team)
 
 - **D1 — Register name.** TRACKING.md (proposed; scope is wider than
   debt, and the file is a day old with one inbound link) vs keeping

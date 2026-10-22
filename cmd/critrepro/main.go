@@ -16,7 +16,7 @@
 // race (-race clean, 100/100), broken lock logic, lost WriteTargets, a
 // SQLite driver comparison bug, and wall-clock non-monotonicity (a direct
 // 2M-iteration probe of time.Now().UTC(), the exact call the affected
-// code makes, found zero backward jumps). Horacio's own hypothesis --
+// code makes, found zero backward jumps). Our own hypothesis --
 // that go test's own repeated-invocation harness, not the application
 // code, was the actual source of the failures -- was the one that
 // resolved it: this exact scenario, same hardware, same fix, driven by a

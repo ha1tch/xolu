@@ -296,8 +296,7 @@ def step_critrepro(ctx: Ctx):
     repeatedly here. 200 iterations, not 500 -- this step's own budget
     is release verification, not exhaustive stress testing; 200 was
     enough to distinguish the harness-caused ~33% rate from a genuine
-    fix cleanly in practice, and stress-scale iteration counts belong
-    to Horacio's own hardware (Part 1 §5.3), not this pipeline."""
+    fix cleanly in practice. (Part 1 §5.3), not this pipeline."""
     tool = Path("/tmp/critrepro")
     rc = ctx.run(["go", "build", "-o", str(tool), "./cmd/critrepro"], timeout=120)
     if rc != 0:

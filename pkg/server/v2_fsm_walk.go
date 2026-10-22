@@ -173,7 +173,7 @@ func (s *Server) handleFSMMachineWalk(w http.ResponseWriter, r *http.Request) {
 // constrained this way; the transition payload -- caller-supplied JSON,
 // decoded straight into an unconstrained map -- was not, confirmed
 // directly by checking the decode path before this was written, not
-// assumed. Horacio's own decision, stated plainly: key names with spaces
+// assumed.  The design decision is that  key names with spaces
 // (and by the same rule, anything else outside strict-identifier
 // characters) are illegal in xolu, full stop -- this is that decision
 // enforced at the one boundary that had been letting them through.

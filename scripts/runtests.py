@@ -138,9 +138,8 @@ def estimate_total_from_previous(json_path: Path) -> int | None:
     return n or None
 
 
-# Added 2026-08-07, same day as the estimator above -- Horacio's own
-# direct challenge to the first-run message ("no previous run found")
-# was fair: only the expensive, compile-based go test -list approach
+# Added 2026-08-07, same day as the estimator above.
+# Only the expensive, compile-based go test -list approach
 # had actually been measured and ruled out (76.7s). A plain source scan
 # for top-level Test function declarations was never tried, and once
 # measured is dramatically cheaper -- 0.02-0.14s, effectively free,

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ha1tch/tsqlparser/ast"
@@ -22,38 +23,72 @@ type EntityChecker interface {
 }
 
 // Validator validates OQL queries against schema
+//
+// A Validator is shared by every in-flight request: Engine.Execute and
+// Engine.ExecuteWithStore validate under the engine's shared (read) lock, so
+// any number of goroutines are inside Validate at once, and forStore hands
+// out copies of it. The entity cache therefore sits behind a pointer, so every
+// copy shares one cache and one set of locks, and it is never written in place
+// (see entityCache).
 type Validator struct {
 	schemaDir     string
-	entities      map[string]bool // Cached entity names
-	entityChecker EntityChecker   // Optional store-based checker
-	extra         EntityChecker   // Consulted last: the store a query runs on (see forStore)
-	emptyUnknown  bool            // XOT241: a well-formed name nothing was written to is empty, not QL004
+	cache         *entityCache  // Cached entity names, shared by forStore copies
+	entityChecker EntityChecker // Optional store-based checker
+	extra         EntityChecker // Consulted last: the store a query runs on (see forStore)
+	emptyUnknown  bool          // XOT241: a well-formed name nothing was written to is empty, not QL004
+}
+
+// entityCache is the Validator's entity-name cache and the locks around it.
+// It lives behind a pointer so that the per-request copy forStore makes
+// (nv := *v) shares it with the validator it came from, locks included; a
+// mutex embedded in Validator itself would be copied, silently splitting the
+// lock from the cache it guards.
+type entityCache struct {
+	// mu guards names, started and doneStart. The names map is immutable once
+	// published: a refresh builds a new map off to the side and swaps it in
+	// under mu, so a reader never sees a map that is being written. mu is held
+	// only for a lookup or the swap, never across a store or disk read.
+	mu    sync.RWMutex
+	names map[string]bool
+
+	// refreshMu serializes refreshes, so a burst of simultaneous cache misses
+	// does not become a burst of simultaneous store listings.
+	refreshMu sync.Mutex
+
+	// started counts refreshes begun; doneStart is the value of started when
+	// the most recently completed refresh began. A caller that missed the cache
+	// can skip its own refresh if one that began after its miss has already
+	// completed (see refreshAfterMiss). Guarded by mu.
+	started   uint64
+	doneStart uint64
+}
+
+// lookup reports whether name is cached, along with the refresh count at the
+// moment of the lookup (see refreshAfterMiss).
+func (c *entityCache) lookup(name string) (known bool, startedAt uint64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.names[name], c.started
 }
 
 // NewValidator creates a new validator that checks the filesystem
 func NewValidator(schemaDir string) *Validator {
-	v := &Validator{
-		schemaDir: schemaDir,
-		entities:  make(map[string]bool),
-	}
-	v.loadEntitiesFromDisk()
+	v := &Validator{schemaDir: schemaDir, cache: &entityCache{}}
+	v.RefreshEntities()
 	return v
 }
 
 // NewValidatorWithStore creates a validator that checks the store for entities
 func NewValidatorWithStore(schemaDir string, checker EntityChecker) *Validator {
-	v := &Validator{
-		schemaDir:     schemaDir,
-		entities:      make(map[string]bool),
-		entityChecker: checker,
-	}
+	v := &Validator{schemaDir: schemaDir, cache: &entityCache{}, entityChecker: checker}
 	v.RefreshEntities()
 	return v
 }
 
 // loadEntitiesFromDisk scans the schema directory for entity folders
-// and schema JSON files (e.g. "author.json" -> entity "author").
-func (v *Validator) loadEntitiesFromDisk() {
+// and schema JSON files (e.g. "author.json" -> entity "author"),
+// adding what it finds to into.
+func (v *Validator) loadEntitiesFromDisk(into map[string]bool) {
 	entries, err := os.ReadDir(v.schemaDir)
 	if err != nil {
 		return
@@ -61,18 +96,19 @@ func (v *Validator) loadEntitiesFromDisk() {
 
 	for _, entry := range entries {
 		if entry.IsDir() {
-			v.entities[entry.Name()] = true
+			into[entry.Name()] = true
 		} else if filepath.Ext(entry.Name()) == ".json" {
 			name := entry.Name()[:len(entry.Name())-5]
 			if name != "" {
-				v.entities[name] = true
+				into[name] = true
 			}
 		}
 	}
 }
 
-// loadEntitiesFromStore queries the store for entity types
-func (v *Validator) loadEntitiesFromStore() {
+// loadEntitiesFromStore queries the store for entity types, adding what it
+// finds to into. A store error leaves into untouched.
+func (v *Validator) loadEntitiesFromStore(into map[string]bool) {
 	if v.entityChecker == nil {
 		return
 	}
@@ -86,27 +122,69 @@ func (v *Validator) loadEntitiesFromStore() {
 	}
 
 	for _, entity := range entities {
-		v.entities[entity] = true
+		into[entity] = true
 	}
 }
 
 // RefreshEntities reloads the entity list.
 // If a store checker is configured, it queries the store.
 // Otherwise, it scans the filesystem.
+// Safe for concurrent use.
 func (v *Validator) RefreshEntities() {
-	v.entities = make(map[string]bool)
+	c := v.cache
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	v.refreshLocked()
+}
+
+// refreshLocked performs one refresh. The caller must hold cache.refreshMu.
+// The new entity set is assembled in a private map and published by swapping
+// it in, so concurrent readers only ever see a complete map.
+func (v *Validator) refreshLocked() {
+	c := v.cache
+	c.mu.Lock()
+	c.started++
+	started := c.started
+	c.mu.Unlock()
+
+	fresh := make(map[string]bool)
 	if v.entityChecker != nil {
-		v.loadEntitiesFromStore()
+		v.loadEntitiesFromStore(fresh)
 	}
 	// Always also check disk for schema definitions
-	v.loadEntitiesFromDisk()
+	v.loadEntitiesFromDisk(fresh)
+
+	c.mu.Lock()
+	c.names = fresh
+	c.doneStart = started
+	c.mu.Unlock()
+}
+
+// refreshAfterMiss refreshes the cache after a miss seen when the refresh
+// count was missedAt, unless a refresh that began after that miss has already
+// completed: such a refresh reflects the store as it stood after the miss, so
+// repeating it would only ask the same question again. Under a burst of misses
+// this turns N store listings into at most two.
+func (v *Validator) refreshAfterMiss(missedAt uint64) {
+	c := v.cache
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	c.mu.RLock()
+	covered := c.doneStart > missedAt
+	c.mu.RUnlock()
+	if !covered {
+		v.refreshLocked()
+	}
 }
 
 // forStore returns a validator that, besides everything this one already
 // accepts (its own store's entity types and the schemas on disk), also accepts
 // the entity types of the given store. A store that cannot list its entities,
 // or is the store this validator already uses, gets this validator back
-// unchanged. The returned value is a copy, so nothing is shared or locked.
+// unchanged. The returned value is a copy of the struct, but the copy shares
+// this one's entity cache, and the cache's locks, because the cache sits behind
+// a pointer; only extra differs.
 //
 // XOT229: names used to be checked only against the engine's default store, so
 // every tenant query for a type that exists only in that tenant's store failed
@@ -127,19 +205,21 @@ func (v *Validator) forStore(store interface{}) *Validator {
 // If the entity is not in the cache, it automatically refreshes
 // before returning false. This ensures newly created entity types are
 // recognised without requiring manual refresh.
+// Safe for concurrent use.
 func (v *Validator) EntityExists(name string) bool {
 	// Normalize name (lowercase, remove brackets/quotes)
 	name = normalizeEntityName(name)
 
 	// Check cache first
-	if v.entities[name] {
+	known, missedAt := v.cache.lookup(name)
+	if known {
 		return true
 	}
 
 	// Entity not in cache - refresh and retry
 	// This handles dynamically created entity types
-	v.RefreshEntities()
-	if v.entities[name] {
+	v.refreshAfterMiss(missedAt)
+	if known, _ := v.cache.lookup(name); known {
 		return true
 	}
 	// Last resort: the store the query runs on (XOT229).

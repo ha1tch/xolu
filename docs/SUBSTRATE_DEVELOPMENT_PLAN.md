@@ -529,7 +529,7 @@ degrades gracefully if interrupted, by construction.
 
 - **Solo bandwidth** is the plan's binding constraint; the mitigation
   is the wave structure itself (every boundary releasable) plus the
-  option of delegating bounded items (e.g. items 24–29) to Claude
+  option of delegating bounded items (e.g. items 24–29) to our team
   Code-style subcontracting.
 - **Paper meeting production**: waves 4–5 implement designs with zero
   production hours; the harnesses and CI are the defence, and the

@@ -3,10 +3,9 @@
 Updated: 2026-08-03
 
 This document is the operating manual for xolu's code-management
-tooling. It assumes **zero session context**: a developer — human, or a
-Claude session with no memory of previous ones — should be able to work
-the full development cycle from this page alone. Read it before
-touching the tree.
+tooling. It assumes **zero session context**: a developer should be 
+able to work the full development cycle from this page alone. 
+Read it before touching the tree.
 
 The tools live in `scripts/`. Every one of them supports `--help`, and
 every one follows two design invariants, adopted after repeated,
@@ -221,7 +220,7 @@ buttons — and was asked to persist that pattern for future sessions to
 reuse. What actually got written down (`TOOLING.md`, this section's
 own prior content) only documented the plain terminal tool, never the
 toggle behaviour itself — and the toggle *state* was never persisted
-anywhere at all, since claude.ai widgets cannot use `localStorage`.
+anywhere at all, since session  widgets cannot use `localStorage`.
 The widget's checkboxes lived exactly as long as that one chat turn.
 Found and corrected 2026-08-17 (XOT207): visibility is now real DATA,
 not a rendering-layer afterthought.

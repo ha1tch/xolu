@@ -229,8 +229,8 @@ func TestWalkAdversarial_WalkAfterDefinitionDeleted(t *testing.T) {
 // T-SQL, where '...' is a string literal and "..." is a quoted
 // IDENTIFIER -- the opposite of JSON/JavaScript convention. A guard
 // written payload.x != "" parses without error but silently compares
-// against nothing, never what the author meant. Horacio's own
-// decision, directly relevant to why auto-correcting instead of
+// against nothing, never what the author meant.
+// The decision we made is relevant to why auto-correcting instead of
 // warning was rejected: key names with spaces (and anything else
 // outside strict-identifier characters) are illegal in xolu, closing
 // the one legitimate reason a double-quoted identifier could ever

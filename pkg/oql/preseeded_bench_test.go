@@ -13,7 +13,7 @@ import (
 	"github.com/ha1tch/xolu/pkg/storage"
 )
 
-const preseededDB = "/home/claude/bench_1m.db"
+const preseededDB = "./bench_1m.db"
 
 func openPreseeded(b *testing.B) *benchEnv {
 	b.Helper()

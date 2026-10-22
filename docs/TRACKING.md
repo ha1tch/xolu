@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.30.43-pre1_fixes01
-Last reviewed: 2026-10-06
+Version: 0.30.44
+Last reviewed: 2026-10-22
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -80,7 +80,7 @@ item's Trigger line.
 | T-134 | obj patterns: the full §4a mechanism deferred out of T-124 (obj-01-rest-api.md §4a, obj-00-design.md §7a) -- def/extract/list/get/delete endpoints, pattern/pattern_after wiring into attach, pattern/pattern_id/pattern_deleted GET fields, XOLU-OBJ013 reachability | obj | P3 | ☐ | none directly |
 | T-137 | tsqlparser chained method-call access (`@FSM.state(1).name`) drops the base call entirely -- structural parser defect, not a display bug | oql | P3 | ☐ | After: none. Relevant to: whichever wave-8 provider first needs chained access (not T-76, not scoped this wave). |
 | T-148 | dispatchEvent fires unconditionally on every v1 CRUD write, regardless of APIV2Enabled -- eventStore() never checks it, so any v1-only deployment logs a WARN on every single write (event_defs genuinely doesn't exist until v2 is on) | server | P3 | ☐ | — |
-| XOT196 | New repoman-descended tool, scripts/str_replace_extended.py: format-aware, journaled, base64-payload substitution -- built to retire the failure class that direct str_replace/sed/awk substitution invites (shell-quoting corruption, edits landing without a syntax check), following a real gap found and fixed during the tool's own build (a balanced escape-and-reenter injection the first delimiter check missed) | tooling | P2 | ◐ | After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, Horacio applying the proposed working-agreement and skill amendments. |
+| XOT196 | New repoman-descended tool, scripts/str_replace_extended.py: format-aware, journaled, base64-payload substitution -- built to retire the failure class that direct str_replace/sed/awk substitution invites (shell-quoting corruption, edits landing without a syntax check), following a real gap found and fixed during the tool's own build (a balanced escape-and-reenter injection the first delimiter check missed) | tooling | P2 | ◐ | After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, our team applying the proposed working-agreement and skill amendments. |
 | XOT197 | /cron item 1: storage, def/job registration, prototype-clone, capability introspection -- the def is the prototype, the job the armed clone; verb capabilities (cancellable, progress-reporting) discovered by interface assertion at def time and recorded on the def, never self-declared | cron | P2 | ☐ | Blocks: every other /cron item. After: none (design decisions cron-primitive.md §10.2/§10.3 should be settled before item XOT198 starts, not before this one). |
 | XOT198 | /cron item 2: recurrence rule object, IANA zones, DST policy, scheduler loop, tick plane, missed-fire + overlap policy, suppression-streak counter, watchdog shape + reset -- the deep pit and the racy loop, deliberately one item so the tick plane and the rules that decide which ticks chime are built and tested together | cron | P2 | ☐ | After: item XOT197. Blocks: items XOT199, XOT201, XOT202. Prerequisite decisions: cron-primitive.md §10.2 (recurrence grammar) and §10.3 (DST enum) MUST be settled before this item starts. |
 | XOT199 | /cron item 3: the chime -- `cron.chime` event type into EVENT_MODEL.md's closed set, shape discriminated in event_latch_source, payload carrying due-instant/def/job/shape and originally-due for catch-up ticks; unconditional on every non-suppressed tick regardless of T-07 | cron | P2 | ☐ | After: item XOT198. Blocks: item XOT201 (job control's info reads chimes alongside ticks). Not blocked by T-07 -- designed around it (cron-primitive.md §6). |
@@ -101,6 +101,9 @@ item's Trigger line.
 | XOT247 | `$now` is not persisted across a restart, and `committed_at` is returned only when a commit sets `templates` | storage-config | P4 | ☐ | After: none. |
 | XOT248 | The default store's /ts must be provisioned by a client call; there is no start-up or lazy provisioning | ts | P4 | ☐ | After: none. |
 | XOT249 | The /ts leg of /commit is not atomic with the SQLite transaction: a failed undo leaves an orphan event (XOLU-CM016) | ts | P3 | ☐ | After: none. |
+| XOT251 | A failed or timed-out ListEntities replaces the OQL validator's entity cache with disk-only entities, so known store entities read as unknown | oql | P2 | ☐ | After: none. |
+| XOT252 | Server.riRegistry is reassigned at runtime while the delete path reads it, with no lock | server | P2 | ☐ | After: none. |
+| XOT253 | release.py's c04dcheck step fails under Go 1.27: the analyzer's pinned x/tools cannot read Go 1.27 export data | tooling | P3 | ☐ | After: none. |
 
 ---
 
@@ -239,7 +242,7 @@ item's Trigger line.
     already-spec'd `iolu report usage --tenant` command independent of
     billing -- but "buildable and sensible" is not the same claim as
     "requested," and only the weaker claim holds here.
-  - **Not decided here, deliberately -- pending Horacio's call:**
+  - **Not decided here, deliberately -- pending our team's call:**
     whether to (a) leave T-114 as filed, (b) narrow its scope to generic
     API-usage counting only (drop the billing framing, keep the fleet-
     report tie-in), (c) mark it explicitly parked pending a real
@@ -879,16 +882,16 @@ Theme: tooling · Priority: P4 · Status: ◐ · Blocks/after: After: none. Neit
 
 ### XOT196. New repoman-descended tool, scripts/str_replace_extended.py: format-aware, journaled, base64-payload substitution -- built to retire the failure class that direct str_replace/sed/awk substitution invites (shell-quoting corruption, edits landing without a syntax check), following a real gap found and fixed during the tool's own build (a balanced escape-and-reenter injection the first delimiter check missed)
 
-Theme: tooling · Priority: P2 · Status: ◐ · Blocks/after: After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, Horacio applying the proposed working-agreement and skill amendments.
+Theme: tooling · Priority: P2 · Status: ◐ · Blocks/after: After: none. Pending: upstream sync to github.com/ha1tch/repoman (T-56), repoman's own selftest.py extension, our team applying the proposed working-agreement and skill amendments.
 
-- **Trigger:** direct request, following two edit mistakes this session (a shell-quoting corruption of a comment's own escape sequences; a duplicated line from an overlapping replacement span) plus the project's own longer-standing recorded incidents in the same class (the `` `+expr+` `` inside `"..."` corruption pattern named in the working agreement's own §7.4). Requested design: a `str_replace`-shaped tool whose search/replace content travels as base64-encoded JSON, never as a CLI argument; format-aware; generates collision-proof markers; and something Claude is actually steered toward using instead of the built-in `str_replace`, `sed`, or `awk`.
+- **Trigger:** direct request, following two edit mistakes this session (a shell-quoting corruption of a comment's own escape sequences; a duplicated line from an overlapping replacement span) plus the project's own longer-standing recorded incidents in the same class (the `` `+expr+` `` inside `"..."` corruption pattern named in the working agreement's own §7.4). Requested design: a `str_replace`-shaped tool whose search/replace content travels as base64-encoded JSON, never as a CLI argument; format-aware; generates collision-proof markers; and something our team is actually steered toward using instead of the built-in `str_replace`, `sed`, or `awk`.
 - **Design proposed first, approved, then implemented exactly as proposed** -- payload schema, refusal classes, per-format syntax validators, and the enforcement-layer question (a tool cannot be un-installed from the harness; steering has to make the right tool the reflexively cheap one, not attempt to remove the wrong ones) were all laid out and agreed before any code was written.
 - **`scripts/roles.py` extended**, not forked: python/json/yaml/shell classifiers added alongside the existing go/md ones, wired into the same `classify()` dispatch `ed.py` already depends on -- one classifier, two consumers, no drift between them. Each new classifier's own docstring documents its known heuristic limitations honestly (YAML block scalars, shell heredocs, Python f-string interiors) rather than silently misclassifying them without a record.
 - **`scripts/str_replace_extended.py` built**: JSON payload (stdin or file) with base64-encoded UTF-8 search/replace content; mandatory `expect` count and `roles` assertion (no silent defaults); Unicode-normalization-mismatch detection distinct from a genuine zero-match; a two-part delimiter-integrity precheck (below); per-format post-apply syntax validation (`gofmt -e`, `ast.parse`, `json.loads`, a YAML/Markdown structural lint, `bash -n`) with automatic rollback on failure; atomic multi-op/multi-file batching by default; collision-checked marker generation (`⟦RM:...⟧`, U+27E6/U+27E7) with a sweep op; and journal integration through `ed.py`'s own WAL (`ed.record`/`ed.load_journal`) -- one undo history for both tools, not two.
 - **A real design gap found and fixed during the tool's own build, not assumed correct:** the first delimiter-integrity implementation only sampled syntactic role *after* a replacement, comparing original-vs-new at increasing offsets. Selftest case 5 (`hello" + injected + "` replacing `hello` inside a Go `"..."` string) exposed that this misses a *balanced* escape-and-reenter -- the injected content opens and recloses the string with an even number of quotes, so parity (and therefore role) at every point *after* the replacement matches perfectly even though unescaped code was injected *inside* it. Traced precisely (a standalone script printing the role trajectory character-by-character through the replacement's own span, not guessed at) before fixing. Fixed with a second check: when the edit starts inside a content role (string/comment, any format), every offset within the replacement's own interior must classify as that same role throughout -- any deviation refuses. Verified the fix doesn't over-correct into false positives: a companion selftest case confirms inserting a complete, self-balanced string literal into ordinary code is *not* refused, since that check only applies when the edit starts inside a content role to begin with.
 - **18 selftest paths, all green**, covering: basic sub, count-mismatch, missing-expect/missing-roles, role-mismatch with real census, the delimiter-break case above (both the interior and the after-tail variant), syntax-check-failure-triggers-rollback, dry-run leaves disk untouched, marker generation/uniqueness/sweep, normalization-mismatch detection (without ever silently auto-normalizing), all four new format classifiers each producing a clean sub plus a passing validator, `ed.py undo` reverting a `str_replace_extended`-made edit, an atomic batch rolling back an already-staged change in the same file when a later op in the same batch fails its syntax check, the false-positive guard above, and a direct regression test for the original session incident (tabs/newlines/apostrophes landing byte-exact, confirmed by asserting no literal backslash-n or backslash-t sequence appears on disk).
 - **Dogfooded on a real edit, not just synthetic selftest cases:** used to add its own row to `docs/TOOLING.md`'s file-inventory table, authored via the documented library path (`from str_replace_extended import apply_payload`, content as ordinary Python string literals, base64-encoded by the driver itself -- no shell one-liner at any point). Confirmed in `ed.py log` as a normal journaled transaction alongside every other edit this session.
-- **Enforcement is procedural, not structural** -- the tool cannot be removed from the harness, so three layers were used to make the correct tool the reflexively easy one: (1) a memory edit steering future sessions toward it and away from the built-in `str_replace`/`sed`/`awk` with no exception; (2) a proposed working-agreement amendment (Part 1 §6.2/§6.3's tool-precedence ladder), presented to Horacio as exact replacement text since Claude cannot edit `userPreferences` directly; (3) a proposed `repoman-tools` skill update with the same content, presented as a deliverable file since `/mnt/skills/user/` is read-only to this session. None of the three claim to make bypass impossible -- only procedurally discouraged and, for (1), immediately actionable.
+- **Enforcement is procedural, not structural** -- the tool cannot be removed from the harness, so three layers were used to make the correct tool the reflexively easy one: (1) a memory edit steering future sessions toward it and away from the built-in `str_replace`/`sed`/`awk` with no exception; (2) a proposed working-agreement amendment (Part 1 §6.2/§6.3's tool-precedence ladder), presented to our team as exact replacement text since our team cannot edit `userPreferences` directly; (3) a proposed `repoman-tools` skill update with the same content, presented as a deliverable file since `/mnt/skills/user/` is read-only to this session. None of the three claim to make bypass impossible -- only procedurally discouraged and, for (1), immediately actionable.
 - **Not yet done:** upstreaming to `github.com/ha1tch/repoman` itself -- built and verified in xolu's own in-repo copy first (this repository's own scripts are authoritative pending T-56's migration), matching how every other repoman-descended tool in this tree has been introduced. Also not done: extending repoman's own top-level `selftest.py` (18 checks) with these new paths, since that file lives in the separate repoman repository, not this one.
 
 ### XOT215. roles.py's Go block-comment detection (_go_role) is a naive substring count of '/*'/'*/' across the whole file, not comment/string-aware -- a literal '/*' inside an ordinary // line comment (e.g. a URL pattern like /api/v2/cal/*) is misread as an unclosed block comment, misclassifying every line after it as go-comment for the rest of the file
@@ -900,6 +903,14 @@ Theme: tooling · Priority: P3 · Status: ☐ · Blocks/after: After: none.
 - **Scope of the real fix (not done here):** `_strip_go_strings` already exists and does the right thing for the `//` check just above it in the same function -- the block-comment counting pass needs the equivalent treatment, additionally stripping `//`-comment tails (to end of each line) before counting `/*`/`*/`, not just quoted strings.
 - **Worked around for this session's own edit** via `ed.py` (span-based, no role dependency) rather than blocked on this fix.
 - Not started -- found and filed, not yet fixed in either repoman (the canonical source) or xolu's own migrated copy (XOT208).
+
+### XOT253. release.py's c04dcheck step fails under Go 1.27: the analyzer's pinned x/tools cannot read Go 1.27 export data
+
+Theme: tooling · Priority: P3 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** `release.py`'s `c04dcheck` step fails under Go 1.27.3: `c04dcheck not clean (rc=1): -: reading <go build cache entry>: internal error in importing "math/bits" (cannot decode "math/bits", export data version 5 is greater than maximum supported version 4)`. The analyzer's module pins `golang.org/x/tools v0.48.0`, whose export-data reader supports up to version 4; Go 1.27 writes version 5. The same step passes under Go 1.26.5, the toolchain `go.mod` and CI use (`go-version-file: go.mod`). The step treats any output as a failure, so the guard cannot be disarmed by a loading error; that is working as designed, and it means a release run under Go 1.27 cannot pass this guard.
+- **Fix to decide:** bump `golang.org/x/tools` in `tools/c04dcheck/go.mod` to a release whose reader handles Go 1.27 export data before the project moves to Go 1.27 (which release does is not verified), or state Go 1.26.x as the toolchain for the release run in `docs/TOOLING.md`.
+- **Source:** found cutting the 0.30.44 checkpoint with Go 1.27.3; the run was completed under `GOTOOLCHAIN=go1.26.5`.
 
 ## iolu
 
@@ -1106,6 +1117,14 @@ Theme: oql · Priority: P4 · Status: ☐ · Blocks/after: After: none.
 - **Fix to decide:** expose the calibrated thresholds (`/health` or `/version`), allow pinning them through configuration for tests, and log them at INFO instead of debug.
 - **Source:** observed while reproducing XOT228.
 
+### XOT251. A failed or timed-out ListEntities replaces the OQL validator's entity cache with disk-only entities, so known store entities read as unknown
+
+Theme: oql · Priority: P2 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** a failed or timed-out `ListEntities` (10s timeout) replaces the validator's entity cache with disk-only entities. Confirmed with a throwaway test: after one failed refresh, a previously known store entity reads as unknown, so validation rejects queries on it until the next successful refresh.
+- **Fix to decide:** on a store error, keep the previously loaded store-derived entities and publish nothing new. Either way a failed listing should not make a known type look nonexistent.
+- **Source:** found while fixing XOT250, which kept this behavior unchanged.
+
 ## validation
 
 ### T-91. pkg/validation.JSONSchemaValidator's own doc comment claims Loose mode by default, but its actual code uses queryfy.Strict -- a real, pre-existing discrepancy found while adversarial-testing dxp/txn's bindings validation, not this session's to fix
@@ -1174,6 +1193,14 @@ Theme: server · Priority: P3 · Status: ☐
 - **Not fixed this session:** worked around at the deployment-config level (the CRM launcher sets `XOLU_API_V2_ENABLED=true`, which makes `event_defs` genuinely exist), but the underlying gap in `eventStore()` is untouched. Any v1-only xolu deployment still hits this.
 - **Correct fix, not attempted here:** `eventStore()` should check `s.config.APIV2Enabled` and return `(nil, false)` immediately when it's false, short-circuiting `dispatchEvent` before it ever reaches `matchEventDefs`'s query -- avoiding both the wasted query and the log noise, for a deployment that has no events subsystem to dispatch to in the first place.
 
+
+### XOT252. Server.riRegistry is reassigned at runtime while the delete path reads it, with no lock
+
+Theme: server · Priority: P2 · Status: ☐ · Blocks/after: After: none.
+
+- **Trigger:** `Server.riRegistry` is reassigned by `rebuildRIRegistry` (`handlers.go:1748` and `1764`) at runtime, from `handleCreateSchema` (`handlers.go:1394` and `1407`) and `applySchemaAndRegister` (`schema_promotion_handlers.go:127`), while the delete path reads it (`handlers.go:1795` to `1835`). No lock guards the field in the code read. It is a pointer swap of a registry built privately, not a shared map write, so it cannot produce the XOT250 crash, but it is a data race. Not yet demonstrated by a test.
+- **Fix to decide:** guard the field with an `RWMutex`, or hold it as an `atomic.Pointer[refintegrity.Registry]`.
+- **Source:** found while fixing XOT250.
 
 ## sulpher
 

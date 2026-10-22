@@ -30,9 +30,9 @@ Typical use:
 
     # from a fresh session, checkpoint uploaded
     python3 xolu/scripts/baseline.py --zip /mnt/user-data/uploads/xolu-v0.16.22-checkpoint.zip \
-        --dir /home/claude/xolu
+        --dir $HOME/xolu
     # tree already unpacked
-    python3 scripts/baseline.py --tree /home/claude/xolu
+    python3 scripts/baseline.py --tree $HOME/xolu
 
 Prerequisites: Go toolchain on PATH and the module cache populated
 (`go mod download`); baseline verifies the tree, it does not install

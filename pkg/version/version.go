@@ -6,4 +6,4 @@ package version
 
 // Version is the current version of xolu.
 // This MUST match the contents of the VERSION file.
-const Version = "0.30.43-pre1_fixes01"
+const Version = "0.30.44"
