@@ -125,6 +125,14 @@ section below.
 |----------|---------|-------------|
 | `XOLU_FULLTEXT_ENABLED` | `false` | Enable FTS5 full-text search (SQLite only) |
 | `XOLU_CASCADING_DELETE` | `false` | Delete referencing entities on delete |
+| `XOLU_OQL_UNKNOWN_ENTITY` | `error` | What an OQL `SELECT`, `JOIN`, `UPDATE` or `DELETE` naming an entity type with no rows answers: `error` (`XOLU-QL004`) or `empty` (an empty result). `INSERT` is unchanged. |
+| `XOLU_TS_DEFAULT_PROVISION` | `off` | How the default store's `/ts` gets provisioned: `off` (a client calls `POST /ts/provision`), `startup` (provisioned when the server starts) or `lazy` (the first `/ts` request on the default store provisions it). Tenants are never provisioned implicitly. |
+| `XOLU_COMMIT_INSTANT_PERSIST` | `true` | Record the last `$now` in the commit's transaction and seed the generator from it when a store opens, so `$now` keeps increasing across a restart even if the wall clock stepped back. |
+| `XOLU_COMMIT_CLOCK_ALWAYS` | `false` | Return `clock.now` in every `/commit` response, not only when `templates` was set. Without templates it is taken after the commit, not carried by any row. |
+| `XOLU_OQL_BLOB_THRESHOLD` | `0` | Pin the row count at which blob-entity queries are pushed to SQL. `0` keeps the performance profile's value. |
+| `XOLU_OQL_NONCOVERING_THRESHOLD` | `0` | Pin the push-down threshold for non-covering aggregate scans. `0` keeps the profile's value. |
+| `XOLU_OQL_TEMPBTREE1_THRESHOLD` | `0` | Pin the push-down threshold for queries needing one temporary B-tree. `0` keeps the profile's value. |
+| `XOLU_OQL_TEMPBTREE2_THRESHOLD` | `0` | Pin the push-down threshold for queries needing two or more temporary B-trees. `0` keeps the profile's value. |
 | `XOLU_REF_EMBED_DEPTH` | `3` | Default reference embedding depth |
 | `XOLU_MAX_EMBED_DEPTH` | `10` | Maximum allowed embed depth |
 | `XOLU_MAX_ENTITY_SIZE` | `1048576` | Maximum entity size in bytes |

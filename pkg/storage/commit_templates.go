@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,6 +74,71 @@ func NextCommitInstant() string {
 	}
 	commitClock.last = ns
 	return time.Unix(0, ns).UTC().Format(CommitInstantLayout)
+}
+
+// commitInstantPersist decides whether commit instants are made durable (XOT247).
+// It is on unless the server is configured otherwise (XOLU_COMMIT_INSTANT_PERSIST).
+var commitInstantPersist atomic.Bool
+
+func init() { commitInstantPersist.Store(true) }
+
+// SetCommitInstantPersistence turns the durable record of commit instants on or
+// off. Call it at startup, before the first store is opened.
+func SetCommitInstantPersistence(on bool) { commitInstantPersist.Store(on) }
+
+// SeedCommitInstant raises the process's commit clock to at least ns (Unix
+// nanoseconds), so the next instant is later than every instant a previous
+// process issued and recorded. It never lowers the clock.
+func SeedCommitInstant(ns int64) {
+	commitClock.mu.Lock()
+	defer commitClock.mu.Unlock()
+	if ns > commitClock.last {
+		commitClock.last = ns
+	}
+}
+
+// persistCommitInstant records now as the last commit instant of this store,
+// inside the commit's transaction (XOT247). The table is created on first use,
+// like commit_seq. An instant that does not parse is not recorded; it is never a
+// reason to fail a commit.
+func (s *SQLiteStore) persistCommitInstant(ctx context.Context, tx *sql.Tx, now string) error {
+	t, err := time.Parse(CommitInstantLayout, now)
+	if err != nil {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS commit_clock (
+		tenant_id INTEGER NOT NULL PRIMARY KEY,
+		last_ns   INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("commit_clock: create table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO commit_clock (tenant_id, last_ns) VALUES (?, ?)
+		ON CONFLICT(tenant_id) DO UPDATE SET last_ns = MAX(last_ns, excluded.last_ns)`,
+		s.config.TenantID, t.UnixNano()); err != nil {
+		return fmt.Errorf("commit_clock: record: %w", err)
+	}
+	return nil
+}
+
+// seedCommitInstant reads the last recorded instant of this store, if any, and
+// raises the process's commit clock to it. Called when the store opens, which is
+// before any request can take an instant. Best effort: no table or no row means
+// nothing was ever recorded.
+func (s *SQLiteStore) seedCommitInstant(ctx context.Context) {
+	if !commitInstantPersist.Load() {
+		return
+	}
+	var name string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'commit_clock'`).Scan(&name); err != nil {
+		return
+	}
+	var last sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(last_ns) FROM commit_clock WHERE tenant_id = ?`, s.config.TenantID).Scan(&last); err != nil || !last.Valid {
+		return
+	}
+	SeedCommitInstant(last.Int64)
 }
 
 // TemplateValues are the values the tokens stand for. A token whose Has flag is

@@ -66,6 +66,7 @@ type Server struct {
 	sulpherJobs       *sulpher.JobManager
 	tenantSulpherJobs sync.Map // uint16 -> *sulpher.JobManager; lazily initialised
 	oqlJobs           *oql.JobManager
+	oqlPlanner        *oql.HardwareProfile // thresholds in force (XOT246); shown by /version
 	tenantExportJobs  *tenantexport.JobManager
 	promoteJobs       *PromoteJobManager
 	rateLimiter       *xoluMiddleware.RateLimiter
@@ -670,12 +671,14 @@ func New(
 		MaxRows:     cfg.QueryMaxRows,
 		MaxScanRows: cfg.QueryMaxScanRows,
 	})
+	oqlEngine.SetUnknownEntityMode(cfg.OQLUnknownEntity)
 
 	// Select hardware profile for query planner thresholds.
 	profileName := strings.ToLower(cfg.PerformanceProfile)
 	if profileName == "" {
 		profileName = "auto"
 	}
+	effective := oql.DefaultProfile() // the thresholds in force, for the INFO line and /version (XOT246)
 	switch profileName {
 	case "auto":
 		// Run startup micro-benchmark to calibrate thresholds.
@@ -685,16 +688,47 @@ func New(
 				logger.Warn().Err(err).Msg("Hardware calibration failed, using VPS defaults")
 			} else {
 				oqlEngine.SetProfile(profile)
+				effective = *profile
 			}
 		}
 	case "edge", "vps", "dedicated":
 		if profile := oql.ProfileByName(profileName); profile != nil {
 			oqlEngine.SetProfile(profile)
+			effective = *profile
 			logger.Info().Str("profile", profileName).Msg("Using hardware profile")
 		}
 	default:
 		logger.Warn().Str("profile", cfg.PerformanceProfile).Msg("Unknown performance profile, using VPS defaults")
 	}
+
+	// XOT246: exact pins on top of whichever profile was chosen. The same build
+	// pushed filters down at different table sizes on different starts, because
+	// the calibrated thresholds differ from start to start; pinning them makes a
+	// size-dependent defect reproducible. Zero keeps the profile's value.
+	if cfg.OQLBlobThreshold > 0 || cfg.OQLNonCoveringThreshold > 0 || cfg.OQLTempBTree1Threshold > 0 || cfg.OQLTempBTree2Threshold > 0 {
+		if cfg.OQLBlobThreshold > 0 {
+			effective.BlobPushThreshold = cfg.OQLBlobThreshold
+		}
+		if cfg.OQLNonCoveringThreshold > 0 {
+			effective.NonCoveringThreshold = cfg.OQLNonCoveringThreshold
+		}
+		if cfg.OQLTempBTree1Threshold > 0 {
+			effective.TempBTree1Threshold = cfg.OQLTempBTree1Threshold
+		}
+		if cfg.OQLTempBTree2Threshold > 0 {
+			effective.TempBTree2Threshold = cfg.OQLTempBTree2Threshold
+		}
+		effective.Name = "custom"
+		oqlEngine.SetProfile(&effective)
+	}
+	s.oqlPlanner = &effective
+	logger.Info().
+		Str("profile", effective.Name).
+		Int("blobThreshold", effective.BlobPushThreshold).
+		Int("nonCoveringThreshold", effective.NonCoveringThreshold).
+		Int("tempBTree1Threshold", effective.TempBTree1Threshold).
+		Int("tempBTree2Threshold", effective.TempBTree2Threshold).
+		Msg("OQL planner thresholds in force")
 
 	s.oqlJobs = oql.NewJobManager(oqlEngine, time.Duration(cfg.AsyncJobRetentionTTL)*time.Second)
 	if cfg.QueryTimeout > 0 {
@@ -753,6 +787,15 @@ func New(
 			logger.Error().Err(err).Msg("Failed to initialise timeseries manager")
 		} else {
 			s.tsManager = tsm
+			// XOT248: provision the default store's /ts at start when asked to. "_default"
+			// is the label HandleTSProvision gives the unscoped route.
+			if cfg.TSDefaultProvision == "startup" {
+				if err := s.tsManager.Provision(context.Background(), 0, "_default"); err != nil {
+					logger.Error().Err(err).Msg("Failed to provision timeseries for the default store")
+				} else {
+					logger.Info().Msg("Timeseries provisioned for the default store (XOLU_TS_DEFAULT_PROVISION=startup)")
+				}
+			}
 			if cfg.TSRetentionEnabled && cfg.TSCompactionIntervalSecs > 0 {
 				interval := time.Duration(cfg.TSCompactionIntervalSecs) * time.Second
 				sweeper := timeseries.NewRetentionWorker(tsm, interval)
@@ -1454,10 +1497,20 @@ var Capabilities = []string{
 
 // handleVersion returns the server version and its capabilities.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+	body := map[string]interface{}{
 		"version":      version.Version,
 		"capabilities": Capabilities,
-	})
+	}
+	if p := s.oqlPlanner; p != nil {
+		body["oql_planner"] = map[string]interface{}{
+			"profile":                p.Name,
+			"blob_threshold":         p.BlobPushThreshold,
+			"non_covering_threshold": p.NonCoveringThreshold,
+			"temp_btree1_threshold":  p.TempBTree1Threshold,
+			"temp_btree2_threshold":  p.TempBTree2Threshold,
+		}
+	}
+	s.writeJSON(w, http.StatusOK, body)
 }
 
 // handleReady returns readiness status for Kubernetes-style probes.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type Validator struct {
 	entities      map[string]bool // Cached entity names
 	entityChecker EntityChecker   // Optional store-based checker
 	extra         EntityChecker   // Consulted last: the store a query runs on (see forStore)
+	emptyUnknown  bool            // XOT241: a well-formed name nothing was written to is empty, not QL004
 }
 
 // NewValidator creates a new validator that checks the filesystem
@@ -155,6 +157,27 @@ func (v *Validator) EntityExists(name string) bool {
 	return false
 }
 
+// entityIdentRe is the shape of an entity type name as normalizeEntityName
+// returns it. Only the "empty" unknown-entity mode uses it.
+var entityIdentRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// SetUnknownEntitiesEmpty chooses what a query naming an entity type that is not
+// in the store answers. false (the default) is the error "entity does not exist"
+// (XOLU-QL004); true is an empty result, for any well-formed name (XOT241). Call
+// it once at startup, before the validator is shared.
+func (v *Validator) SetUnknownEntitiesEmpty(on bool) { v.emptyUnknown = on }
+
+// entityKnown is EntityExists, except that in the "empty" mode a well-formed
+// name that nothing has been written to is accepted as well: xolu creates types
+// on first write, so "does not exist" and "has no rows" are the same state.
+// INSERT does not use it; creating a type through OQL is a separate question.
+func (v *Validator) entityKnown(name string) bool {
+	if v.EntityExists(name) {
+		return true
+	}
+	return v.emptyUnknown && entityIdentRe.MatchString(normalizeEntityName(name))
+}
+
 // Validate validates an AST statement
 // maxDerivedTableDepth caps how deeply a derived table (subquery in
 // FROM) may nest inside another derived table. Enforced once, upfront,
@@ -242,7 +265,7 @@ func (v *Validator) validateSelect(s *ast.SelectStatement) error {
 	case *ast.TableName:
 		// Single-table SELECT — existing path.
 		entity := normalizeEntityName(ref.Name.String())
-		if !v.EntityExists(entity) {
+		if !v.entityKnown(entity) {
 			return fmt.Errorf("entity '%s' does not exist", entity)
 		}
 
@@ -405,11 +428,11 @@ func (v *Validator) validateJoinClause(jc *ast.JoinClause) error {
 	}
 
 	leftEntity := normalizeEntityName(leftTable.Name.String())
-	if !v.EntityExists(leftEntity) {
+	if !v.entityKnown(leftEntity) {
 		return fmt.Errorf("entity '%s' does not exist", leftEntity)
 	}
 	rightEntity := normalizeEntityName(rightTable.Name.String())
-	if !v.EntityExists(rightEntity) {
+	if !v.entityKnown(rightEntity) {
 		return fmt.Errorf("entity '%s' does not exist", rightEntity)
 	}
 
@@ -463,7 +486,7 @@ func (v *Validator) validateUpdate(s *ast.UpdateStatement) error {
 	}
 
 	entity := normalizeEntityName(s.Table.String())
-	if !v.EntityExists(entity) {
+	if !v.entityKnown(entity) {
 		return fmt.Errorf("entity '%s' does not exist", entity)
 	}
 
@@ -493,7 +516,7 @@ func (v *Validator) validateDelete(s *ast.DeleteStatement) error {
 	}
 
 	entity = normalizeEntityName(entity)
-	if !v.EntityExists(entity) {
+	if !v.entityKnown(entity) {
 		return fmt.Errorf("entity '%s' does not exist", entity)
 	}
 

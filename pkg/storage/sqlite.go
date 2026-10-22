@@ -747,6 +747,7 @@ func (s *SQLiteStore) initialize(ctx context.Context) error {
 		}
 	}
 
+	s.seedCommitInstant(ctx) // XOT247
 	return nil
 }
 
@@ -2345,6 +2346,11 @@ func (s *SQLiteStore) commitInner(ctx context.Context, req CommitRequest) (Commi
 		}
 		tv.Now, tv.HasNow = now, true
 		clock = &CommitClock{Now: now}
+		if commitInstantPersist.Load() {
+			if perr := s.persistCommitInstant(ctx, tx, now); perr != nil {
+				return CommitResult{}, perr
+			}
+		}
 		if used["$commit_seq"] {
 			seq, serr := s.nextCommitSeq(ctx, tx)
 			if serr != nil {

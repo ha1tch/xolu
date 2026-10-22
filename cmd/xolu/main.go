@@ -204,6 +204,10 @@ func main() {
 	}
 
 	// Initialize storage
+	// XOT247: decide whether commit instants are made durable before any store opens,
+	// because each store seeds the commit clock from its own record when it opens.
+	storage.SetCommitInstantPersistence(cfg.CommitInstantPersist)
+
 	store, err := storage.NewStoreFromConfig(storage.StoreConfig{
 		Type:                      cfg.StorageType,
 		BaseDir:                   cfg.BaseDir,
@@ -919,6 +923,13 @@ func printEnvVars() {
 	fmt.Println("    XOLU_S3_ENABLED              Enable S3-compatible blob API")
 	fmt.Println("    XOLU_DYNCONFIG_ENABLED       Enable dynamic config system")
 	fmt.Println("    XOLU_CASCADING_DELETE        Enable cascading entity deletion")
+	fmt.Println("    XOLU_OQL_UNKNOWN_ENTITY      OQL on a type with no rows: error (default) or empty")
+	fmt.Println("    XOLU_TS_DEFAULT_PROVISION    Provision the default store's /ts: off (default), startup or lazy")
+	fmt.Println("    XOLU_COMMIT_INSTANT_PERSIST  Keep $now increasing across restarts (default true)")
+	fmt.Println("    XOLU_COMMIT_CLOCK_ALWAYS     Put clock in every /commit response (default false)")
+	fmt.Println("    XOLU_OQL_BLOB_THRESHOLD      Pin the OQL blob push-down row threshold (0 = profile)")
+	fmt.Println("    XOLU_OQL_NONCOVERING_THRESHOLD, XOLU_OQL_TEMPBTREE1_THRESHOLD, XOLU_OQL_TEMPBTREE2_THRESHOLD")
+	fmt.Println("                                 Pin the other OQL push-down thresholds (0 = profile)")
 	fmt.Println()
 	fmt.Println("  Startup output")
 	fmt.Println("    XOLU_NO_ASCII                Suppress ASCII art (--no-ascii)")

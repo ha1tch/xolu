@@ -135,6 +135,32 @@ type Config struct {
 	MaxCascadeDeletions int
 	MaxCascadeWork      int
 
+	// OQL entity checks and planner pins (XOT241, XOT246).
+	// OQLUnknownEntity is what a query naming an entity type that is not in the
+	// store answers: "error" (XOLU-QL004, the default) or "empty" (an empty result).
+	OQLUnknownEntity string
+	// The push-down thresholds. Zero keeps the value of the performance profile in
+	// force; a positive value pins it, for reproducing a size-dependent defect.
+	OQLBlobThreshold        int
+	OQLNonCoveringThreshold int
+	OQLTempBTree1Threshold  int
+	OQLTempBTree2Threshold  int
+
+	// Commit clock (XOT247).
+	// CommitInstantPersist records the last commit instant in the commit's own
+	// transaction and seeds the generator from it when a store opens, so a restart
+	// after the wall clock stepped back cannot issue an earlier $now. On by default.
+	CommitInstantPersist bool
+	// CommitClockAlways puts "clock" in every /commit response, not only those that
+	// used templates. Off by default: it adds a field to every response.
+	CommitClockAlways bool
+
+	// TSDefaultProvision decides how the default store's /ts gets provisioned
+	// (XOT248): "off" (the default: a client calls POST /ts/provision, as before),
+	// "startup" (provisioned when the server starts) or "lazy" (provisioned by the
+	// first /ts request). Only meaningful while XOLU_TIMESERIES_ENABLED is on.
+	TSDefaultProvision string
+
 	// Debug
 	Debug      bool
 	DebugLocks bool
@@ -520,6 +546,10 @@ func Default() *Config {
 		CascadingDelete:             false,
 		MaxCascadeDeletions:         10000,
 		MaxCascadeWork:              100000,
+		OQLUnknownEntity:            "error",
+		CommitInstantPersist:        true,
+		CommitClockAlways:           false,
+		TSDefaultProvision:          "off",
 		Debug:                       false,
 		DebugLocks:                  false,
 		LogLevel:                    "info",
@@ -703,6 +733,38 @@ func LoadFromEnv(cfg *Config) {
 	}
 	if val := os.Getenv("XOLU_CASCADING_DELETE"); val != "" {
 		cfg.CascadingDelete = parseBool(val)
+	}
+	if val := os.Getenv("XOLU_OQL_UNKNOWN_ENTITY"); val != "" {
+		cfg.OQLUnknownEntity = strings.ToLower(strings.TrimSpace(val))
+	}
+	if val := os.Getenv("XOLU_OQL_BLOB_THRESHOLD"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.OQLBlobThreshold = n
+		}
+	}
+	if val := os.Getenv("XOLU_OQL_NONCOVERING_THRESHOLD"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.OQLNonCoveringThreshold = n
+		}
+	}
+	if val := os.Getenv("XOLU_OQL_TEMPBTREE1_THRESHOLD"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.OQLTempBTree1Threshold = n
+		}
+	}
+	if val := os.Getenv("XOLU_OQL_TEMPBTREE2_THRESHOLD"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.OQLTempBTree2Threshold = n
+		}
+	}
+	if val := os.Getenv("XOLU_COMMIT_INSTANT_PERSIST"); val != "" {
+		cfg.CommitInstantPersist = parseBool(val)
+	}
+	if val := os.Getenv("XOLU_COMMIT_CLOCK_ALWAYS"); val != "" {
+		cfg.CommitClockAlways = parseBool(val)
+	}
+	if val := os.Getenv("XOLU_TS_DEFAULT_PROVISION"); val != "" {
+		cfg.TSDefaultProvision = strings.ToLower(strings.TrimSpace(val))
 	}
 	if val := os.Getenv("XOLU_DEBUG"); val != "" {
 		cfg.Debug = parseBool(val)
@@ -1158,6 +1220,21 @@ func (c *Config) Validate() (errs []string, warnings []string) {
 	check("GraphMode", c.GraphMode, []string{"flat", "disabled"})
 	check("GraphCycleDetection", c.GraphCycleDetection, []string{"warn", "error", "ignore"})
 	check("PatchNullBehavior", c.PatchNullBehavior, []string{"store", "delete"})
+	check("OQLUnknownEntity", c.OQLUnknownEntity, []string{"error", "empty"})
+	check("TSDefaultProvision", c.TSDefaultProvision, []string{"off", "startup", "lazy"})
+	for _, pin := range []struct {
+		name  string
+		value int
+	}{
+		{"OQLBlobThreshold", c.OQLBlobThreshold},
+		{"OQLNonCoveringThreshold", c.OQLNonCoveringThreshold},
+		{"OQLTempBTree1Threshold", c.OQLTempBTree1Threshold},
+		{"OQLTempBTree2Threshold", c.OQLTempBTree2Threshold},
+	} {
+		if pin.value < 0 {
+			errs = append(errs, fmt.Sprintf("%s: %d is not valid (must be 0 or more; 0 keeps the performance profile's value)", pin.name, pin.value))
+		}
+	}
 	check("AuthType", c.AuthType, []string{"none", "jwt", "apikey", "bearertoken"})
 	// Accept "none" as deprecated alias for "path"
 	if c.TenantMode == "none" {

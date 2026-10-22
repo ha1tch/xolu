@@ -160,8 +160,17 @@ func (s *Server) tsStore(w http.ResponseWriter, r *http.Request, tenantIDStr str
 		return nil
 	}
 	if !s.tsManager.IsProvisioned(tid) {
-		s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not provisioned for timeseries", tenantIDStr))
-		return nil
+		// XOT248: with XOLU_TS_DEFAULT_PROVISION=lazy the first request on the default
+		// store provisions it. A tenant is never provisioned implicitly.
+		if tid == 0 && tenantIDStr == "" && s.config.TSDefaultProvision == "lazy" {
+			if err := s.tsManager.Provision(r.Context(), 0, "_default"); err != nil {
+				s.writeError(w, http.StatusInternalServerError, xoluerr.Code("XOLU-TS015"), err.Error())
+				return nil
+			}
+		} else {
+			s.writeError(w, http.StatusNotFound, xoluerr.Code("XOLU-TS003"), fmt.Sprintf("tenant %s not provisioned for timeseries", tenantIDStr))
+			return nil
+		}
 	}
 	store, err := s.tsManager.StoreFor(tid)
 	if err != nil {

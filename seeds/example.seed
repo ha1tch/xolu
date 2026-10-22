@@ -1,0 +1,20 @@
+# Example seed. Run with: scripts/seed.sh example   (or just scripts/seed.sh)
+#
+# Every record's body is the JSON the xolu API accepts. Run
+# `scripts/seed.sh --format-help` for the full description.
+{"seed": 1, "name": "example"}
+
+{"kind": "schema", "entity": "person", "schema": {"properties": {"name": {"type": "string"}, "level": {"type": "integer"}}, "required": ["name"]}}
+{"kind": "schema", "entity": "skill",  "schema": {"properties": {"name": {"type": "string"}}, "required": ["name"]}}
+
+{"kind": "seq", "body": {"name": "badge_no", "start": 1000, "increment_by": 1}}
+{"kind": "bal_account", "body": {"account_id": "cash", "unit": "USD", "scale": 2}}
+
+# Entities keep their ids. REF values become graph edges and are written in
+# dependency order, so listing order does not matter. The mutual reference
+# between 1 and 2 is a cycle: seed.py saves both and patches the refs in.
+{"kind": "entity", "entity": "skill",  "id": 1, "data": {"name": "Go"}}
+{"kind": "entity", "entity": "person", "id": 2, "data": {"name": "Bob", "level": 5, "partner": {"type": "REF", "entity": "person", "id": 1}, "has_skill": {"type": "REF", "entity": "skill", "id": 1}}}
+{"kind": "entity", "entity": "person", "id": 1, "data": {"name": "Alice", "level": 6, "partner": {"type": "REF", "entity": "person", "id": 2}}}
+
+{"kind": "meta", "entity": "person", "id": 1, "key": "onboarded", "value": true}

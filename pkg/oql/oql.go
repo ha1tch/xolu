@@ -84,6 +84,17 @@ func (e *Engine) SetGenDispatcher(fn func(tenantID tenant.TenantID, name string)
 	e.executor.SetGenDispatcher(fn)
 }
 
+// SetUnknownEntityMode chooses what a query naming an entity type that is not in
+// the store answers: "error" (XOLU-QL004, the default) or "empty" (an empty
+// result, XOT241). Call once at startup.
+func (e *Engine) SetUnknownEntityMode(mode string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.validator != nil {
+		e.validator.SetUnknownEntitiesEmpty(mode == "empty")
+	}
+}
+
 // NewEngine creates a new OQL engine
 func NewEngine(store storage.Store, schemaDir string) *Engine {
 	// Check if store supports entity listing

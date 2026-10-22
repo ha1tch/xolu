@@ -1355,6 +1355,32 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// XOT244: registering an adapted table over a type that already holds blob
+	// rows hides them (queries read the new, empty table). Refuse before any state
+	// changes; the strict promotion route migrates such rows.
+	if err := s.checkAdaptedRegistrableEverywhere(r.Context(), entity); err != nil {
+		var held *storage.BlobRowsExistError
+		if errors.As(err, &held) {
+			s.writeError(w, http.StatusConflict, xoluerr.ErrSchemaLoadFailed,
+				fmt.Sprintf("%s already has %d row(s) in blob storage, and registering a schema now would hide them; migrate them with POST /entities/promote/strict/%s first", entity, held.Rows, entity))
+			return
+		}
+		s.logger.Error().Err(err).Str("entity", entity).Msg("Failed to check existing rows before registering schema")
+		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
+			"Could not check for existing rows before registering the schema")
+		return
+	}
+
+	// Remember the schema now in force, so that a failed table registration can put
+	// it back (XOT243).
+	var prevSchema map[string]interface{}
+	hadPrev := false
+	if s.validator.HasSchema(entity) {
+		if ps, err := s.validator.GetSchema(entity); err == nil && ps != nil {
+			prevSchema, hadPrev = ps, true
+		}
+	}
+
 	if err := s.validator.LoadSchema(entity, schema); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to load schema")
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrSchemaLoadFailed, "Failed to load schema")
@@ -1367,10 +1393,18 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 	// keys, which are few.
 	s.rebuildRIRegistry()
 
-	// Persist schema to disk so it survives restarts and is visible
-	// to subsystems that scan the schema directory (e.g. OQL validator).
-	if err := s.validator.SaveSchema(entity, schema); err != nil {
-		s.logger.Warn().Err(err).Str("entity", entity).Msg("Failed to persist schema to disk")
+	// restorePrevious undoes the in-memory part of this request when the table
+	// cannot be registered (XOT243). The validator has no way to drop a schema, so a
+	// type that had none keeps the new one in memory until the next restart; nothing
+	// has been written to disk, so a restart returns to the old state.
+	restorePrevious := func() {
+		if !hadPrev {
+			return
+		}
+		if err := s.validator.LoadSchema(entity, prevSchema); err != nil {
+			s.logger.Warn().Err(err).Str("entity", entity).Msg("Failed to restore previous schema after a failed registration")
+		}
+		s.rebuildRIRegistry()
 	}
 
 	// Register adapted table if the store supports it.
@@ -1380,13 +1414,14 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 	// exists, not just the default one -- see registerAdaptedEverywhere's
 	// own doc comment (XOT178) for why this matters.
 	if err := s.registerAdaptedEverywhere(r.Context(), entity, schema); err != nil {
+		restorePrevious()
 		s.logger.Error().Err(err).Str("entity", entity).Msg("Failed to register adapted table")
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			// Adding a unique index to a type that already has rows: they violate it.
-			// The schema document was saved before this step and the table was not
-			// changed; fix the rows and POST the same schema again to retry.
+			// The table was not changed and the schema was not saved (XOT243);
+			// fix the rows and POST the same schema again to retry.
 			s.writeError(w, http.StatusConflict, xoluerr.ErrUniqueViolation,
-				"existing rows of "+entity+" violate a unique index in this schema, so the table was not changed; remove the duplicates and POST the schema again")
+				"existing rows of "+entity+" violate a unique index in this schema, so the table was not changed and the schema was not saved; remove the duplicates and POST the schema again")
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, xoluerr.ErrStorageFailed,
@@ -1394,6 +1429,13 @@ func (s *Server) handleCreateSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info().Str("entity", entity).Msg("Registered adapted table")
+
+	// Persist schema to disk so it survives restarts and is visible to subsystems
+	// that scan the schema directory (e.g. OQL validator). Done only now that the
+	// table agrees with it (XOT243).
+	if err := s.validator.SaveSchema(entity, schema); err != nil {
+		s.logger.Warn().Err(err).Str("entity", entity).Msg("Failed to persist schema to disk")
+	}
 
 	s.logger.Info().Str("entity", entity).Msg("Created/updated schema")
 
@@ -2869,6 +2911,13 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 			s.fireFSMStepEvent(r, mid, walkInput, result.FsmWalk.Previous, result.FsmWalk.Current,
 				result.FsmWalk.Terminal, result.FsmWalk.Vars, affected, result.FsmWalk.Definition)
 		}
+	}
+
+	// XOT247: with XOLU_COMMIT_CLOCK_ALWAYS a commit that used no templates still
+	// reports an instant. It is taken here, after the commit, so it is not the instant
+	// any row or event carries (none of them used one); it is when the server finished.
+	if result.Clock == nil && s.config.CommitClockAlways {
+		result.Clock = &storage.CommitClock{Now: storage.NextCommitInstant()}
 	}
 
 	if req.Delete != nil {
