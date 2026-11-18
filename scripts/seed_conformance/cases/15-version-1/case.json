@@ -1,0 +1,21 @@
+{
+ "about": "a version 1 file, as xolu's own loader reads it, loads the same way",
+ "entities": [
+  "person"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "v1.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "v1.seed"
+   ],
+   "says": "present"
+  }
+ ]
+}

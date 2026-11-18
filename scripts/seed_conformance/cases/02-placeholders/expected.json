@@ -1,0 +1,28 @@
+{
+ "alerts": {
+  "1": {
+   "created_at": "2026-01-31T08:00:00Z",
+   "due": "2026-01-31T10:30:00Z",
+   "message": "Due on 2026-03-02, raised 2026-01-30T10:00:00Z for tenant 7.",
+   "morning": "2026-01-29T08:30:00Z",
+   "nested": [
+    {
+     "at": "2026-02-01"
+    }
+   ],
+   "seen_at": "2026-01-31T10:00:00Z"
+  }
+ },
+ "assets": {
+  "1": {
+   "bought": "2024-01-31",
+   "last_week": "2026-01-24",
+   "name": "a",
+   "next_month": "2026-02-28",
+   "region": "north",
+   "tenant_id": 7,
+   "today": "2026-01-31",
+   "warranty_end": "2026-05-01"
+  }
+ }
+}

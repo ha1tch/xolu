@@ -1,7 +1,7 @@
 # Known Issues and Intentional Limits
 
-Version: 0.30.44
-Last reviewed: 2026-10-22
+Version: 0.31.0
+Last reviewed: 2026-11-18
 
 Intentional limits, invariant boundaries, and recorded decisions — what is
 true of the product now **by design**. This document is not a work register:
@@ -361,7 +361,7 @@ under true parallelism require `m1` or `gh-runner`.
 - **Gate:** build tag `integration`.
 - **Hardware:** any; boots an in-process server, no external services.
 - **Invocation:** `go test -tags integration ./pkg/client/ -count=1`.
-- **Last exercised:** 2026-08-04 env:sandbox, go1.26.5, T-153's own verification — run repeatedly for the FSM definition write surface (T-153), both -short and -tags integration, all passing Previous: 2026-08-04 env:sandbox, go1.26.5, this session's own repeated runs — run repeatedly throughout this session (blob/export/promotion feature work), both -short and -tags integration, all passing
+- **Last exercised:** 2026-11-18 env:sandbox, go1.26.5 — run for 0.31.0, which touches pkg/client: all pass but TestIntegration_BlobFullFlow, which also fails on the unchanged 0.30.44 tree (XOT261) Previous: 2026-08-04 env:sandbox, go1.26.5, T-153's own verification — run repeatedly for the FSM definition write surface (T-153), both -short and -tags integration, all passing
 
 ### G-03. Fuzz targets
 
@@ -651,6 +651,67 @@ rely on `/bal/asof` for an account that receives backdated transfers.
 which suits a ledger but not domains where backdating is legitimate
 (museum accessions, historical inventories). The stale checkpoint is a
 bug in both cases.
+
+### G-19. Seed loader tests that need no server (`scripts/seed_tests`)
+
+- **What it guards:** `scripts/seed_system`, the loader of `.seed` files:
+  reading the format (versions 1 and 2), the placeholders, and the plan
+  a load makes (phases, references and their cycles, `match`, `find`,
+  additions), and the command line over `seeds/example.seed`. 21 tests.
+- **Gate:** Python, not Go: `go test ./...` and `release.py` do not run
+  it. No build tag, no server, standard library only.
+  Canonical invocation: `make test-seeds`
+  (`python3 -m unittest discover -s scripts/seed_tests`).
+  Pass condition: `OK`, 21 tests.
+- **Environment contract:** Python 3.8 or later.
+- **Last exercised:** 2026-11-18 env:sandbox (Linux, Python 3) — 21 of
+  21 passed, at 0.30.45.
+
+### G-20. `.seed` conformance suite on a real xolu (`scripts/seed_conformance`)
+
+- **What it guards:** what a load does to a tenant, as
+  `docs/SEED_FORMAT.md` specifies it: 22 cases, each on a fresh xolu
+  with its own data directory — what is created, what a second load
+  leaves alone, what is refused (a tenant that holds other data, an
+  unknown key, a binding with nothing bound), a failure and its undo,
+  `check`, a version 1 file, files and calls, tenants, `match`, `find`,
+  additions, state machines. It judges any loader that takes the same
+  command line (`--loader`), so a second implementation (XOT255) is
+  held to the same cases.
+- **Gate:** Python, and it needs a xolu binary: `go test ./...` and
+  `release.py` do not run it.
+  Canonical invocation: `make test-seeds-live`
+  (`XOLU_BIN=$PWD/xolu python3 scripts/seed_conformance/run.py`; the
+  path must be absolute).
+  Pass condition: `22 case(s), 22 passed, 0 failed`.
+- **Environment contract:** a xolu built from this tree (0.30.44 or
+  later); the runner starts it with `XOLU_API_V2_ENABLED=true` on a free
+  port for each case.
+- **Last exercised:** 2026-11-18 env:sandbox (Linux, the xolu built
+  from this tree at 0.30.45) — 22 of 22 passed.
+
+### G-21. The Go loader against the conformance suite and against the Python loader (`make test-xoseed`)
+
+- **What it guards:** that `xoseed` (`cmd/xoseed`, `pkg/seed`) and the
+  Python loader mean the same. Two runs: the 22 conformance cases of
+  G-20 with `--loader xoseed`, on a real xolu; and
+  `scripts/seed_conformance/crosscheck.py`, which plans every `.seed`
+  file of the cases and of `seeds/` with both loaders, alone and by
+  directory, and compares every step in full, refusals included. The
+  unit tests of `pkg/seed` and `cmd/xoseed` are ordinary Go tests and
+  run by default; they are not part of this guard.
+- **Gate:** Python, a xolu binary and a xoseed binary: `go test ./...`
+  and `release.py` do not run it.
+  Canonical invocation: `make test-xoseed`.
+  Pass condition: `0 set(s) differ`, then
+  `22 case(s), 22 passed, 0 failed`.
+- **Environment contract:** as G-20, and Python 3.8 or later for the
+  cross-check. To cross-check other seeds (a project's own datasets):
+  `python3 scripts/seed_conformance/crosscheck.py --xoseed ./xoseed DIR`.
+- **Last exercised:** 2026-11-18 env:sandbox (Linux, xolu and xoseed
+  built from this tree) — 46 sets of files and 99 steps the same, 22 of
+  22 cases passed; the cross-check also run over the seeds of Seam AMS
+  0.4.5: 73 sets, 5,717 steps, none different.
 
 ### G-12. RI restrict race harness (`pkg/server/ri_restrict_race_test.go`)
 

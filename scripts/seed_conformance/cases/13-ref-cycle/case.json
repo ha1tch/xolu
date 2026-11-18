@@ -1,0 +1,22 @@
+{
+ "about": "REF values: targets are written first and a cycle is closed with a PATCH",
+ "entities": [
+  "person",
+  "skill"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "refs.seed"
+   ]
+  },
+  {
+   "run": [
+    "check",
+    "refs.seed"
+   ],
+   "says": "same"
+  }
+ ]
+}

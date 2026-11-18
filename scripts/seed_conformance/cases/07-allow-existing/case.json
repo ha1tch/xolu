@@ -1,0 +1,24 @@
+{
+ "about": "--allow-existing loads into a tenant that holds other data",
+ "entities": [
+  "brands"
+ ],
+ "steps": [
+  {
+   "http": [
+    "POST",
+    "/api/v1/brands",
+    {
+     "name": "Already here"
+    }
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "basic.seed",
+    "--allow-existing"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,3 @@
+{"seed": 2, "name": "forward"}
+{"kind": "entity", "entity": "assets", "data": {"name": "too early", "type_id": {"$seed": "t_later"}}}
+{"kind": "entity", "entity": "asset_types", "as": "t_later", "data": {"name": "Later"}}

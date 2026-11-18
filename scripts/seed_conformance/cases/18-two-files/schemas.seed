@@ -1,0 +1,2 @@
+{"seed": 2, "name": "basic-schemas", "entities": ["brands"]}
+{"kind": "schema", "entity": "brands", "schema": {"properties": {"name": {"type": "string"}, "rank": {"type": "integer"}}, "required": ["name"]}}

@@ -1,0 +1,3 @@
+{"seed": 2, "name": "none", "addition": true}
+{"kind": "entity", "entity": "assets", "find": {"tag": "A-9"}, "as": "x"}
+{"kind": "entity", "entity": "notes", "match": ["code"], "data": {"code": "N-2", "asset_id": {"$seed": "x"}}}

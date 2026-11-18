@@ -1,0 +1,6 @@
+{"seed": 2, "name": "basic"}
+# brands, then models that point at them with plain integer keys
+{"kind": "entity", "entity": "brands", "id": 1, "data": {"name": "Caterpillar", "code": "CAT"}}
+{"kind": "entity", "entity": "brands", "id": 2, "data": {"name": "Toyota", "code": "TOY"}}
+{"kind": "entity", "entity": "models", "id": 1, "data": {"name": "320 GC", "brand_id": 1, "specs": [{"k": "weight", "v": 22.5}, {"k": "gps", "v": true}], "tags": ["heavy"], "price": "185000"}}
+{"kind": "entity", "entity": "models", "id": 2, "data": {"name": "Hilux", "brand_id": 2, "specs": [], "note": null}}

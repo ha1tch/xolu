@@ -1,0 +1,35 @@
+{
+ "about": "a body_file outside the seed's directory is refused; --safe refuses call records; no seed named loads nothing",
+ "entities": [
+  "brands",
+  "notes"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "sub/out.seed"
+   ],
+   "exit": 2,
+   "says": "outside"
+  },
+  {
+   "run": [
+    "load",
+    "call.seed",
+    "--safe"
+   ],
+   "exit": 2,
+   "says": "--safe"
+  },
+  {
+   "run": [
+    "load",
+    "--seeds-dir",
+    "."
+   ],
+   "exit": 2,
+   "says": "--all"
+  }
+ ]
+}

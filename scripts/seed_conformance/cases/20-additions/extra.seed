@@ -1,0 +1,2 @@
+{"seed": 2, "name": "extra", "requires": ["base"]}
+{"kind": "entity", "entity": "notes", "as": "n", "data": {"text": "about brand 1", "brand_id": 1}}

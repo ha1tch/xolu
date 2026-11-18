@@ -1,0 +1,14 @@
+{
+ "brands": {
+  "1": {
+   "name": "Caterpillar",
+   "tags": [
+    "heavy",
+    "yellow"
+   ]
+  },
+  "2": {
+   "name": "Toyota"
+  }
+ }
+}

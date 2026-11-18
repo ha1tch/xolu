@@ -1,0 +1,2 @@
+{"seed": 2, "name": "call"}
+{"kind": "call", "method": "POST", "path": "/api/v1/brands", "body": {"name": "by call"}}

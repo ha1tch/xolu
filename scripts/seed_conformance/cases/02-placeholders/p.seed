@@ -1,0 +1,3 @@
+{"seed": 2, "name": "placeholders", "vars": {"tenant_id": 1, "region": "north"}}
+{"kind": "entity", "entity": "assets", "id": 1, "data": {"name": "a", "tenant_id": {"$var": "tenant_id"}, "region": {"$var": "region"}, "today": {"$date": ""}, "warranty_end": {"$date": "+90d"}, "bought": {"$date": "-2y"}, "next_month": {"$date": "+1mo"}, "last_week": {"$date": "-1w"}}}
+{"kind": "entity", "entity": "alerts", "id": 1, "data": {"created_at": {"$now": "-2h"}, "seen_at": {"$now": ""}, "due": {"$now": "+30m"}, "morning": {"$date": "-2dT08:30:00Z"}, "message": {"$text": "Due on ${date:+30d}, raised ${now:-1d} for tenant ${var:tenant_id}."}, "nested": [{"at": {"$date": "+1d"}}]}}

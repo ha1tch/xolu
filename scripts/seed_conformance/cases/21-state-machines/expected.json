@@ -1,0 +1,14 @@
+{
+ "tickets": {
+  "1": {
+   "code": "T-1",
+   "machine_id": 1,
+   "state": "triaged"
+  },
+  "2": {
+   "code": "T-2",
+   "machine_id": 2,
+   "state": "reported"
+  }
+ }
+}

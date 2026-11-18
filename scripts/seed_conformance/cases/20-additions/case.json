@@ -1,0 +1,58 @@
+{
+ "about": "a file that requires a seed loads only where that seed is; an addition loads over anything; neither is loaded twice",
+ "entities": [
+  "brands",
+  "notes",
+  "tags"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "extra.seed"
+   ],
+   "exit": 3,
+   "says": "adds to the seed \"base\""
+  },
+  {
+   "run": [
+    "load",
+    "both.seed"
+   ],
+   "exit": 2,
+   "says": "whole dataset"
+  },
+  {
+   "run": [
+    "load",
+    "base.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "extra.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "any.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "extra.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "load",
+    "any.seed"
+   ],
+   "says": "present"
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+{
+ "about": "a second seed over a loaded one is refused, exit 3, and named",
+ "entities": [
+  "brands",
+  "models"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "basic.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "other.seed"
+   ],
+   "exit": 3,
+   "says": "holds the seed \"basic\""
+  }
+ ]
+}

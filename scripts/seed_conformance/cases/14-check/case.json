@@ -1,0 +1,56 @@
+{
+ "about": "check writes nothing and exits 1 when the tenant differs from the seed",
+ "entities": [
+  "brands",
+  "models"
+ ],
+ "steps": [
+  {
+   "run": [
+    "check",
+    "basic.seed"
+   ],
+   "exit": 1,
+   "says": "missing"
+  },
+  {
+   "run": [
+    "load",
+    "basic.seed"
+   ]
+  },
+  {
+   "run": [
+    "check",
+    "basic.seed"
+   ],
+   "says": "same"
+  },
+  {
+   "http": [
+    "PATCH",
+    "/api/v1/brands/1",
+    {
+     "name": "Edited"
+    }
+   ]
+  },
+  {
+   "http": [
+    "POST",
+    "/api/v1/brands/save/50",
+    {
+     "name": "extra"
+    }
+   ]
+  },
+  {
+   "run": [
+    "check",
+    "basic.seed"
+   ],
+   "exit": 1,
+   "says": "1 different, 1 extra"
+  }
+ ]
+}

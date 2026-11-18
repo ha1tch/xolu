@@ -1,0 +1,48 @@
+{
+ "about": "a whole dataset loads together with a file of its schemas, schemas first; two whole datasets do not load together",
+ "entities": [
+  "brands",
+  "seed_loads"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "whole.seed",
+    "second.seed"
+   ],
+   "exit": 2,
+   "says": "whole dataset"
+  },
+  {
+   "run": [
+    "load",
+    "whole.seed",
+    "schemas.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "whole.seed",
+    "schemas.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "load",
+    "second.seed"
+   ],
+   "exit": 3,
+   "says": "refused"
+  }
+ ],
+ "ignore": [
+  "seed_loads.digest",
+  "seed_loads.as_of",
+  "seed_loads.started_at",
+  "seed_loads.finished_at",
+  "seed_loads.loader"
+ ]
+}

@@ -1,7 +1,7 @@
 # xolu — Tracking (live register)
 
-Version: 0.30.44
-Last reviewed: 2026-10-22
+Version: 0.31.0
+Last reviewed: 2026-11-18
 
 Open actionable items only — debt, defects, gaps, hardening, tooling, and
 features filed as prerequisites. A closed item still present here is itself
@@ -104,6 +104,11 @@ item's Trigger line.
 | XOT251 | A failed or timed-out ListEntities replaces the OQL validator's entity cache with disk-only entities, so known store entities read as unknown | oql | P2 | ☐ | After: none. |
 | XOT252 | Server.riRegistry is reassigned at runtime while the delete path reads it, with no lock | server | P2 | ☐ | After: none. |
 | XOT253 | release.py's c04dcheck step fails under Go 1.27: the analyzer's pinned x/tools cannot read Go 1.27 export data | tooling | P3 | ☐ | After: none. |
+| XOT256 | After a save with an explicit id the next assigned id skips one, and id 0 is accepted | server | P3 | ☐ | — |
+| XOT257 | Sulpher: the parser ignores whatever follows a complete RETURN clause instead of refusing it | sulpher | P3 | ☐ | — |
+| XOT258 | No way for a client to number versions without a race: a uniqueness guarantee or an atomic counter in the commit | server | P4 | ☐ | — |
+| XOT260 | Seeds: which implementation is the reference, and where Seam AMS takes seed_system from; nothing holds the two copies together | tooling | P3 | ☐ | — |
+| XOT261 | TestIntegration_BlobFullFlow fails intermittently: blob usage reports 0 keys right after puts | server | P3 | ☐ | — |
 
 ---
 
@@ -912,6 +917,14 @@ Theme: tooling · Priority: P3 · Status: ☐ · Blocks/after: After: none.
 - **Fix to decide:** bump `golang.org/x/tools` in `tools/c04dcheck/go.mod` to a release whose reader handles Go 1.27 export data before the project moves to Go 1.27 (which release does is not verified), or state Go 1.26.x as the toolchain for the release run in `docs/TOOLING.md`.
 - **Source:** found cutting the 0.30.44 checkpoint with Go 1.27.3; the run was completed under `GOTOOLCHAIN=go1.26.5`.
 
+### XOT260. Seeds: which implementation is the reference, and where Seam AMS takes seed_system from; nothing holds the two copies together
+
+Theme: tooling · Priority: P3 · Status: ☐
+
+- **Trigger:** XOT255 closed at 0.31.0 with two implementations of the `.seed` format in this repository (`scripts/seed_system`, Python; `pkg/seed` with `cmd/xoseed`, Go) and a third copy of `seed_system` vendored in Seam AMS. The decision of 2026-11-18 was to settle how the seed system is divided between Seam and xolu later, once it has matured in Seam.
+- **Open:** which implementation is the reference when the two disagree (today the Python one, by `docs/SEED_FORMAT.md` and the comments of `pkg/seed`); whether Seam AMS keeps its own copy of `seed_system` or takes it from here; and nothing checks that the copy in Seam and the one here stay identical (`crosscheck.py` compares Python with Go inside this tree, not one tree with the other).
+- **Done when:** the decision is recorded in `docs/SEED_FORMAT.md`, and either one copy of `seed_system` is left or a check holds the two together.
+
 ## iolu
 
 ### T-68. iolu tenant provision-cal: provisions/rebuilds cal's Pebble occupancy index offline -- a real gap found while scoping item 24, but NOT item 24 itself (see T-69 for that correction)
@@ -1202,7 +1215,41 @@ Theme: server · Priority: P2 · Status: ☐ · Blocks/after: After: none.
 - **Fix to decide:** guard the field with an `RWMutex`, or hold it as an `atomic.Pointer[refintegrity.Registry]`.
 - **Source:** found while fixing XOT250.
 
+### XOT256. After a save with an explicit id the next assigned id skips one, and id 0 is accepted
+
+Theme: server · Priority: P3 · Status: ☐
+
+- **Trigger:** `docs/SEED_FORMAT_PROPOSAL.md`, proposal P-6, 2026-11-17, observed on 0.30.44 while loading seeds that carry their ids.
+- **Found:** after a save with an explicit id, the next id xolu assigns for that entity type skips one. A save with id 0 is accepted and stored as a record with id 0.
+- **Scope:** decide whether 0 is a valid id (the loaders treat 0 as "none" in references) and refuse it if not; make the next assigned id follow the highest stored one. Not verified again on 0.30.45: the server code did not change in that release.
+
+### XOT258. No way for a client to number versions without a race: a uniqueness guarantee or an atomic counter in the commit
+
+Theme: server · Priority: P4 · Status: ☐
+
+- **Trigger:** request from Seam AMS, 2026-11-17 (its Developer module, on 0.30.44; DEC-24 of its `docs/DEVELOPER_MODULE_CAMPAIGN.md`).
+- **Found:** Seam numbers the versions of an override as "the highest stored, plus one". Two instances that save at the same instant could give two versions the same number. Not reproduced: three rounds of simultaneous saves from two instances gave six distinct versions, and its history orders by version and then by time, so nothing is lost if it happens.
+- **Scope:** a real fix needs a guarantee from xolu: uniqueness of a field within a scope (so the second save fails and is retried), or an atomic counter a client can take the next value of in the same commit as its record (`/seq` gives the value, not the atomicity with the save). Decide which, or whether it belongs to the entity-versioning library instead.
+
+### XOT261. TestIntegration_BlobFullFlow fails intermittently: blob usage reports 0 keys right after puts
+
+Theme: server · Priority: P3 · Status: ☐
+
+- **Trigger:** running dormant guard G-02 for 0.31.0 (`go test -tags integration ./pkg/client/ -count=1`), 2026-11-18: `TestIntegration_BlobFullFlow` fails at `integration_test.go:2798`, "BlobUsage KeyCount: got 0, want at least 1 after puts above". Every other test of the suite passes.
+- **Not caused by 0.31.0:** on a clean copy of the committed 0.30.44 tree the same test, run alone, failed once in four runs; in the working tree it failed five times in five. The release touches `pkg/client/raw.go` only, and `BlobUsage` does not go through it.
+- **Not known:** whether the count the usage route answers with lags the puts (the blob store has a sampler, `pkg/blob/sampler.go`) and the test reads too soon, or whether the route can answer 0 for a tenant that holds keys.
+- **Done when:** the cause is known, and either the test waits for what it asserts or the route is fixed; G-02 then passes whole.
+
 ## sulpher
+
+### XOT257. Sulpher: the parser ignores whatever follows a complete RETURN clause instead of refusing it
+
+Theme: sulpher · Priority: P3 · Status: ☐
+
+- **Trigger:** found from Seam AMS on 0.30.44, 2026-11-17, while checking a Sulpher example in its documents.
+- **Found:** the Sulpher parser (`pkg/sulpher`) stops reading when the RETURN clause is complete and ignores what follows without an error. Accepted: `RETURN a 5`; `RETURN a.id b.id` (the comma is missing); `RETURN a ) ) (`; loose text after `LIMIT 5`; and `RETURN a 5 a.id ORDER BY a.created_at DESC`, where the ORDER BY is dropped. In openCypher 9, which Sulpher follows, leftover tokens are a syntax error. `TOP` as a variable name is legal and is not part of this.
+- **Not verified:** whether the executor or the HTTP layer catches any of it later, and whether stopping at the end of RETURN is deliberate.
+- **Scope:** decide whether it is a limit to document or a defect; if a defect, require the end of input after the last clause, with tests for the five inputs above.
 
 ## cron
 

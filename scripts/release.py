@@ -69,6 +69,9 @@ ZIP_SOURCES = [
     ".golangci.yml", ".repoman.json", "run_tests.sh", "syncver.sh", "release.sh",
     "go.mod", "go.sum",
     "cmd", "pkg", "docs", "scripts", "tests", ".github", "tools",
+    # "seeds" was missing until 0.30.45 (XOT259): scripts/seed.sh loads
+    # from it, and a tree unpacked from a checkpoint had none.
+    "seeds",
     # "examples" deliberately absent (BUGFIX found 2026-08-14, XOT195):
     # examples/crm was removed entirely in v0.30.0 (CHANGELOG.md) --
     # xoluman now maintains it as the canonical end-user example, to
@@ -201,7 +204,7 @@ def step_syncver(ctx: Ctx):
 
 
 def step_build(ctx: Ctx):
-    rc = ctx.run(["make", "build-xolu", "build-iolu", "build-xotogen"], timeout=300)
+    rc = ctx.run(["make", "build-xolu", "build-iolu", "build-xotogen", "build-xoseed"], timeout=300)
     if rc != 0:
         raise StepFailed(f"build failed (rc={rc}); see {ctx.log_path.name}")
     return {}
@@ -251,7 +254,7 @@ def step_test(ctx: Ctx):
         if rc != 0:
             raise StepFailed("integration suite failed")
     ctx.run(["python3", "scripts/test_report.py", "--json", str(TEST_JSON),
-             "--binaries", os.environ.get("RELEASE_BINARIES", "xolu iolu xotogen")])
+             "--binaries", os.environ.get("RELEASE_BINARIES", "xolu iolu xotogen xoseed")])
     return {"tests_run": c["run"], "shards": len(shards)}
 
 

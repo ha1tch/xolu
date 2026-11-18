@@ -1,0 +1,22 @@
+{
+ "assets": {
+  "50": {
+   "name": "Pump",
+   "tag": "A-1"
+  },
+  "51": {
+   "name": "Fan",
+   "tag": "A-2"
+  },
+  "52": {
+   "name": "Fan, again",
+   "tag": "A-2"
+  }
+ },
+ "notes": {
+  "1": {
+   "asset_id": 50,
+   "code": "N-1"
+  }
+ }
+}

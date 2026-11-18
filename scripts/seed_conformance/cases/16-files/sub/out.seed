@@ -1,0 +1,2 @@
+{"seed": 2, "name": "out"}
+{"kind": "call", "method": "POST", "path": "/api/v1/notes", "body_file": "../secret.txt"}

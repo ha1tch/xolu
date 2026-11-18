@@ -1,0 +1,62 @@
+{
+ "brands": {
+  "1": {
+   "name": "a",
+   "rank": 1
+  },
+  "2": {
+   "name": "b",
+   "rank": 2
+  }
+ },
+ "seed_loads": {
+  "1": {
+   "done": {},
+   "format": 2,
+   "mode": "create",
+   "partial": false,
+   "records": {
+    "entity": {
+     "created": 0,
+     "failed": 0,
+     "present": 2,
+     "replaced": 0,
+     "skipped": 0
+    },
+    "schema": {
+     "created": 0,
+     "failed": 0,
+     "present": 1,
+     "replaced": 0,
+     "skipped": 0
+    }
+   },
+   "seed": "whole",
+   "status": "loaded"
+  },
+  "2": {
+   "done": {},
+   "format": 2,
+   "mode": "create",
+   "partial": false,
+   "records": {
+    "entity": {
+     "created": 0,
+     "failed": 0,
+     "present": 2,
+     "replaced": 0,
+     "skipped": 0
+    },
+    "schema": {
+     "created": 0,
+     "failed": 0,
+     "present": 1,
+     "replaced": 0,
+     "skipped": 0
+    }
+   },
+   "seed": "basic-schemas",
+   "status": "loaded"
+  }
+ }
+}

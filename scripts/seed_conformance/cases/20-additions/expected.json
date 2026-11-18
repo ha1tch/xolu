@@ -1,0 +1,18 @@
+{
+ "brands": {
+  "1": {
+   "name": "Caterpillar"
+  }
+ },
+ "notes": {
+  "1": {
+   "brand_id": 1,
+   "text": "about brand 1"
+  }
+ },
+ "tags": {
+  "1": {
+   "name": "added"
+  }
+ }
+}

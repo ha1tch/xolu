@@ -1,0 +1,59 @@
+{
+ "about": "a record with \"find\" is looked up and never written; the load stops if it is not there, or if more than one is",
+ "entities": [
+  "assets",
+  "notes"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "add.seed"
+   ],
+   "exit": 3,
+   "says": "not loaded"
+  },
+  {
+   "run": [
+    "load",
+    "base.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "add.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "add.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "check",
+    "add.seed"
+   ],
+   "says": "same"
+  },
+  {
+   "run": [
+    "load",
+    "none.seed"
+   ],
+   "exit": 1,
+   "says": "nothing in assets has tag=A-9"
+  },
+  {
+   "run": [
+    "load",
+    "two.seed"
+   ],
+   "exit": 1,
+   "says": "matches 2 records"
+  }
+ ]
+}

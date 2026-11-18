@@ -1,14 +1,16 @@
-.PHONY: build build-xolu build-iolu build-xotogen run clean test install deps fmt lint benchmark test-race test-unit test-integration waves critrepro
+.PHONY: build build-xolu build-iolu build-xotogen build-xoseed test-xoseed run clean test install deps fmt lint benchmark test-race test-unit test-integration waves critrepro test-seeds test-seeds-live
 
 # Binary name
 BINARY_NAME=xolu
 ADMIN_BINARY=iolu
 XOTOGEN_BINARY=xotogen
+XOSEED_BINARY=xoseed
+XOSEED_PATH=./cmd/xoseed
 MAIN_PATH=./cmd/xolu
 ADMIN_PATH=./cmd/iolu
 XOTOGEN_PATH=./cmd/xotogen
 
-# Build all binaries (xolu, iolu, xotogen)
+# Build all binaries (xolu, iolu, xotogen, xoseed)
 build: deps
 	@echo "Building ${BINARY_NAME}..."
 	@go build -o ${BINARY_NAME} ${MAIN_PATH}
@@ -19,6 +21,9 @@ build: deps
 	@echo "Building ${XOTOGEN_BINARY}..."
 	@go build -o ${XOTOGEN_BINARY} ${XOTOGEN_PATH}
 	@echo "Build complete: ${XOTOGEN_BINARY}"
+	@echo "Building ${XOSEED_BINARY}..."
+	@go build -o ${XOSEED_BINARY} ${XOSEED_PATH}
+	@echo "Build complete: ${XOSEED_BINARY}"
 
 # Build xolu only
 build-xolu: deps
@@ -31,6 +36,12 @@ build-xotogen:
 	@echo "Building ${XOTOGEN_BINARY}..."
 	@go build -o ${XOTOGEN_BINARY} ${XOTOGEN_PATH}
 	@echo "Build complete: ${XOTOGEN_BINARY}"
+
+# Build the .seed loader (the format and its semantics are pkg/seed)
+build-xoseed:
+	@echo "Building ${XOSEED_BINARY}..."
+	@go build -o ${XOSEED_BINARY} ${XOSEED_PATH}
+	@echo "Build complete: ${XOSEED_BINARY}"
 
 # Build admin CLI
 build-iolu:
@@ -71,6 +82,7 @@ clean:
 	@rm -f ${BINARY_NAME}
 	@rm -f ${ADMIN_BINARY}
 	@rm -f ${XOTOGEN_BINARY}
+	@rm -f ${XOSEED_BINARY}
 	@rm -rf data/*
 	@rm -f *.db
 	@rm -f coverage.out coverage.html test-report.json
@@ -132,6 +144,21 @@ coverage-check:
 # name, not because its behaviour still differs from `test`.)
 test-quick:
 	@./run_tests.sh --quiet
+
+# The .seed loader (scripts/seed_system) is Python: `go test` does not see it.
+# test-seeds needs no server; test-seeds-live runs the conformance cases of
+# docs/SEED_FORMAT.md on the xolu this tree builds (dormant guards G-19, G-20).
+# test-xoseed holds the Go loader (cmd/xoseed, pkg/seed) to the same cases and
+# compares its plans with the Python loader's, step by step (G-21).
+test-seeds:
+	@python3 -m unittest discover -s scripts/seed_tests
+
+test-seeds-live: build-xolu
+	@XOLU_BIN=$(CURDIR)/${BINARY_NAME} python3 scripts/seed_conformance/run.py
+
+test-xoseed: build-xolu build-xoseed
+	@python3 scripts/seed_conformance/crosscheck.py --xoseed $(CURDIR)/${XOSEED_BINARY}
+	@XOLU_BIN=$(CURDIR)/${BINARY_NAME} python3 scripts/seed_conformance/run.py --loader "$(CURDIR)/${XOSEED_BINARY}"
 
 # Generate test report in JSON — reuses runtests.py's own -json capture
 # rather than a second, separate `go test -json` invocation.
@@ -400,7 +427,8 @@ help:
 	@echo "Available targets:"
 	@echo ""
 	@echo "Build & Run:"
-	@echo "  build           - Build xolu, iolu, and xotogen"
+	@echo "  build           - Build xolu, iolu, xotogen and xoseed"
+	@echo "  build-xoseed     - Build the .seed loader (xoseed)"
 	@echo "  build-xolu       - Build xolu only"
 	@echo "  build-iolu      - Build admin CLI (iolu)"
 	@echo "  build-xotogen    - Build token generator (xotogen)"

@@ -1,0 +1,54 @@
+{
+ "about": "a record found by fields is reused, one not found is created; the id either way can be bound",
+ "entities": [
+  "unit",
+  "consumable"
+ ],
+ "steps": [
+  {
+   "http": [
+    "POST",
+    "/api/v1/unit",
+    {
+     "symbol": "L",
+     "name": "Litre, already here"
+    }
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "m.seed"
+   ]
+  },
+  {
+   "run": [
+    "check",
+    "m.seed"
+   ],
+   "exit": 1,
+   "says": "different"
+  },
+  {
+   "run": [
+    "load",
+    "m.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "load",
+    "m.seed",
+    "--replace"
+   ]
+  },
+  {
+   "run": [
+    "check",
+    "m.seed"
+   ],
+   "says": "same"
+  }
+ ]
+}

@@ -1,0 +1,4 @@
+{"seed": 2, "name": "as"}
+{"kind": "entity", "entity": "alert_types", "as": "al_km", "data": {"name": "Service km"}}
+{"kind": "entity", "entity": "asset_types", "as": "t_veh", "data": {"name": "Vehicle"}}
+{"kind": "entity", "entity": "assets", "data": {"name": "VH-1", "type_id": {"$seed": "t_veh"}, "service_configs": [{"measure": "km", "threshold": 5000, "alert_id": {"$seed": "al_km"}}]}}

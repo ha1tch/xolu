@@ -1,0 +1,5 @@
+{"seed": 2, "name": "bad"}
+{"kind": "schema", "entity": "brands", "schema": {"properties": {"name": {"type": "string"}, "rank": {"type": "integer"}}, "required": ["name"]}}
+{"kind": "entity", "entity": "brands", "id": 1, "data": {"name": "a", "rank": 1}}
+{"kind": "entity", "entity": "brands", "id": 2, "data": {"name": "b", "rank": 2}}
+{"kind": "entity", "entity": "brands", "id": 3, "data": {"name": "c", "rank": 3}}

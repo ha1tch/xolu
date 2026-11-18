@@ -1,0 +1,22 @@
+{
+ "about": "a record the server refuses stops the load, exit 1, with what was written left in place; the same command continues it once the file is fixed",
+ "entities": [
+  "brands"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "bad.seed"
+   ],
+   "exit": 1,
+   "says": "run the same command again"
+  },
+  {
+   "run": [
+    "load",
+    "fixed/bad.seed"
+   ]
+  }
+ ]
+}

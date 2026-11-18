@@ -1,0 +1,19 @@
+{
+ "about": "dates, times, text and variables resolved against --as-of and --set",
+ "entities": [
+  "assets",
+  "alerts"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "p.seed",
+    "--as-of",
+    "2026-01-31T10:00:00Z",
+    "--set",
+    "tenant_id=7"
+   ]
+  }
+ ]
+}

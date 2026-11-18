@@ -1,0 +1,7 @@
+{"seed": 2, "name": "fsm", "addition": true}
+{"kind": "fsm_def", "match": ["name"], "as": "def", "body": {"name": "ticket_lifecycle", "description": "d", "initial": "reported", "determinism": "firstmatch", "states": {"reported": {"terminal": false}, "triaged": {"terminal": false}, "closed": {"terminal": true}}, "transitions": [{"from": "reported", "input": "triage", "to": "triaged"}, {"from": ["reported", "triaged"], "input": "close", "to": "closed"}]}}
+{"kind": "fsm_machine", "as": "m1", "phase": 36, "body": {"definition": {"$seed": "def"}}}
+{"kind": "fsm_walk", "phase": 37, "machine": {"$seed": "m1"}, "input": "triage"}
+{"kind": "fsm_machine", "as": "m2", "phase": 36, "body": {"definition": {"$seed": "def"}}}
+{"kind": "entity", "entity": "tickets", "match": ["code"], "data": {"code": "T-1", "state": "triaged", "machine_id": {"$seed": "m1"}}}
+{"kind": "entity", "entity": "tickets", "match": ["code"], "data": {"code": "T-2", "state": "reported", "machine_id": {"$seed": "m2"}}}

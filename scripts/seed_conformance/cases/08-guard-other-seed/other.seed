@@ -1,0 +1,3 @@
+{"seed": 2, "name": "other"}
+{"kind": "entity", "entity": "brands", "id": 1, "data": {"name": "Overwritten?"}}
+{"kind": "entity", "entity": "brands", "id": 3, "data": {"name": "Third"}}

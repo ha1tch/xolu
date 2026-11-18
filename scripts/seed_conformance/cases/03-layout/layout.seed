@@ -1,0 +1,15 @@
+﻿# a file saved by an editor that adds a byte-order mark and CRLF
+{"seed": 2,
+  "name": "layout",
+  "description": "laid out"
+  }
+
+# brands
+{"kind": "entity", "entity": "brands", "id": 1, "data": {
+  "name": "Caterpillar",
+  "tags": [
+    "heavy",
+    "yellow"
+  ]
+  }}
+{"kind": "entity", "entity": "brands", "id": 2, "data": {"name": "Toyota"}}

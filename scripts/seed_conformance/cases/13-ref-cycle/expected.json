@@ -1,0 +1,30 @@
+{
+ "person": {
+  "1": {
+   "name": "Alice",
+   "partner": {
+    "entity": "person",
+    "id": 2,
+    "type": "REF"
+   }
+  },
+  "2": {
+   "has_skill": {
+    "entity": "skill",
+    "id": 1,
+    "type": "REF"
+   },
+   "name": "Bob",
+   "partner": {
+    "entity": "person",
+    "id": 1,
+    "type": "REF"
+   }
+  }
+ },
+ "skill": {
+  "1": {
+   "name": "Go"
+  }
+ }
+}

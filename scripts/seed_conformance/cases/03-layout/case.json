@@ -1,0 +1,14 @@
+{
+ "about": "records over several lines, comments, a byte-order mark and CRLF line ends",
+ "entities": [
+  "brands"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "layout.seed"
+   ]
+  }
+ ]
+}

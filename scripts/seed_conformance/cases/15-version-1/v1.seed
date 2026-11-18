@@ -1,0 +1,4 @@
+# version 1: one record per line
+{"seed": 1, "name": "example"}
+{"kind": "schema", "entity": "person", "schema": {"properties": {"name": {"type": "string"}, "level": {"type": "integer"}}, "required": ["name"]}}
+{"kind": "entity", "entity": "person", "id": 1, "data": {"name": "Alice", "level": 6}}

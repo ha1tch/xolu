@@ -1,7 +1,7 @@
 # Example seed. Run with: scripts/seed.sh example   (or just scripts/seed.sh)
 #
-# Every record's body is the JSON the xolu API accepts. Run
-# `scripts/seed.sh --format-help` for the full description.
+# Every record's body is the JSON the xolu API accepts. The format is described
+# in docs/SEED_FORMAT.md; this file is written in version 1 of it, which stays valid.
 {"seed": 1, "name": "example"}
 
 {"kind": "schema", "entity": "person", "schema": {"properties": {"name": {"type": "string"}, "level": {"type": "integer"}}, "required": ["name"]}}

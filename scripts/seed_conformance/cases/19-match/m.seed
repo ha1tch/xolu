@@ -1,0 +1,4 @@
+{"seed": 2, "name": "m", "addition": true}
+{"kind": "entity", "entity": "unit", "match": ["symbol"], "as": "u_l", "data": {"symbol": "L", "name": "Litre"}}
+{"kind": "entity", "entity": "unit", "match": ["symbol"], "as": "u_kg", "data": {"symbol": "kg", "name": "Kilogram"}}
+{"kind": "entity", "entity": "consumable", "match": ["name", "unit_id"], "data": {"name": "O'Brien oil", "unit_id": {"$seed": "u_l"}, "stock": 4}}

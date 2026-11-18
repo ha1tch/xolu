@@ -1,0 +1,26 @@
+{
+ "about": "a tenant that holds data no seed accounts for is refused, exit 3, and left as it was",
+ "entities": [
+  "brands",
+  "models"
+ ],
+ "steps": [
+  {
+   "http": [
+    "POST",
+    "/api/v1/brands",
+    {
+     "name": "Already here"
+    }
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "basic.seed"
+   ],
+   "exit": 3,
+   "says": "refused"
+  }
+ ]
+}

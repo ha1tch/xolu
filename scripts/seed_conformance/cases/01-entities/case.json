@@ -1,0 +1,15 @@
+{
+ "about": "entities with ids, nested values, integer keys",
+ "entities": [
+  "brands",
+  "models"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "basic.seed"
+   ]
+  }
+ ]
+}

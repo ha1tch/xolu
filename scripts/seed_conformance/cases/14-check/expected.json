@@ -1,0 +1,41 @@
+{
+ "brands": {
+  "1": {
+   "code": "CAT",
+   "name": "Edited"
+  },
+  "2": {
+   "code": "TOY",
+   "name": "Toyota"
+  },
+  "50": {
+   "name": "extra"
+  }
+ },
+ "models": {
+  "1": {
+   "brand_id": 1,
+   "name": "320 GC",
+   "price": "185000",
+   "specs": [
+    {
+     "k": "weight",
+     "v": 22.5
+    },
+    {
+     "k": "gps",
+     "v": true
+    }
+   ],
+   "tags": [
+    "heavy"
+   ]
+  },
+  "2": {
+   "brand_id": 2,
+   "name": "Hilux",
+   "note": null,
+   "specs": []
+  }
+ }
+}

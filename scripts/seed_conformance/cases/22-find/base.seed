@@ -1,0 +1,4 @@
+{"seed": 2, "name": "base"}
+{"kind": "entity", "entity": "assets", "id": 50, "data": {"tag": "A-1", "name": "Pump"}}
+{"kind": "entity", "entity": "assets", "id": 51, "data": {"tag": "A-2", "name": "Fan"}}
+{"kind": "entity", "entity": "assets", "id": 52, "data": {"tag": "A-2", "name": "Fan, again"}}

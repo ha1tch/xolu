@@ -1,0 +1,15 @@
+{
+ "about": "the header's tenant scopes the load; --tenant overrides it",
+ "entities": [
+  "brands"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "t.seed"
+   ]
+  }
+ ],
+ "tenant": "acme"
+}

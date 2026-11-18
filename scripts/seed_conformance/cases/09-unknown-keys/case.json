@@ -1,0 +1,57 @@
+{
+ "about": "an unknown header key, record key, kind or entity type stops the load before anything is written, exit 2",
+ "entities": [
+  "brands",
+  "brnads"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "header.seed"
+   ],
+   "exit": 2,
+   "says": "tennant"
+  },
+  {
+   "run": [
+    "load",
+    "record.seed"
+   ],
+   "exit": 2,
+   "says": "expct"
+  },
+  {
+   "run": [
+    "load",
+    "kind.seed"
+   ],
+   "exit": 2,
+   "says": "unknown kind"
+  },
+  {
+   "run": [
+    "load",
+    "entity.seed"
+   ],
+   "exit": 2,
+   "says": "brnads"
+  },
+  {
+   "run": [
+    "load",
+    "version.seed"
+   ],
+   "exit": 2,
+   "says": "\"seed\": 2"
+  },
+  {
+   "run": [
+    "load",
+    "future.seed"
+   ],
+   "exit": 2,
+   "says": "unsupported"
+  }
+ ]
+}

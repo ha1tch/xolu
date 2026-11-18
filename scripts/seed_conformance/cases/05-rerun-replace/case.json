@@ -1,0 +1,48 @@
+{
+ "about": "run again with --replace: every record of the seed is written again",
+ "entities": [
+  "brands",
+  "models"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "basic.seed"
+   ]
+  },
+  {
+   "http": [
+    "PATCH",
+    "/api/v1/brands/1",
+    {
+     "name": "Edited by a user",
+     "note": "kept"
+    }
+   ]
+  },
+  {
+   "http": [
+    "DELETE",
+    "/api/v1/brands/2"
+   ]
+  },
+  {
+   "http": [
+    "POST",
+    "/api/v1/brands/save/50",
+    {
+     "name": "Added by a user"
+    }
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "basic.seed",
+    "--replace"
+   ],
+   "says": "replaced"
+  }
+ ]
+}

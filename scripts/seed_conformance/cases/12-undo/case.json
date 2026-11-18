@@ -1,0 +1,17 @@
+{
+ "about": "with --undo-on-failure a failed load into an empty tenant deletes the records it created",
+ "entities": [
+  "brands"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "bad.seed",
+    "--undo-on-failure"
+   ],
+   "exit": 1,
+   "says": "deleted"
+  }
+ ]
+}

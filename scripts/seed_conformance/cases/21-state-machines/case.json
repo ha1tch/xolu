@@ -1,0 +1,28 @@
+{
+ "about": "a definition found by name, machines made and walked once, and records that point at them; a second load makes no second machine",
+ "entities": [
+  "tickets"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "fsm.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "fsm.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "load",
+    "fsm.seed",
+    "--replace"
+   ]
+  }
+ ]
+}

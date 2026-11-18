@@ -1,0 +1,25 @@
+{
+ "alert_types": {
+  "1": {
+   "name": "Service km"
+  }
+ },
+ "asset_types": {
+  "1": {
+   "name": "Vehicle"
+  }
+ },
+ "assets": {
+  "1": {
+   "name": "VH-1",
+   "service_configs": [
+    {
+     "alert_id": 1,
+     "measure": "km",
+     "threshold": 5000
+    }
+   ],
+   "type_id": 1
+  }
+ }
+}

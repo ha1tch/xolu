@@ -79,6 +79,19 @@ type RawResult struct {
 // sent, including 4xx/5xx, comes back as a non-nil *RawResult with a
 // nil error; check result.StatusCode.
 func (c *Client) Raw(ctx context.Context, method, path string, contentType string, body io.Reader) (*RawResult, error) {
+	return c.RawWithHeaders(ctx, method, path, contentType, nil, body)
+}
+
+// RawWithHeaders is Raw with request headers of the caller's own: what a
+// route needs besides its body (the blob store's X-Blob-Key), or an auth
+// header this client does not build itself. They are set after the
+// Content-Type and Authorization headers Raw sets, so a header given here
+// replaces the one Raw would have sent, and a name given with no values
+// removes it (a body sent with no Content-Type at all). A nil header is Raw
+// exactly.
+//
+// Requested for pkg/seed, whose records can name any route and any header.
+func (c *Client) RawWithHeaders(ctx context.Context, method, path string, contentType string, header http.Header, body io.Reader) (*RawResult, error) {
 	if path == "" || path[0] != '/' {
 		return nil, fmt.Errorf("xolu: Raw path must start with \"/\", got %q", path)
 	}
@@ -102,6 +115,12 @@ func (c *Client) Raw(ctx context.Context, method, path string, contentType strin
 	}
 	if h := c.authHeader(); h != "" {
 		req.Header.Set("Authorization", h)
+	}
+	for name, values := range header {
+		req.Header.Del(name)
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
 	}
 
 	start := time.Now()

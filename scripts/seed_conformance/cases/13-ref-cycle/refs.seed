@@ -1,0 +1,4 @@
+{"seed": 2, "name": "refs"}
+{"kind": "entity", "entity": "person", "id": 2, "data": {"name": "Bob", "partner": {"type": "REF", "entity": "person", "id": 1}, "has_skill": {"type": "REF", "entity": "skill", "id": 1}}}
+{"kind": "entity", "entity": "person", "id": 1, "data": {"name": "Alice", "partner": {"type": "REF", "entity": "person", "id": 2}}}
+{"kind": "entity", "entity": "skill", "id": 1, "data": {"name": "Go"}}

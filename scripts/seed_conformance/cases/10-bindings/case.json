@@ -1,0 +1,39 @@
+{
+ "about": "records without ids bound with \"as\" and used in nested values; a use before the binding is found before anything is written",
+ "entities": [
+  "alert_types",
+  "asset_types",
+  "assets"
+ ],
+ "steps": [
+  {
+   "run": [
+    "load",
+    "forward.seed"
+   ],
+   "exit": 2,
+   "says": "t_later"
+  },
+  {
+   "run": [
+    "load",
+    "as.seed"
+   ]
+  },
+  {
+   "run": [
+    "load",
+    "as.seed"
+   ],
+   "says": "present"
+  },
+  {
+   "run": [
+    "load",
+    "as.seed",
+    "--replace"
+   ],
+   "says": "present"
+  }
+ ]
+}

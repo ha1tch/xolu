@@ -4,6 +4,42 @@ Append-only record of closed register items and resolved issues, newest first.
 Each entry preserves the item's full text as at closure, stamped with its
 closing version and date.
 
+## [0.31.0] XOT255 — Seeds: the Go command xoseed over pkg/client, held to the same specification and conformance cases as the Python loader (v0.31.0, 2026-11-18)
+
+Theme: tooling · closed 0.31.0 · 2026-11-18
+
+
+- **Trigger:** decision of 2026-11-18: besides the Python `seed_system`, an official Go command in xolu (`xoseed`), built on `pkg/client`, checked against the Python loader so that the two mean the same.
+- **State:** implemented on 2026-11-18 and released in 0.31.0: `pkg/seed` (the format and its semantics as a package, so that xoluman can take the same format) and `cmd/xoseed`, with `pkg/client.RawWithHeaders` added for it. The 22 cases pass with `--loader`, the unit tests are ported, and `crosscheck.py` finds no step different (dormant guard G-21). Not run: `golangci-lint` (the installed one refuses this `go.mod`, as at 0.30.45); `staticcheck` and `errcheck` were run on their own over the new packages and are clean. The question of which of the two is the reference, and where Seam AMS takes `seed_system` from, was put off by decision until the seed system matures in Seam: XOT260. The specification (`docs/SEED_FORMAT.md`) and the conformance suite are what it is held to: `scripts/seed_conformance/run.py --loader "xoseed"` runs the 22 cases against any command that takes the command line of section 9.
+- **Scope:** `cmd/xoseed` with `load`, `check`, `dump`, `list`, `info`; the 22 cases green with `--loader`; the unit tests of the format, the placeholders and the plan ported; a cross-check that plans the same files with both and compares the requests. Decide then which of the two is the reference, and whether `seed_system` stays vendored in Seam AMS or is taken from here.
+- **Also to decide:** `seed_system` now lives in two repositories with the same code (Seam's copy has one more file, `compat.py`, for its old per-seed commands). Nothing checks that they stay the same.
+
+Cross-ref: CHANGELOG 0.31.0.
+
+## [0.30.45] XOT259 — Checkpoints do not contain seeds/: release.py's ZIP_SOURCES never named it (v0.30.45, 2026-11-18)
+
+Theme: tooling · closed 0.30.45 · 2026-11-18
+
+
+- **Trigger:** cutting 0.30.45, 2026-11-18: `scripts/seed.sh` loads from `<repo>/seeds`, and `ZIP_SOURCES` in `scripts/release.py` does not name that directory.
+- **Found:** `seeds/` (with `seeds/example.seed`) has been in the repository since the version 1 loader was added and was never in a checkpoint: a tree unpacked from one had `scripts/seed.sh` and no seeds directory, so the script stopped with "seeds directory not found". The same kind of drift as XOT195 (`examples`), in the other direction.
+- **Done (0.30.45):** `"seeds"` is in `ZIP_SOURCES`. The new test `Repository.test_the_example_reads_and_plans` (`scripts/seed_tests`) reads `seeds/example.seed`, so a checkpoint without it now fails G-19.
+
+Cross-ref: CHANGELOG 0.30.45.
+
+## [0.30.45] XOT254 — Seeds: format version 2 and its loader (seed_system) replace the version 1 loader of scripts/seed.py (v0.30.45, 2026-11-18)
+
+Theme: tooling · closed 0.30.45 · 2026-11-18
+
+
+- **Trigger:** review of `scripts/seed.py` (format version 1) against Seam AMS's six seeds, 2026-11-17 (`docs/SEED_FORMAT_PROPOSAL.md`), and the decision of 2026-11-18 that xolu and Seam use one `.seed` format and one loader.
+- **Found:** the version 1 loader loaded over a tenant that held data without noticing, replaced every record on a second run, accepted unknown keys and misspelt entity names, used a binding before it existed until the request failed, read a `body_file` outside the seed's directory, recorded nothing of what it loaded, and had no way to write a date relative to the day of the load.
+- **Done (0.30.45):** `scripts/seed_system/` is the loader of format version 2 (`docs/SEED_FORMAT.md`), built and used in Seam AMS since its 0.4.5; `scripts/seed.py` is its command (`load`, `check`, `dump`, `list`, `info`) and `scripts/seed.sh` keeps its old command line over it. A version 1 file loads as before (`seeds/example.seed` is one). 21 tests that need no server (`scripts/seed_tests`, G-19) and 22 conformance cases on a real xolu (`scripts/seed_conformance`, G-20).
+- **Behaviour that changed for a caller of `seed.sh`:** a tenant that holds other data is refused without `--allow-existing`; records that exist are left alone without `--replace`; an unknown key is an error without `--lenient`. Section 11 of the specification has the table.
+- **Not done here:** the Go command (XOT255); the server's id behaviour after an explicit id (XOT256).
+
+Cross-ref: CHANGELOG 0.30.45.
+
 ## [0.30.44] XOT250 — The OQL validator's entity cache is written without a lock: concurrent cache misses crash the server (fatal error: concurrent map writes) (v0.30.44, 2026-10-22)
 
 Theme: oql · closed 0.30.44 · 2026-10-22

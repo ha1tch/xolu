@@ -1,0 +1,5 @@
+{"seed": 2, "name": "bad"}
+{"kind": "call", "method": "GET", "path": "/api/v1/nothing/here/at/all", "as": "x", "phase": 40}
+{"kind": "entity", "entity": "brands", "id": 1, "data": {"name": "a", "rank": 1}}
+{"kind": "entity", "entity": "brands", "id": 2, "data": {"name": {"$seed": "x"}}}
+{"kind": "entity", "entity": "brands", "id": 3, "data": {"name": "c", "rank": 3}}

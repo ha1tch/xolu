@@ -1,0 +1,19 @@
+{
+ "consumable": {
+  "1": {
+   "name": "O'Brien oil",
+   "stock": 4,
+   "unit_id": 1
+  }
+ },
+ "unit": {
+  "1": {
+   "name": "Litre",
+   "symbol": "L"
+  },
+  "2": {
+   "name": "Kilogram",
+   "symbol": "kg"
+  }
+ }
+}
